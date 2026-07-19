@@ -365,49 +365,32 @@ async function checkOneAccount(
 
     // ── Step 2: Enter email ───────────────────────────────────────
     await page.waitForSelector("#identifierId", { timeout: 15000 });
-    await humanType("#identifierId", email);
-    await sleep(200);
+    // Use React-compatible value setter so Google's JS recognizes the input
+    await page.evaluate((emailVal: string) => {
+      const input = document.querySelector("#identifierId") as HTMLInputElement | null;
+      if (!input) return;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      if (setter) setter.call(input, emailVal);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }, email);
+    await sleep(600); // let Google's JS validate the email
 
-    // Submit email — all strategies fire quickly
-    const submitEmail = async () => {
-      // S1: JS click
-      await page.evaluate(() => {
-        const btn = document.querySelector("#identifierNext") as HTMLElement | null;
-        if (btn) { btn.focus(); btn.click(); }
-      });
-      await sleep(400);
-      if (!page.url().includes("identifier")) return;
+    // Click Next using full MouseEvent dispatch (works on ARM headless)
+    await page.evaluate(() => {
+      const btn = document.querySelector("#identifierNext") as HTMLElement | null;
+      if (!btn) return;
+      btn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+      btn.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true, cancelable: true, view: window }));
+      btn.dispatchEvent(new MouseEvent("click",     { bubbles: true, cancelable: true, view: window }));
+    });
 
-      // S2: Enter on input
-      await page.focus("#identifierId").catch(() => {});
-      await page.keyboard.press("Enter");
-      await sleep(400);
-      if (!page.url().includes("identifier")) return;
+    // Also press Enter as backup
+    await page.focus("#identifierId").catch(() => {});
+    await page.keyboard.press("Enter");
 
-      // S3: Tab + Space + Enter
-      await page.keyboard.press("Tab");
-      await sleep(150);
-      await page.keyboard.press("Space");
-      await page.keyboard.press("Enter");
-      await sleep(400);
-      if (!page.url().includes("identifier")) return;
-
-      // S4: mouse bounding-box click
-      try {
-        const btn = await page.$("#identifierNext");
-        if (btn) {
-          const box = await btn.boundingBox();
-          if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-        }
-      } catch {}
-      await sleep(400);
-    };
-
-    await Promise.race([
-      page.waitForNavigation({ timeout: 12000, waitUntil: "networkidle2" }).catch(() => {}),
-      submitEmail(),
-    ]);
-    await sleep(500);
+    await page.waitForNavigation({ timeout: 10000, waitUntil: "networkidle2" }).catch(() => {});
+    await sleep(400);
 
     // Check page after email step
     {
