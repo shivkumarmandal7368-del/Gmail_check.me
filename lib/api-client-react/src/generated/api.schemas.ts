@@ -77,6 +77,44 @@ export interface LoginCredential {
   totp?: string;
 }
 
+export interface BrowserCheckInput {
+  /** @maxItems 50 */
+  credentials: LoginCredential[];
+}
+
+/**
+ * opened = mailbox opened; verification_required = phone/device verify needed; wrong_password = bad credentials; 2fa_required = 2FA code needed but not provided; unknown = error
+ */
+export type BrowserLoginResultStatus = typeof BrowserLoginResultStatus[keyof typeof BrowserLoginResultStatus];
+
+
+export const BrowserLoginResultStatus = {
+  opened: 'opened',
+  verification_required: 'verification_required',
+  wrong_password: 'wrong_password',
+  '2fa_required': '2fa_required',
+  unknown: 'unknown',
+} as const;
+
+export interface BrowserLoginResult {
+  email: string;
+  /** opened = mailbox opened; verification_required = phone/device verify needed; wrong_password = bad credentials; 2fa_required = 2FA code needed but not provided; unknown = error */
+  status: BrowserLoginResultStatus;
+  reason: string;
+  /** @nullable */
+  totpCode?: string | null;
+}
+
+export interface BrowserCheckResponse {
+  results: BrowserLoginResult[];
+  total: number;
+  opened: number;
+  verificationRequired: number;
+  wrongPassword: number;
+  twoFaRequired?: number;
+  unknown: number;
+}
+
 export interface LoginCheckInput {
   /** @maxItems 200 */
   credentials: LoginCredential[];

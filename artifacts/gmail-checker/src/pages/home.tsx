@@ -1,6 +1,6 @@
 import React, { useState } from "react"
-import { useCheckEmails, useGetEmailStats, useLoginCheckEmails } from "@workspace/api-client-react"
-import type { EmailResult, EmailStats, LoginResult } from "@workspace/api-client-react"
+import { useCheckEmails, useGetEmailStats, useLoginCheckEmails, useBrowserCheckEmails } from "@workspace/api-client-react"
+import type { EmailResult, EmailStats, LoginResult, BrowserLoginResult } from "@workspace/api-client-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { Textarea } from "@/components/ui/textarea"
@@ -11,11 +11,11 @@ import { Progress } from "@/components/ui/progress"
 import {
   Download, Terminal, CheckCircle2, XCircle, AlertTriangle,
   HelpCircle, Activity, ShieldAlert, KeyRound, Smartphone,
-  Lock, MailCheck, MailX, RefreshCw
+  Lock, MailCheck, MailX, RefreshCw, Globe, Loader2
 } from "lucide-react"
 
 type SmtpFilter = "all" | "valid" | "invalid" | "disabled" | "catch_all" | "unknown";
-type Mode = "smtp" | "login";
+type Mode = "smtp" | "login" | "browser";
 type LoginList = "opened" | "not_opened";
 
 export default function Home() {
@@ -43,34 +43,25 @@ export default function Home() {
         </header>
 
         {/* Mode Toggle */}
-        <div className="flex gap-2">
-          <button
-            onClick={() => setMode("smtp")}
-            className={cn(
-              "flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-mono font-medium transition-colors",
-              mode === "smtp"
-                ? "bg-primary text-primary-foreground border-primary"
-                : "bg-card border-border text-muted-foreground hover:text-foreground hover:bg-muted/50"
-            )}
-          >
-            <Terminal className="w-4 h-4" />
-            SMTP CHECK
-          </button>
-          <button
-            onClick={() => setMode("login")}
-            className={cn(
-              "flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-mono font-medium transition-colors",
-              mode === "login"
-                ? "bg-primary text-primary-foreground border-primary"
-                : "bg-card border-border text-muted-foreground hover:text-foreground hover:bg-muted/50"
-            )}
-          >
-            <KeyRound className="w-4 h-4" />
-            LOGIN CHECK
-          </button>
+        <div className="flex flex-wrap gap-2">
+          {([
+            { id: "smtp",    label: "SMTP CHECK",    icon: <Terminal className="w-4 h-4" /> },
+            { id: "login",   label: "IMAP CHECK",    icon: <KeyRound className="w-4 h-4" /> },
+            { id: "browser", label: "BROWSER CHECK", icon: <Globe className="w-4 h-4" /> },
+          ] as { id: Mode; label: string; icon: React.ReactNode }[]).map(m => (
+            <button key={m.id} onClick={() => setMode(m.id)}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-mono font-medium transition-colors",
+                mode === m.id
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "bg-card border-border text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              )}>
+              {m.icon}{m.label}
+            </button>
+          ))}
         </div>
 
-        {mode === "smtp" ? <SmtpChecker /> : <LoginChecker />}
+        {mode === "smtp" ? <SmtpChecker /> : mode === "login" ? <LoginChecker /> : <BrowserChecker />}
       </div>
     </div>
   );
@@ -402,6 +393,192 @@ function LoginChecker() {
   );
 }
 
+/* ───────────────────────── BROWSER CHECKER ───────────────────────── */
+function BrowserChecker() {
+  const [inputText, setInputText] = useState("");
+  const [results, setResults] = useState<BrowserLoginResult[]>([]);
+  const [activeList, setActiveList] = useState<"opened" | "not_opened">("opened");
+  const [progress, setProgress] = useState(0);
+  const [currentIdx, setCurrentIdx] = useState(0);
+  const [total, setTotal] = useState(0);
+
+  const browserMutation = useBrowserCheckEmails();
+
+  const parseCredentials = (text: string) => {
+    return text.split(/\n+/).map(l => l.trim()).filter(Boolean).map(line => {
+      const parts = line.split(":");
+      if (parts.length < 2) return null;
+      const email = parts[0].trim();
+      const password = parts.slice(1, parts.length > 3 ? -1 : undefined).join(":").trim();
+      const totp = parts.length === 3 ? parts[2].trim() : parts.length > 3 ? parts[parts.length - 1].trim() : undefined;
+      if (!email || !password) return null;
+      return { email, password, ...(totp ? { totp } : {}) };
+    }).filter(Boolean) as Array<{ email: string; password: string; totp?: string }>;
+  };
+
+  const handleCheck = () => {
+    const credentials = parseCredentials(inputText);
+    if (credentials.length === 0) return;
+    setResults([]); setProgress(5); setCurrentIdx(0); setTotal(credentials.length);
+
+    // Progress: browser check is slow (~15-30s per account)
+    let done = 0;
+    const iv = setInterval(() => {
+      setProgress(p => Math.min(p + 2, Math.max(5, Math.round((done / credentials.length) * 95))));
+    }, 1000);
+
+    browserMutation.mutate(
+      { data: { credentials } },
+      {
+        onSuccess: (data) => {
+          clearInterval(iv);
+          setProgress(100);
+          setResults(data.results as BrowserLoginResult[]);
+        },
+        onError: () => { clearInterval(iv); setProgress(0); }
+      }
+    );
+  };
+
+  const opened = results.filter(r => r.status === "opened");
+  const notOpened = results.filter(r => r.status !== "opened");
+  const displayed = activeList === "opened" ? opened : notOpened;
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      {/* Input */}
+      <div className="lg:col-span-1 space-y-3">
+        <Card className="border-border bg-card/50">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-mono uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+              <Globe className="w-3.5 h-3.5 text-primary" />Browser Login Check
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Textarea
+              placeholder={"email@gmail.com:password\nemail2@gmail.com:password:2FA_SECRET"}
+              className="min-h-[240px] resize-y bg-background/50 font-mono text-sm leading-relaxed"
+              value={inputText}
+              onChange={e => setInputText(e.target.value)}
+            />
+            <div className="text-xs text-muted-foreground font-mono bg-muted/30 rounded p-2 border border-border space-y-1">
+              <p className="text-foreground/70 font-medium">Format:</p>
+              <p><span className="text-primary">email:password</span></p>
+              <p><span className="text-primary">email:password:2FA_SECRET</span></p>
+              <p className="text-yellow-400/70 mt-1">⚠ ~20–40s per account (real browser)</p>
+            </div>
+            <Button className="w-full font-mono font-medium tracking-wide" size="lg"
+              onClick={handleCheck}
+              disabled={browserMutation.isPending || !inputText.trim()}>
+              {browserMutation.isPending
+                ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />CHECKING ({parseCredentials(inputText).length} accounts)...</>
+                : <><Globe className="w-4 h-4 mr-2" />OPEN BROWSER & CHECK</>}
+            </Button>
+          </CardContent>
+        </Card>
+
+        {results.length > 0 && (
+          <div className="grid grid-cols-2 gap-3">
+            <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "opened" ? "border-green-500/60 bg-green-500/5" : "border-border bg-card/40")}
+              onClick={() => setActiveList("opened")}>
+              <CardContent className="p-4 flex flex-col items-center gap-1">
+                <MailCheck className={cn("w-5 h-5", opened.length > 0 ? "text-green-400" : "text-muted-foreground/30")} />
+                <span className={cn("text-2xl font-mono font-bold", opened.length > 0 ? "text-green-400" : "text-muted-foreground/30")}>{opened.length}</span>
+                <span className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">OPENED</span>
+              </CardContent>
+            </Card>
+            <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "not_opened" ? "border-red-500/60 bg-red-500/5" : "border-border bg-card/40")}
+              onClick={() => setActiveList("not_opened")}>
+              <CardContent className="p-4 flex flex-col items-center gap-1">
+                <MailX className={cn("w-5 h-5", notOpened.length > 0 ? "text-red-400" : "text-muted-foreground/30")} />
+                <span className={cn("text-2xl font-mono font-bold", notOpened.length > 0 ? "text-red-400" : "text-muted-foreground/30")}>{notOpened.length}</span>
+                <span className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">NOT OPENED</span>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+      </div>
+
+      {/* Results */}
+      <div className="lg:col-span-2 space-y-5">
+        {browserMutation.isPending && (
+          <div className="space-y-2">
+            <div className="flex justify-between text-xs font-mono text-muted-foreground uppercase tracking-wider">
+              <span className="flex items-center gap-2">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Opening Gmail in browser... (~{total * 30}s total)
+              </span>
+              <span>{progress}%</span>
+            </div>
+            <Progress value={progress} className="h-1 bg-border" />
+            <p className="text-[11px] text-muted-foreground/60 font-mono">Each account takes 20–40s — please wait</p>
+          </div>
+        )}
+
+        <Card className="border-border bg-card/50 min-h-[400px] flex flex-col overflow-hidden">
+          <div className="border-b border-border p-3 flex items-center justify-between bg-card gap-3 flex-wrap">
+            <div className="flex gap-2">
+              <button onClick={() => setActiveList("opened")}
+                className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
+                  activeList === "opened" ? "bg-green-500/10 text-green-400 border-green-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
+                <MailCheck className="w-3.5 h-3.5" />OPENED ({opened.length})
+              </button>
+              <button onClick={() => setActiveList("not_opened")}
+                className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
+                  activeList === "not_opened" ? "bg-red-500/10 text-red-400 border-red-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
+                <MailX className="w-3.5 h-3.5" />NOT OPENED ({notOpened.length})
+              </button>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => download(displayed.map(r => r.email).join("\n"), `gmail_browser_${activeList}.txt`)}
+              disabled={displayed.length === 0} className="font-mono text-xs h-8">
+              <Download className="w-3 h-3 mr-2" />EXPORT .TXT
+            </Button>
+          </div>
+
+          <div className="flex-1 overflow-auto">
+            {results.length === 0 ? (
+              <EmptyState icon={<Globe className="w-8 h-8 mb-3 opacity-50" />} label="AWAITING CREDENTIALS" />
+            ) : displayed.length === 0 ? (
+              <EmptyState label={`NO ${activeList === "opened" ? "OPENED" : "FAILED"} ACCOUNTS`} />
+            ) : (
+              <Table>
+                <TableHeader className="bg-background/50 sticky top-0 backdrop-blur-sm z-10">
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead className="font-mono text-xs w-[48px] text-center sticky left-0 bg-card/80 backdrop-blur-sm z-20">#</TableHead>
+                    <TableHead className="font-mono text-xs">EMAIL</TableHead>
+                    <TableHead className="font-mono text-xs w-[130px]">STATUS</TableHead>
+                    <TableHead className="font-mono text-xs min-w-[160px]">REASON</TableHead>
+                    {displayed.some(r => r.totpCode) && (
+                      <TableHead className="font-mono text-xs w-[100px]">TOTP</TableHead>
+                    )}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {displayed.map((r, idx) => (
+                    <TableRow key={idx} className="font-mono text-sm">
+                      <TableCell className="text-center text-muted-foreground/50 text-xs tabular-nums sticky left-0 bg-card/80 backdrop-blur-sm">{idx + 1}</TableCell>
+                      <TableCell className="font-medium text-foreground/90">{r.email}</TableCell>
+                      <TableCell><BrowserStatusBadge status={r.status} /></TableCell>
+                      <TableCell className="text-muted-foreground break-words">{r.reason}</TableCell>
+                      {displayed.some(x => x.totpCode) && (
+                        <TableCell>
+                          {r.totpCode
+                            ? <span className="text-primary font-mono font-bold tracking-widest">{r.totpCode}</span>
+                            : <span className="text-muted-foreground">—</span>}
+                        </TableCell>
+                      )}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 /* ───────────────────────── SHARED HELPERS ───────────────────────── */
 function download(text: string, filename: string) {
   const blob = new Blob([text], { type: "text/plain" });
@@ -468,6 +645,22 @@ function StatusBadge({ status }: { status: EmailResult["status"] | "disabled" })
     unknown: { variant: "unknown", label: "UNKNOWN" },
   }[status as string] || { variant: "outline", label: (status as string).toUpperCase() };
   return <Badge variant={props.variant as any} className="uppercase font-mono tracking-wider text-[10px] py-0">{props.label}</Badge>;
+}
+
+function BrowserStatusBadge({ status }: { status: BrowserLoginResult["status"] }) {
+  const map: Record<string, { label: string; className: string; icon: React.ReactNode }> = {
+    opened:                { label: "OPENED",    className: "border-green-500/50 text-green-400 bg-green-400/10",   icon: <MailCheck className="w-3 h-3" /> },
+    verification_required: { label: "VERIFY",    className: "border-yellow-500/50 text-yellow-400 bg-yellow-400/10", icon: <Smartphone className="w-3 h-3" /> },
+    wrong_password:        { label: "BAD PASS",  className: "border-red-500/50 text-red-400 bg-red-400/10",         icon: <XCircle className="w-3 h-3" /> },
+    "2fa_required":        { label: "2FA NEEDED",className: "border-blue-500/50 text-blue-400 bg-blue-400/10",      icon: <Lock className="w-3 h-3" /> },
+    unknown:               { label: "UNKNOWN",   className: "border-border text-muted-foreground",                  icon: <HelpCircle className="w-3 h-3" /> },
+  };
+  const cfg = map[status] ?? map.unknown;
+  return (
+    <Badge variant="outline" className={cn("uppercase font-mono tracking-wider text-[10px] py-0 flex items-center gap-1 w-fit", cfg.className)}>
+      {cfg.icon}{cfg.label}
+    </Badge>
+  );
 }
 
 function LoginStatusBadge({ status }: { status: LoginResult["status"] }) {

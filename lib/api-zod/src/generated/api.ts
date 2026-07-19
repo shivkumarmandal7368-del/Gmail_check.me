@@ -47,6 +47,38 @@ export const CheckEmailsResponse = zod.object({
 
 
 /**
+ * Actually opens Gmail in a headless browser, logs in, and checks if mailbox opens or verification is required
+ * @summary Gmail browser login check
+ */
+export const browserCheckEmailsBodyCredentialsMax = 50;
+
+
+
+export const BrowserCheckEmailsBody = zod.object({
+  "credentials": zod.array(zod.object({
+  "email": zod.string(),
+  "password": zod.string(),
+  "totp": zod.string().optional().describe('Base32 TOTP secret from the authenticator app setup (optional — for 2FA accounts)')
+})).max(browserCheckEmailsBodyCredentialsMax)
+})
+
+export const BrowserCheckEmailsResponse = zod.object({
+  "results": zod.array(zod.object({
+  "email": zod.string(),
+  "status": zod.enum(['opened', 'verification_required', 'wrong_password', '2fa_required', 'unknown']).describe('opened = mailbox opened; verification_required = phone\/device verify needed; wrong_password = bad credentials; 2fa_required = 2FA code needed but not provided; unknown = error'),
+  "reason": zod.string(),
+  "totpCode": zod.string().nullish()
+})),
+  "total": zod.number(),
+  "opened": zod.number(),
+  "verificationRequired": zod.number(),
+  "wrongPassword": zod.number(),
+  "twoFaRequired": zod.number().optional(),
+  "unknown": zod.number()
+})
+
+
+/**
  * Attempts to log in to Gmail accounts via IMAP and returns accessible/verification_required/wrong_password status
  * @summary Gmail login check via IMAP
  */

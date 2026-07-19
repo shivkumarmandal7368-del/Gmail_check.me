@@ -53,6 +53,32 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /emails/browser-check:
+    post:
+      operationId: browserCheckEmails
+      tags: [emails]
+      summary: Gmail browser login check
+      description: Actually opens Gmail in a headless browser, logs in, and checks if mailbox opens or verification is required
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BrowserCheckInput"
+      responses:
+        "200":
+          description: Browser login results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BrowserCheckResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /emails/login-check:
     post:
       operationId: loginCheckEmails
@@ -209,6 +235,62 @@ components:
           type: number
         invalidPercent:
           type: number
+
+    BrowserCheckInput:
+      type: object
+      required:
+        - credentials
+      properties:
+        credentials:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/LoginCredential"
+
+    BrowserLoginResult:
+      type: object
+      required:
+        - email
+        - status
+        - reason
+      properties:
+        email:
+          type: string
+        status:
+          type: string
+          enum: [opened, verification_required, wrong_password, 2fa_required, unknown]
+          description: "opened = mailbox opened; verification_required = phone/device verify needed; wrong_password = bad credentials; 2fa_required = 2FA code needed but not provided; unknown = error"
+        reason:
+          type: string
+        totpCode:
+          type: ["string", "null"]
+
+    BrowserCheckResponse:
+      type: object
+      required:
+        - results
+        - total
+        - opened
+        - verificationRequired
+        - wrongPassword
+        - unknown
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/BrowserLoginResult"
+        total:
+          type: integer
+        opened:
+          type: integer
+        verificationRequired:
+          type: integer
+        wrongPassword:
+          type: integer
+        twoFaRequired:
+          type: integer
+        unknown:
+          type: integer
 
     LoginCheckInput:
       type: object

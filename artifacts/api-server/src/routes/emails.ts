@@ -1,7 +1,8 @@
 import { Router, type IRouter } from "express";
-import { CheckEmailsBody, GetEmailStatsBody, LoginCheckEmailsBody } from "@workspace/api-zod";
+import { CheckEmailsBody, GetEmailStatsBody, LoginCheckEmailsBody, BrowserCheckEmailsBody } from "@workspace/api-zod";
 import { verifyEmails } from "../lib/emailVerifier.js";
 import { checkGmailLogins } from "../lib/imapChecker.js";
+import { browserLoginCheck } from "../lib/browserLoginChecker.js";
 
 const router: IRouter = Router();
 
@@ -62,6 +63,29 @@ router.post("/emails/stats", (req, res) => {
     unknown,
     validPercent: total > 0 ? Math.round((valid / total) * 100) : 0,
     invalidPercent: total > 0 ? Math.round((invalid / total) * 100) : 0,
+  });
+});
+
+router.post("/emails/browser-check", async (req, res) => {
+  const parsed = BrowserCheckEmailsBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  const { credentials } = parsed.data;
+  if (credentials.length === 0) {
+    res.status(400).json({ error: "No credentials provided" });
+    return;
+  }
+  const results = await browserLoginCheck(credentials as Array<{ email: string; password: string; totp?: string }>);
+  res.json({
+    results,
+    total: results.length,
+    opened: results.filter((r) => r.status === "opened").length,
+    verificationRequired: results.filter((r) => r.status === "verification_required").length,
+    wrongPassword: results.filter((r) => r.status === "wrong_password").length,
+    twoFaRequired: results.filter((r) => r.status === "2fa_required").length,
+    unknown: results.filter((r) => r.status === "unknown").length,
   });
 });
 

@@ -20,6 +20,8 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  BrowserCheckInput,
+  BrowserCheckResponse,
   EmailCheckInput,
   EmailCheckResponse,
   EmailStats,
@@ -205,6 +207,78 @@ export const useCheckEmails = <TError = ErrorType<ErrorResponse>,
         TContext
       > => {
       return useMutation(getCheckEmailsMutationOptions(options));
+    }
+
+export const getBrowserCheckEmailsUrl = () => {
+
+
+
+
+  return `/api/emails/browser-check`
+}
+
+/**
+ * Actually opens Gmail in a headless browser, logs in, and checks if mailbox opens or verification is required
+ * @summary Gmail browser login check
+ */
+export const browserCheckEmails = async (browserCheckInput: BrowserCheckInput, options?: RequestInit): Promise<BrowserCheckResponse> => {
+
+  return customFetch<BrowserCheckResponse>(getBrowserCheckEmailsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(browserCheckInput)
+  }
+);}
+
+
+
+
+
+export const getBrowserCheckEmailsMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof browserCheckEmails>>, TError,{data: BodyType<BrowserCheckInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof browserCheckEmails>>, TError,{data: BodyType<BrowserCheckInput>}, TContext> => {
+
+const mutationKey = ['browserCheckEmails'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof browserCheckEmails>>, {data: BodyType<BrowserCheckInput>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  browserCheckEmails(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type BrowserCheckEmailsMutationResult = NonNullable<Awaited<ReturnType<typeof browserCheckEmails>>>
+    export type BrowserCheckEmailsMutationBody = BodyType<BrowserCheckInput>
+    export type BrowserCheckEmailsMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Gmail browser login check
+ */
+export const useBrowserCheckEmails = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof browserCheckEmails>>, TError,{data: BodyType<BrowserCheckInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof browserCheckEmails>>,
+        TError,
+        {data: BodyType<BrowserCheckInput>},
+        TContext
+      > => {
+      return useMutation(getBrowserCheckEmailsMutationOptions(options));
     }
 
 export const getLoginCheckEmailsUrl = () => {
