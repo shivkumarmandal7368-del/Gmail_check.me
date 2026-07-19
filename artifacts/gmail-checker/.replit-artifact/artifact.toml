@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "Gmail Checker"
+version = "1.0.0"
+id = "artifacts/gmail-checker"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18726
+
+[services.development]
+run = "pnpm --filter @workspace/gmail-checker run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/gmail-checker", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/gmail-checker/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18726"
+BASE_PATH = "/"

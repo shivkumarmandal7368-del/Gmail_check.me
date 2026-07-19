@@ -3,13 +3,15 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Gmail Checker API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: emails
+    description: Email verification operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,53 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /emails/check:
+    post:
+      operationId: checkEmails
+      tags: [emails]
+      summary: Bulk email verification
+      description: Verifies a list of email addresses via format, MX, and SMTP checks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailCheckInput"
+      responses:
+        "200":
+          description: Check results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailCheckResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /emails/stats:
+    post:
+      operationId: getEmailStats
+      tags: [emails]
+      summary: Get stats for a set of email check results
+      description: Returns aggregate statistics from email check results
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailStatsInput"
+      responses:
+        "200":
+          description: Statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailStats"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +83,105 @@ components:
       required:
         - status
 
+    EmailCheckInput:
+      type: object
+      required:
+        - emails
+      properties:
+        emails:
+          type: array
+          items:
+            type: string
+          maxItems: 500
+          description: List of email addresses to verify
+
+    EmailResult:
+      type: object
+      required:
+        - email
+        - status
+        - reason
+      properties:
+        email:
+          type: string
+        status:
+          type: string
+          enum: [valid, invalid, catch_all, unknown]
+          description: "valid = mailbox exists; invalid = mailbox doesn't exist; catch_all = domain accepts all; unknown = couldn't determine"
+        reason:
+          type: string
+          description: Human-readable explanation
+        isGmail:
+          type: boolean
+        smtpCode:
+          type: ["integer", "null"]
+          description: SMTP response code from RCPT TO check
+
+    EmailCheckResponse:
+      type: object
+      required:
+        - results
+        - total
+        - valid
+        - invalid
+        - catchAll
+        - unknown
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/EmailResult"
+        total:
+          type: integer
+        valid:
+          type: integer
+        invalid:
+          type: integer
+        catchAll:
+          type: integer
+        unknown:
+          type: integer
+
+    EmailStatsInput:
+      type: object
+      required:
+        - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/EmailResult"
+
+    EmailStats:
+      type: object
+      required:
+        - total
+        - valid
+        - invalid
+        - catchAll
+        - unknown
+        - validPercent
+        - invalidPercent
+      properties:
+        total:
+          type: integer
+        valid:
+          type: integer
+        invalid:
+          type: integer
+        catchAll:
+          type: integer
+        unknown:
+          type: integer
+        validPercent:
+          type: number
+        invalidPercent:
+          type: number
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
