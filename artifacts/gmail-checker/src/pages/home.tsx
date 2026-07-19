@@ -594,7 +594,15 @@ function BrowserChecker() {
                       <TableCell className="text-center text-muted-foreground/50 text-xs tabular-nums sticky left-0 bg-card/80 backdrop-blur-sm">{idx + 1}</TableCell>
                       <TableCell className="font-medium text-foreground/90">{r.email}</TableCell>
                       <TableCell><BrowserStatusBadge status={r.status} /></TableCell>
-                      <TableCell className="text-muted-foreground break-words">{r.reason}</TableCell>
+                      <TableCell className="text-muted-foreground break-words">
+                        {r.reason}
+                        {(r as any).debugScreenshot && (
+                          <div className="mt-2">
+                            <p className="text-[10px] text-yellow-400/70 font-mono mb-1">📸 Google ne kya dikhaya:</p>
+                            <img src={(r as any).debugScreenshot} alt="debug" className="rounded border border-border max-w-[280px] w-full cursor-pointer" onClick={() => window.open((r as any).debugScreenshot)} />
+                          </div>
+                        )}
+                      </TableCell>
                       {displayed.some(x => x.totpCode) && (
                         <TableCell>
                           {r.totpCode

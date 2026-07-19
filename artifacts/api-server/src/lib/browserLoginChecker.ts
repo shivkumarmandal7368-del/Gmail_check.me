@@ -13,6 +13,7 @@ export interface BrowserLoginResult {
   status: BrowserLoginStatus;
   reason: string;
   totpCode: string | null;
+  debugScreenshot?: string; // base64 PNG when stuck
 }
 
 const BROWSER_TIMEOUT = 60000;
@@ -413,13 +414,6 @@ async function checkOneAccount(
       await page.waitForNavigation({ timeout: 10000, waitUntil: "networkidle2" }).catch(() => {});
       await sleep(rand(1000, 2000));
 
-      // Save debug screenshot so we can see what Google is showing
-      try {
-        const fs = await import("fs/promises");
-        await fs.mkdir("/tmp/gmail-debug", { recursive: true });
-        await (page as any).screenshot({ path: `/tmp/gmail-debug/identifier-page-${Date.now()}.png` });
-        console.log("[DEBUG] Screenshot saved to /tmp/gmail-debug/");
-      } catch {}
     }
 
     // Check page after email step
@@ -445,11 +439,18 @@ async function checkOneAccount(
       const { url, text } = await pageState();
       const classified = await classify(url, text);
       if (classified) return classified;
+      // Capture screenshot so user can see what Google is showing
+      let debugScreenshot: string | undefined;
+      try {
+        const buf = await (page as any).screenshot({ type: "png", fullPage: false });
+        debugScreenshot = `data:image/png;base64,${Buffer.from(buf).toString("base64")}`;
+      } catch {}
       return {
         email,
         status: "verification_required",
         reason: `Google did not show password field — page: ${url.slice(0, 80)}`,
         totpCode,
+        debugScreenshot,
       };
     }
 
