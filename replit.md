@@ -1,15 +1,16 @@
-# [Project name]
+# Vanguard MX
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Email verification tool with three modes: SMTP check, IMAP login check, and browser-based Gmail login check.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- Frontend (Vite dev server): `PORT=18726 BASE_PATH=/ pnpm --filter @workspace/gmail-checker run dev`
+- API server (Express): `PORT=8080 pnpm --filter @workspace/api-server run dev`
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `DATABASE_URL` is auto-provided by Replit's built-in PostgreSQL (runtime-managed)
 
 ## Stack
 
