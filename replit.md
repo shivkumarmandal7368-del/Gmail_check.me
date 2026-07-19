@@ -23,15 +23,30 @@ Email verification tool with three modes: SMTP check, IMAP login check, and brow
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/gmail-checker/` — React + Vite frontend (port 18726)
+- `artifacts/api-server/` — Express 5 API server (port 8080)
+- `artifacts/api-server/src/lib/browserLoginChecker.ts` — Puppeteer-based Gmail browser login checker
+- `artifacts/api-server/src/lib/imapChecker.ts` — IMAP credential checker
+- `artifacts/api-server/src/lib/emailVerifier.ts` — SMTP email verifier
+- `artifacts/api-server/src/routes/emails.ts` — all three check endpoints
+- `artifacts/gmail-checker/src/pages/home.tsx` — main UI (SMTP / IMAP / Browser Check tabs)
+- `scripts/post-merge.sh` — runs `pnpm install --frozen-lockfile` + DB push on merge
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Browser Check uses Puppeteer + puppeteer-extra-plugin-stealth against Chromium from Nix store. Google blocks Replit's datacenter IP, so a **residential proxy is required** for browser check to work.
+- API is built with esbuild to `dist/index.mjs` before starting (no ts-node in prod or dev).
+- All three check modes share a single Express router; the frontend switches between them client-side.
+- Orval codegen generates typed React Query hooks from the OpenAPI spec — run `pnpm --filter @workspace/api-spec run codegen` after spec changes.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Three email verification modes accessible from one UI:
+1. **SMTP Check** — verifies email address existence via SMTP handshake (no credentials needed)
+2. **IMAP Check** — tests Gmail credentials via IMAP login (app password required)
+3. **Browser Check** — uses a real Chromium browser to log into Gmail (supports TOTP; requires residential proxy on Replit)
+
+Results can be filtered and downloaded as `.txt` lists.
 
 ## User preferences
 
@@ -39,7 +54,10 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- **Browser Check requires a residential proxy on Replit** — Replit's datacenter IP is blocked by Google. Without a proxy all accounts return `verification_required`.
+- Chromium path is resolved via `which chromium` with a Nix store fallback hardcoded in `browserLoginChecker.ts` — if Chromium version changes, update that path.
+- `pnpm install` must be run after cloning/importing before workflows will start (deps not committed).
+- Browser Check is sequential (~20-40s per account); long lists block the endpoint for the full duration.
 
 ## Pointers
 

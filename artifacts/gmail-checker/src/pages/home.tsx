@@ -463,21 +463,38 @@ function BrowserChecker() {
               value={inputText}
               onChange={e => setInputText(e.target.value)}
             />
+            {/* Proxy warning banner */}
+            <div className={cn(
+              "rounded-lg border p-2.5 text-[11px] font-mono space-y-1",
+              proxy.trim()
+                ? "border-green-500/40 bg-green-500/5 text-green-400/90"
+                : "border-yellow-500/40 bg-yellow-500/5 text-yellow-400/90"
+            )}>
+              {proxy.trim() ? (
+                <>
+                  <p className="font-semibold">🔀 Proxy active — traffic routed via proxy</p>
+                  <p className="text-yellow-300/70">Make sure it's a residential/mobile proxy, not datacenter.</p>
+                </>
+              ) : (
+                <>
+                  <p className="font-semibold">⚠ Residential proxy required on Replit</p>
+                  <p className="text-yellow-300/70">Google blocks datacenter IPs. Without a proxy all checks return <span className="text-orange-400">verification_required</span>.</p>
+                </>
+              )}
+            </div>
             <div className="space-y-1.5">
-              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
-                Proxy (optional)
+              <label className="text-[10px] font-mono uppercase tracking-widest text-yellow-400/80 flex items-center gap-1">
+                <Lock className="w-3 h-3" /> Residential Proxy
               </label>
               <Input
                 placeholder="http://user:pass@host:port"
-                className="font-mono text-sm bg-background/50 border-border h-8"
+                className={cn(
+                  "font-mono text-sm bg-background/50 h-8",
+                  proxy.trim() ? "border-green-500/50" : "border-yellow-500/40"
+                )}
                 value={proxy}
                 onChange={e => setProxy(e.target.value)}
               />
-              {proxy.trim() && (
-                <p className="text-[10px] font-mono text-primary/80">
-                  🔀 Traffic will be routed via proxy
-                </p>
-              )}
             </div>
             <div className="text-xs text-muted-foreground font-mono bg-muted/30 rounded p-2 border border-border space-y-1">
               <p className="text-foreground/70 font-medium">Format:</p>
