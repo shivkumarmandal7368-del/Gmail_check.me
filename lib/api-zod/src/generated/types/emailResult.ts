@@ -9,7 +9,7 @@ import type { EmailResultStatus } from './emailResultStatus';
 
 export interface EmailResult {
   email: string;
-  /** valid = mailbox exists; invalid = mailbox doesn't exist; catch_all = domain accepts all; unknown = couldn't determine */
+  /** valid = mailbox exists; invalid = mailbox doesn't exist; disabled = account exists but is disabled/inactive; catch_all = domain accepts all; unknown = couldn't determine */
   status: EmailResultStatus;
   /** Human-readable explanation */
   reason: string;

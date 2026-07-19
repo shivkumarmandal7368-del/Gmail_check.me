@@ -22,6 +22,7 @@ router.post("/emails/check", async (req, res) => {
 
   const valid = results.filter((r) => r.status === "valid").length;
   const invalid = results.filter((r) => r.status === "invalid").length;
+  const disabled = results.filter((r) => r.status === "disabled").length;
   const catchAll = results.filter((r) => r.status === "catch_all").length;
   const unknown = results.filter((r) => r.status === "unknown").length;
 
@@ -30,6 +31,7 @@ router.post("/emails/check", async (req, res) => {
     total: results.length,
     valid,
     invalid,
+    disabled,
     catchAll,
     unknown,
   });
@@ -46,6 +48,7 @@ router.post("/emails/stats", (req, res) => {
   const total = results.length;
   const valid = results.filter((r) => r.status === "valid").length;
   const invalid = results.filter((r) => r.status === "invalid").length;
+  const disabled = results.filter((r) => r.status === "disabled").length;
   const catchAll = results.filter((r) => r.status === "catch_all").length;
   const unknown = results.filter((r) => r.status === "unknown").length;
 
@@ -53,6 +56,7 @@ router.post("/emails/stats", (req, res) => {
     total,
     valid,
     invalid,
+    disabled,
     catchAll,
     unknown,
     validPercent: total > 0 ? Math.round((valid / total) * 100) : 0,

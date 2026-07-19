@@ -7,7 +7,7 @@
  */
 
 /**
- * valid = mailbox exists; invalid = mailbox doesn't exist; catch_all = domain accepts all; unknown = couldn't determine
+ * valid = mailbox exists; invalid = mailbox doesn't exist; disabled = account exists but is disabled/inactive; catch_all = domain accepts all; unknown = couldn't determine
  */
 export type EmailResultStatus = typeof EmailResultStatus[keyof typeof EmailResultStatus];
 
@@ -15,6 +15,7 @@ export type EmailResultStatus = typeof EmailResultStatus[keyof typeof EmailResul
 export const EmailResultStatus = {
   valid: 'valid',
   invalid: 'invalid',
+  disabled: 'disabled',
   catch_all: 'catch_all',
   unknown: 'unknown',
 } as const;

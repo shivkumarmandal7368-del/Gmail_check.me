@@ -1,7 +1,7 @@
 import dns from "dns/promises";
 import net from "net";
 
-export type EmailStatus = "valid" | "invalid" | "catch_all" | "unknown";
+export type EmailStatus = "valid" | "invalid" | "disabled" | "catch_all" | "unknown";
 
 export interface EmailResult {
   email: string;
@@ -149,10 +149,18 @@ async function verifySingleEmail(email: string): Promise<EmailResult> {
         smtpCode: code,
       };
     } else if (code === 550 || code === 551 || code === 552 || code === 553 || code === 554) {
+      // Detect disabled/inactive accounts (e.g. Gmail's DisabledUser response)
+      const isDisabled =
+        message.toLowerCase().includes("disableduser") ||
+        message.toLowerCase().includes("disabled") ||
+        message.toLowerCase().includes("inactive") ||
+        message.toLowerCase().includes("p=disableduser");
       return {
         email,
-        status: "invalid",
-        reason: message || "Mailbox does not exist",
+        status: isDisabled ? "disabled" : "invalid",
+        reason: isDisabled
+          ? "Account exists but is disabled / inactive (requires verification)"
+          : message || "Mailbox does not exist",
         isGmail,
         smtpCode: code,
       };

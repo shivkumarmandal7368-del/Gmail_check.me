@@ -32,7 +32,7 @@ export const CheckEmailsBody = zod.object({
 export const CheckEmailsResponse = zod.object({
   "results": zod.array(zod.object({
   "email": zod.string(),
-  "status": zod.enum(['valid', 'invalid', 'catch_all', 'unknown']).describe('valid = mailbox exists; invalid = mailbox doesn\'t exist; catch_all = domain accepts all; unknown = couldn\'t determine'),
+  "status": zod.enum(['valid', 'invalid', 'disabled', 'catch_all', 'unknown']).describe('valid = mailbox exists; invalid = mailbox doesn\'t exist; disabled = account exists but is disabled\/inactive; catch_all = domain accepts all; unknown = couldn\'t determine'),
   "reason": zod.string().describe('Human-readable explanation'),
   "isGmail": zod.boolean().optional(),
   "smtpCode": zod.number().nullish().describe('SMTP response code from RCPT TO check')
@@ -40,6 +40,7 @@ export const CheckEmailsResponse = zod.object({
   "total": zod.number(),
   "valid": zod.number(),
   "invalid": zod.number(),
+  "disabled": zod.number(),
   "catchAll": zod.number(),
   "unknown": zod.number()
 })
@@ -52,7 +53,7 @@ export const CheckEmailsResponse = zod.object({
 export const GetEmailStatsBody = zod.object({
   "results": zod.array(zod.object({
   "email": zod.string(),
-  "status": zod.enum(['valid', 'invalid', 'catch_all', 'unknown']).describe('valid = mailbox exists; invalid = mailbox doesn\'t exist; catch_all = domain accepts all; unknown = couldn\'t determine'),
+  "status": zod.enum(['valid', 'invalid', 'disabled', 'catch_all', 'unknown']).describe('valid = mailbox exists; invalid = mailbox doesn\'t exist; disabled = account exists but is disabled\/inactive; catch_all = domain accepts all; unknown = couldn\'t determine'),
   "reason": zod.string().describe('Human-readable explanation'),
   "isGmail": zod.boolean().optional(),
   "smtpCode": zod.number().nullish().describe('SMTP response code from RCPT TO check')
@@ -63,6 +64,7 @@ export const GetEmailStatsResponse = zod.object({
   "total": zod.number(),
   "valid": zod.number(),
   "invalid": zod.number(),
+  "disabled": zod.number(),
   "catchAll": zod.number(),
   "unknown": zod.number(),
   "validPercent": zod.number(),

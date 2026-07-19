@@ -8,9 +8,9 @@ import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
-import { Download, Terminal, CheckCircle2, XCircle, AlertTriangle, HelpCircle, Activity } from "lucide-react"
+import { Download, Terminal, CheckCircle2, XCircle, AlertTriangle, HelpCircle, Activity, ShieldAlert } from "lucide-react"
 
-type FilterType = "all" | "valid" | "invalid" | "catch_all" | "unknown";
+type FilterType = "all" | "valid" | "invalid" | "disabled" | "catch_all" | "unknown";
 
 export default function Home() {
   const [inputText, setInputText] = useState("");
@@ -148,10 +148,11 @@ export default function Home() {
           <div className="lg:col-span-2 space-y-6">
             
             {/* Stats Grid */}
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
               <StatCard title="TOTAL" value={stats?.total ?? 0} />
               <StatCard title="VALID" value={stats?.valid ?? 0} trend="valid" icon={<CheckCircle2 className="w-4 h-4" />} />
               <StatCard title="INVALID" value={stats?.invalid ?? 0} trend="invalid" icon={<XCircle className="w-4 h-4" />} />
+              <StatCard title="DISABLED" value={(stats as any)?.disabled ?? 0} trend="disabled" icon={<ShieldAlert className="w-4 h-4" />} />
               <StatCard title="CATCH-ALL" value={stats?.catchAll ?? 0} trend="catchall" icon={<AlertTriangle className="w-4 h-4" />} />
               <StatCard title="UNKNOWN" value={stats?.unknown ?? 0} trend="unknown" icon={<HelpCircle className="w-4 h-4" />} />
             </div>
@@ -173,6 +174,7 @@ export default function Home() {
                   <FilterButton active={filter === 'all'} onClick={() => setFilter('all')}>ALL</FilterButton>
                   <FilterButton active={filter === 'valid'} onClick={() => setFilter('valid')} className="hover:text-valid data-[active=true]:text-valid data-[active=true]:bg-valid/10">VALID</FilterButton>
                   <FilterButton active={filter === 'invalid'} onClick={() => setFilter('invalid')} className="hover:text-invalid data-[active=true]:text-invalid data-[active=true]:bg-invalid/10">INVALID</FilterButton>
+                  <FilterButton active={filter === 'disabled'} onClick={() => setFilter('disabled')} className="hover:text-orange-400 data-[active=true]:text-orange-400 data-[active=true]:bg-orange-400/10">DISABLED</FilterButton>
                   <FilterButton active={filter === 'catch_all'} onClick={() => setFilter('catch_all')} className="hover:text-catchall data-[active=true]:text-catchall data-[active=true]:bg-catchall/10">CATCH-ALL</FilterButton>
                   <FilterButton active={filter === 'unknown'} onClick={() => setFilter('unknown')} className="hover:text-unknown data-[active=true]:text-unknown data-[active=true]:bg-unknown/10">UNKNOWN</FilterButton>
                 </div>
@@ -187,9 +189,10 @@ export default function Home() {
                   <Table>
                     <TableHeader className="bg-background/50 sticky top-0 backdrop-blur-sm z-10">
                       <TableRow className="hover:bg-transparent">
+                        <TableHead className="font-mono text-xs tracking-wider w-[48px] text-center">#</TableHead>
                         <TableHead className="font-mono text-xs tracking-wider">EMAIL</TableHead>
-                        <TableHead className="font-mono text-xs tracking-wider w-[100px]">STATUS</TableHead>
-                        <TableHead className="font-mono text-xs tracking-wider w-[100px]">CODE</TableHead>
+                        <TableHead className="font-mono text-xs tracking-wider w-[110px]">STATUS</TableHead>
+                        <TableHead className="font-mono text-xs tracking-wider w-[80px]">CODE</TableHead>
                         <TableHead className="font-mono text-xs tracking-wider">DIAGNOSTIC</TableHead>
                         <TableHead className="font-mono text-xs tracking-wider w-[80px]">GMAIL</TableHead>
                       </TableRow>
@@ -197,6 +200,7 @@ export default function Home() {
                     <TableBody>
                       {filteredResults.map((result, idx) => (
                         <TableRow key={idx} className="font-mono text-sm group">
+                          <TableCell className="text-center text-muted-foreground/50 text-xs tabular-nums">{idx + 1}</TableCell>
                           <TableCell className="font-medium text-foreground/90">{result.email}</TableCell>
                           <TableCell>
                             <StatusBadge status={result.status} />
@@ -245,6 +249,7 @@ function StatCard({ title, value, trend, icon }: { title: string, value: number,
           isZero ? 'text-muted-foreground/30' : 
           trend === 'valid' ? 'text-valid' :
           trend === 'invalid' ? 'text-invalid' :
+          trend === 'disabled' ? 'text-orange-400' :
           trend === 'catchall' ? 'text-catchall' :
           'text-foreground'
         }`}>
@@ -273,13 +278,21 @@ function FilterButton({ active, children, onClick, className }: { active?: boole
   )
 }
 
-function StatusBadge({ status }: { status: EmailResult["status"] }) {
+function StatusBadge({ status }: { status: EmailResult["status"] | "disabled" }) {
+  if (status === "disabled") {
+    return (
+      <Badge variant="outline" className="uppercase font-mono tracking-wider text-[10px] py-0 border-orange-500/50 text-orange-400 bg-orange-400/10">
+        DISABLED
+      </Badge>
+    );
+  }
+
   const props = {
     valid: { variant: "valid", label: "VALID" },
     invalid: { variant: "invalid", label: "INVALID" },
     catch_all: { variant: "catchall", label: "CATCH-ALL" },
-    unknown: { variant: "unknown", label: "UNKNOWN" }
-  }[status] || { variant: "outline", label: status.toUpperCase() };
+    unknown: { variant: "unknown", label: "UNKNOWN" },
+  }[status as string] || { variant: "outline", label: (status as string).toUpperCase() };
 
   return <Badge variant={props.variant as any} className="uppercase font-mono tracking-wider text-[10px] py-0">{props.label}</Badge>;
 }

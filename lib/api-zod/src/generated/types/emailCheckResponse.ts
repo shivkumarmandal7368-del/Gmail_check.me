@@ -12,6 +12,7 @@ export interface EmailCheckResponse {
   total: number;
   valid: number;
   invalid: number;
+  disabled: number;
   catchAll: number;
   unknown: number;
 }

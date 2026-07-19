@@ -106,8 +106,8 @@ components:
           type: string
         status:
           type: string
-          enum: [valid, invalid, catch_all, unknown]
-          description: "valid = mailbox exists; invalid = mailbox doesn't exist; catch_all = domain accepts all; unknown = couldn't determine"
+          enum: [valid, invalid, disabled, catch_all, unknown]
+          description: "valid = mailbox exists; invalid = mailbox doesn't exist; disabled = account exists but is disabled/inactive; catch_all = domain accepts all; unknown = couldn't determine"
         reason:
           type: string
           description: Human-readable explanation
@@ -124,6 +124,7 @@ components:
         - total
         - valid
         - invalid
+        - disabled
         - catchAll
         - unknown
       properties:
@@ -136,6 +137,8 @@ components:
         valid:
           type: integer
         invalid:
+          type: integer
+        disabled:
           type: integer
         catchAll:
           type: integer
@@ -158,6 +161,7 @@ components:
         - total
         - valid
         - invalid
+        - disabled
         - catchAll
         - unknown
         - validPercent
@@ -168,6 +172,8 @@ components:
         valid:
           type: integer
         invalid:
+          type: integer
+        disabled:
           type: integer
         catchAll:
           type: integer
