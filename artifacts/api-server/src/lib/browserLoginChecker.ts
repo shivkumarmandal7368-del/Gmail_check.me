@@ -376,20 +376,41 @@ async function checkOneAccount(
     }, email);
     await sleep(600); // let Google's JS validate the email
 
-    // Click Next using full MouseEvent dispatch (works on ARM headless)
-    await page.evaluate(() => {
-      const btn = document.querySelector("#identifierNext") as HTMLElement | null;
-      if (!btn) return;
-      btn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
-      btn.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true, cancelable: true, view: window }));
-      btn.dispatchEvent(new MouseEvent("click",     { bubbles: true, cancelable: true, view: window }));
-    });
+    // Click Next — try pointer events + tap (touch) for ARM compatibility
+    const clickNext = async () => {
+      // Pointer + mouse + click events
+      await page.evaluate(() => {
+        const btn = document.querySelector("#identifierNext") as HTMLElement | null;
+        if (!btn) return;
+        ["pointerdown","mousedown","pointerup","mouseup","click"].forEach(type => {
+          btn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, buttons: 1 }));
+        });
+      });
+      await sleep(300);
+      if (!page.url().includes("identifier")) return;
 
-    // Also press Enter as backup
-    await page.focus("#identifierId").catch(() => {});
-    await page.keyboard.press("Enter");
+      // Tap (touch event) — works best on ARM Android
+      try {
+        const btn = await page.$("#identifierNext");
+        if (btn) {
+          const box = await btn.boundingBox();
+          if (box) await page.tap(`#identifierNext`).catch(() =>
+            page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
+          );
+        }
+      } catch {}
+      await sleep(300);
+      if (!page.url().includes("identifier")) return;
 
-    await page.waitForNavigation({ timeout: 10000, waitUntil: "networkidle2" }).catch(() => {});
+      // Enter key fallback
+      await page.focus("#identifierId").catch(() => {});
+      await page.keyboard.press("Enter");
+    };
+
+    await Promise.race([
+      page.waitForNavigation({ timeout: 10000, waitUntil: "networkidle2" }).catch(() => {}),
+      clickNext(),
+    ]);
     await sleep(400);
 
     // Check page after email step
