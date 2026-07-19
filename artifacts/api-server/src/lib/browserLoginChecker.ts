@@ -377,34 +377,41 @@ async function checkOneAccount(
     // ── Step 2: Enter email ───────────────────────────────────────
     await page.waitForSelector("#identifierId", { timeout: 15000 });
     await humanType("#identifierId", email);
+    await sleep(rand(300, 600));
 
-    // Try clicking Next button, fall back to Enter key
-    try {
-      await Promise.all([
-        page.waitForNavigation({ timeout: 15000, waitUntil: "networkidle2" }),
-        humanClick("#identifierNext"),
-      ]);
-    } catch {
-      // Fallback: press Enter
-      try {
-        await Promise.all([
-          page.waitForNavigation({ timeout: 15000, waitUntil: "networkidle2" }),
-          page.keyboard.press("Enter"),
-        ]);
-      } catch { /* ignore */ }
-    }
-    await sleep(rand(1000, 2500));
+    // Multiple click strategies for Android/ARM compatibility
+    const navigated = await Promise.race([
+      page.waitForNavigation({ timeout: 20000, waitUntil: "networkidle2" }).then(() => true).catch(() => false),
+      (async () => {
+        // Strategy 1: JS click
+        await page.evaluate(() => {
+          const btn = document.querySelector("#identifierNext") as HTMLElement | null;
+          if (btn) btn.click();
+        });
+        await sleep(500);
+        // Strategy 2: Enter key
+        await page.keyboard.press("Enter");
+        await sleep(500);
+        // Strategy 3: Tab then Enter
+        await page.keyboard.press("Tab");
+        await sleep(200);
+        await page.keyboard.press("Enter");
+        return false;
+      })(),
+    ]);
 
-    // If still on identifier page, try pressing Enter again
-    {
-      const currentUrl = page.url();
-      if (currentUrl.includes("identifier")) {
-        try {
-          await page.keyboard.press("Enter");
-          await page.waitForNavigation({ timeout: 10000, waitUntil: "networkidle2" }).catch(() => {});
-        } catch { /* ignore */ }
-        await sleep(rand(500, 1000));
-      }
+    await sleep(rand(1500, 3000));
+
+    // If still on identifier page, try one more time
+    if (page.url().includes("identifier")) {
+      await page.evaluate(() => {
+        const btn = document.querySelector("#identifierNext") as HTMLElement | null;
+        if (btn) btn.click();
+      });
+      await sleep(500);
+      await page.keyboard.press("Enter");
+      await page.waitForNavigation({ timeout: 10000, waitUntil: "networkidle2" }).catch(() => {});
+      await sleep(rand(1000, 2000));
     }
 
     // Check page after email step
