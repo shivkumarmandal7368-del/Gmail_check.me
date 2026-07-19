@@ -189,7 +189,7 @@ export default function Home() {
                   <Table>
                     <TableHeader className="bg-background/50 sticky top-0 backdrop-blur-sm z-10">
                       <TableRow className="hover:bg-transparent">
-                        <TableHead className="font-mono text-xs tracking-wider w-[48px] text-center">#</TableHead>
+                        <TableHead className="font-mono text-xs tracking-wider w-[48px] text-center sticky left-0 bg-card/80 backdrop-blur-sm z-20">#</TableHead>
                         <TableHead className="font-mono text-xs tracking-wider">EMAIL</TableHead>
                         <TableHead className="font-mono text-xs tracking-wider w-[110px]">STATUS</TableHead>
                         <TableHead className="font-mono text-xs tracking-wider w-[80px]">CODE</TableHead>
@@ -200,13 +200,13 @@ export default function Home() {
                     <TableBody>
                       {filteredResults.map((result, idx) => (
                         <TableRow key={idx} className="font-mono text-sm group">
-                          <TableCell className="text-center text-muted-foreground/50 text-xs tabular-nums">{idx + 1}</TableCell>
+                          <TableCell className="text-center text-muted-foreground/50 text-xs tabular-nums sticky left-0 bg-card/80 backdrop-blur-sm">{idx + 1}</TableCell>
                           <TableCell className="font-medium text-foreground/90">{result.email}</TableCell>
                           <TableCell>
                             <StatusBadge status={result.status} />
                           </TableCell>
                           <TableCell className="text-muted-foreground">{result.smtpCode || "—"}</TableCell>
-                          <TableCell className="text-muted-foreground truncate max-w-[200px]" title={result.reason}>
+                          <TableCell className="text-muted-foreground break-words min-w-[160px]" title={result.reason}>
                             {result.reason}
                           </TableCell>
                           <TableCell>
