@@ -378,13 +378,34 @@ async function checkOneAccount(
     await page.waitForSelector("#identifierId", { timeout: 15000 });
     await humanType("#identifierId", email);
 
+    // Try clicking Next button, fall back to Enter key
     try {
       await Promise.all([
-        page.waitForNavigation({ timeout: 20000, waitUntil: "networkidle2" }),
+        page.waitForNavigation({ timeout: 15000, waitUntil: "networkidle2" }),
         humanClick("#identifierNext"),
       ]);
-    } catch { /* navigation may not happen on some flows */ }
+    } catch {
+      // Fallback: press Enter
+      try {
+        await Promise.all([
+          page.waitForNavigation({ timeout: 15000, waitUntil: "networkidle2" }),
+          page.keyboard.press("Enter"),
+        ]);
+      } catch { /* ignore */ }
+    }
     await sleep(rand(1000, 2500));
+
+    // If still on identifier page, try pressing Enter again
+    {
+      const currentUrl = page.url();
+      if (currentUrl.includes("identifier")) {
+        try {
+          await page.keyboard.press("Enter");
+          await page.waitForNavigation({ timeout: 10000, waitUntil: "networkidle2" }).catch(() => {});
+        } catch { /* ignore */ }
+        await sleep(rand(500, 1000));
+      }
+    }
 
     // Check page after email step
     {
