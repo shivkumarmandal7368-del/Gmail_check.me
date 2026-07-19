@@ -25,7 +25,9 @@ import type {
   EmailStats,
   EmailStatsInput,
   ErrorResponse,
-  HealthStatus
+  HealthStatus,
+  LoginCheckInput,
+  LoginCheckResponse
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -203,6 +205,78 @@ export const useCheckEmails = <TError = ErrorType<ErrorResponse>,
         TContext
       > => {
       return useMutation(getCheckEmailsMutationOptions(options));
+    }
+
+export const getLoginCheckEmailsUrl = () => {
+
+
+
+
+  return `/api/emails/login-check`
+}
+
+/**
+ * Attempts to log in to Gmail accounts via IMAP and returns accessible/verification_required/wrong_password status
+ * @summary Gmail login check via IMAP
+ */
+export const loginCheckEmails = async (loginCheckInput: LoginCheckInput, options?: RequestInit): Promise<LoginCheckResponse> => {
+
+  return customFetch<LoginCheckResponse>(getLoginCheckEmailsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(loginCheckInput)
+  }
+);}
+
+
+
+
+
+export const getLoginCheckEmailsMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof loginCheckEmails>>, TError,{data: BodyType<LoginCheckInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof loginCheckEmails>>, TError,{data: BodyType<LoginCheckInput>}, TContext> => {
+
+const mutationKey = ['loginCheckEmails'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof loginCheckEmails>>, {data: BodyType<LoginCheckInput>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  loginCheckEmails(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type LoginCheckEmailsMutationResult = NonNullable<Awaited<ReturnType<typeof loginCheckEmails>>>
+    export type LoginCheckEmailsMutationBody = BodyType<LoginCheckInput>
+    export type LoginCheckEmailsMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Gmail login check via IMAP
+ */
+export const useLoginCheckEmails = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof loginCheckEmails>>, TError,{data: BodyType<LoginCheckInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof loginCheckEmails>>,
+        TError,
+        {data: BodyType<LoginCheckInput>},
+        TContext
+      > => {
+      return useMutation(getLoginCheckEmailsMutationOptions(options));
     }
 
 export const getGetEmailStatsUrl = () => {

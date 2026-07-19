@@ -47,6 +47,39 @@ export const CheckEmailsResponse = zod.object({
 
 
 /**
+ * Attempts to log in to Gmail accounts via IMAP and returns accessible/verification_required/wrong_password status
+ * @summary Gmail login check via IMAP
+ */
+export const loginCheckEmailsBodyCredentialsMax = 200;
+
+
+
+export const LoginCheckEmailsBody = zod.object({
+  "credentials": zod.array(zod.object({
+  "email": zod.string(),
+  "password": zod.string(),
+  "totp": zod.string().optional().describe('Base32 TOTP secret from the authenticator app setup (optional — for 2FA accounts)')
+})).max(loginCheckEmailsBodyCredentialsMax)
+})
+
+export const LoginCheckEmailsResponse = zod.object({
+  "results": zod.array(zod.object({
+  "email": zod.string(),
+  "status": zod.enum(['accessible', 'verification_required', 'wrong_password', 'app_password_required', 'unknown']).describe('accessible = login OK; verification_required = browser verification needed; wrong_password = bad credentials; app_password_required = 2FA on, use App Password; unknown = couldn\'t determine'),
+  "reason": zod.string(),
+  "totpCode": zod.string().nullish().describe('Auto-generated TOTP code (if secret was provided)'),
+  "totpSecondsLeft": zod.number().nullish().describe('Seconds until the TOTP code expires')
+})),
+  "total": zod.number(),
+  "accessible": zod.number(),
+  "verificationRequired": zod.number(),
+  "wrongPassword": zod.number(),
+  "appPasswordRequired": zod.number(),
+  "unknown": zod.number()
+})
+
+
+/**
  * Returns aggregate statistics from email check results
  * @summary Get stats for a set of email check results
  */

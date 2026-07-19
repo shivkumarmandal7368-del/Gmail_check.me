@@ -70,6 +70,59 @@ export interface EmailStats {
   invalidPercent: number;
 }
 
+export interface LoginCredential {
+  email: string;
+  password: string;
+  /** Base32 TOTP secret from the authenticator app setup (optional — for 2FA accounts) */
+  totp?: string;
+}
+
+export interface LoginCheckInput {
+  /** @maxItems 200 */
+  credentials: LoginCredential[];
+}
+
+/**
+ * accessible = login OK; verification_required = browser verification needed; wrong_password = bad credentials; app_password_required = 2FA on, use App Password; unknown = couldn't determine
+ */
+export type LoginResultStatus = typeof LoginResultStatus[keyof typeof LoginResultStatus];
+
+
+export const LoginResultStatus = {
+  accessible: 'accessible',
+  verification_required: 'verification_required',
+  wrong_password: 'wrong_password',
+  app_password_required: 'app_password_required',
+  unknown: 'unknown',
+} as const;
+
+export interface LoginResult {
+  email: string;
+  /** accessible = login OK; verification_required = browser verification needed; wrong_password = bad credentials; app_password_required = 2FA on, use App Password; unknown = couldn't determine */
+  status: LoginResultStatus;
+  reason: string;
+  /**
+     * Auto-generated TOTP code (if secret was provided)
+     * @nullable
+     */
+  totpCode?: string | null;
+  /**
+     * Seconds until the TOTP code expires
+     * @nullable
+     */
+  totpSecondsLeft?: number | null;
+}
+
+export interface LoginCheckResponse {
+  results: LoginResult[];
+  total: number;
+  accessible: number;
+  verificationRequired: number;
+  wrongPassword: number;
+  appPasswordRequired: number;
+  unknown: number;
+}
+
 export interface ErrorResponse {
   error: string;
 }
