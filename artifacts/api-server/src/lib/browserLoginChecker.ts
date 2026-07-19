@@ -83,6 +83,13 @@ async function checkOneAccount(
   const ua = USER_AGENTS[rand(0, USER_AGENTS.length - 1)];
   const res = RESOLUTIONS[rand(0, RESOLUTIONS.length - 1)];
 
+  // Detect if running on Android/Termux
+  const isAndroid = process.platform === "linux" && (
+    process.env.TERMUX_VERSION !== undefined ||
+    process.env.PREFIX?.includes("com.termux") ||
+    require("fs").existsSync("/data/data/com.termux")
+  );
+
   const launchArgs = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
@@ -106,6 +113,14 @@ async function checkOneAccount(
     // Language & timezone
     "--lang=en-US,en",
     "--accept-lang=en-US,en;q=0.9",
+    // Android/ARM specific flags
+    ...(isAndroid ? [
+      "--no-zygote",
+      "--single-process",
+      "--disable-features=VizDisplayCompositor",
+      "--disable-software-rasterizer",
+      "--run-all-compositor-stages-before-draw",
+    ] : []),
   ];
 
   if (proxyParsed) {
