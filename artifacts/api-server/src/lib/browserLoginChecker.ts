@@ -16,7 +16,8 @@ export interface BrowserLoginResult {
   debugScreenshot?: string; // base64 PNG when stuck
 }
 
-const BROWSER_TIMEOUT = 60000;
+const BROWSER_TIMEOUT = 30000;
+const ACCOUNT_TIMEOUT = 55000; // hard kill per account
 
 function getChromiumPath(): string {
   // Try which chromium first
@@ -359,7 +360,7 @@ async function checkOneAccount(
     // ── Step 1: Open Gmail login ──────────────────────────────────
     await page.goto(
       "https://accounts.google.com/v3/signin/identifier?service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
-      { waitUntil: "networkidle2", timeout: BROWSER_TIMEOUT }
+      { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT }
     );
     await sleep(300);
 
@@ -404,7 +405,7 @@ async function checkOneAccount(
       } catch {}
     }
 
-    await page.waitForNavigation({ timeout: 8000, waitUntil: "networkidle2" }).catch(() => {});
+    await page.waitForNavigation({ timeout: 8000, waitUntil: "domcontentloaded" }).catch(() => {});
     await sleep(400);
 
     // Check page after email step
@@ -450,7 +451,7 @@ async function checkOneAccount(
 
     try {
       await Promise.all([
-        page.waitForNavigation({ timeout: 12000, waitUntil: "networkidle2" }),
+        page.waitForNavigation({ timeout: 12000, waitUntil: "domcontentloaded" }),
         (async () => {
           await page.evaluate(() => {
             const btn = document.querySelector("#passwordNext") as HTMLElement | null;
@@ -488,7 +489,7 @@ async function checkOneAccount(
           await sleep(150);
           try {
             await Promise.all([
-              page.waitForNavigation({ timeout: 10000, waitUntil: "networkidle2" }),
+              page.waitForNavigation({ timeout: 10000, waitUntil: "domcontentloaded" }),
               (async () => {
                 await page.evaluate(() => {
                   const btn = document.querySelector('#totpNext, [jsname="LgbsSe"], button[type="submit"]') as HTMLElement | null;
