@@ -143,10 +143,7 @@ async function checkOneAccount(
     // Android/ARM specific flags
     ...(isAndroid ? [
       "--no-zygote",
-      "--single-process",
       "--disable-features=VizDisplayCompositor",
-      "--disable-software-rasterizer",
-      "--run-all-compositor-stages-before-draw",
     ] : []),
   ];
 
