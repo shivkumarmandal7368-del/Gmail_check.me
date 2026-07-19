@@ -447,10 +447,10 @@ export async function browserLoginCheck(
 ): Promise<BrowserLoginResult[]> {
   const results: BrowserLoginResult[] = [];
   for (const cred of credentials) {
-    const result = await checkOneAccount(cred.email, cred.password, cred.totp, proxy).catch(() => ({
+    const result = await checkOneAccount(cred.email, cred.password, cred.totp, proxy).catch((err: unknown) => ({
       email: cred.email,
       status: "unknown" as BrowserLoginStatus,
-      reason: "Browser check failed unexpectedly",
+      reason: `Browser check failed: ${err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)}`,
       totpCode: null,
     }));
     results.push(result);
