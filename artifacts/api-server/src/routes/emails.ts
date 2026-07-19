@@ -72,12 +72,12 @@ router.post("/emails/browser-check", async (req, res) => {
     res.status(400).json({ error: parsed.error.message });
     return;
   }
-  const { credentials } = parsed.data;
+  const { credentials, proxy } = parsed.data;
   if (credentials.length === 0) {
     res.status(400).json({ error: "No credentials provided" });
     return;
   }
-  const results = await browserLoginCheck(credentials as Array<{ email: string; password: string; totp?: string }>);
+  const results = await browserLoginCheck(credentials as Array<{ email: string; password: string; totp?: string }>, proxy);
   res.json({
     results,
     total: results.length,

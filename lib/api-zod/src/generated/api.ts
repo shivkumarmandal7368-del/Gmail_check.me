@@ -59,7 +59,8 @@ export const BrowserCheckEmailsBody = zod.object({
   "email": zod.string(),
   "password": zod.string(),
   "totp": zod.string().optional().describe('Base32 TOTP secret from the authenticator app setup (optional — for 2FA accounts)')
-})).max(browserCheckEmailsBodyCredentialsMax)
+})).max(browserCheckEmailsBodyCredentialsMax),
+  "proxy": zod.string().optional().describe('Proxy URL to route browser traffic through (e.g. http://user:pass@host:port or socks5://host:port)')
 })
 
 export const BrowserCheckEmailsResponse = zod.object({

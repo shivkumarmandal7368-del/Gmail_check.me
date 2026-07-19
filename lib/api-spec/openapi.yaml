@@ -246,6 +246,9 @@ components:
           maxItems: 50
           items:
             $ref: "#/components/schemas/LoginCredential"
+        proxy:
+          type: string
+          description: "Proxy URL to route browser traffic through (e.g. http://user:pass@host:port or socks5://host:port)"
 
     BrowserLoginResult:
       type: object

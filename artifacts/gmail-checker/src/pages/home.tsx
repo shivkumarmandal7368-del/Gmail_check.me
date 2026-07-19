@@ -2,6 +2,7 @@ import React, { useState } from "react"
 import { useCheckEmails, useGetEmailStats, useLoginCheckEmails, useBrowserCheckEmails } from "@workspace/api-client-react"
 import type { EmailResult, EmailStats, LoginResult, BrowserLoginResult } from "@workspace/api-client-react"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
@@ -396,6 +397,7 @@ function LoginChecker() {
 /* ───────────────────────── BROWSER CHECKER ───────────────────────── */
 function BrowserChecker() {
   const [inputText, setInputText] = useState("");
+  const [proxy, setProxy] = useState("");
   const [results, setResults] = useState<BrowserLoginResult[]>([]);
   const [activeList, setActiveList] = useState<"opened" | "not_opened">("opened");
   const [progress, setProgress] = useState(0);
@@ -428,7 +430,7 @@ function BrowserChecker() {
     }, 1000);
 
     browserMutation.mutate(
-      { data: { credentials } },
+      { data: { credentials, ...(proxy.trim() ? { proxy: proxy.trim() } : {}) } },
       {
         onSuccess: (data) => {
           clearInterval(iv);
@@ -457,10 +459,26 @@ function BrowserChecker() {
           <CardContent className="space-y-3">
             <Textarea
               placeholder={"email@gmail.com:password\nemail2@gmail.com:password:2FA_SECRET"}
-              className="min-h-[240px] resize-y bg-background/50 font-mono text-sm leading-relaxed"
+              className="min-h-[200px] resize-y bg-background/50 font-mono text-sm leading-relaxed"
               value={inputText}
               onChange={e => setInputText(e.target.value)}
             />
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+                Proxy (optional)
+              </label>
+              <Input
+                placeholder="http://user:pass@host:port"
+                className="font-mono text-sm bg-background/50 border-border h-8"
+                value={proxy}
+                onChange={e => setProxy(e.target.value)}
+              />
+              {proxy.trim() && (
+                <p className="text-[10px] font-mono text-primary/80">
+                  🔀 Traffic will be routed via proxy
+                </p>
+              )}
+            </div>
             <div className="text-xs text-muted-foreground font-mono bg-muted/30 rounded p-2 border border-border space-y-1">
               <p className="text-foreground/70 font-medium">Format:</p>
               <p><span className="text-primary">email:password</span></p>

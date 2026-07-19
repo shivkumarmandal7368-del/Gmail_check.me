@@ -29,10 +29,25 @@ async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function parseProxy(proxy: string): { server: string; username?: string; password?: string } {
+  try {
+    const url = new URL(proxy);
+    // server without credentials e.g. http://host:port
+    const server = `${url.protocol}//${url.host}`;
+    const username = url.username ? decodeURIComponent(url.username) : undefined;
+    const password = url.password ? decodeURIComponent(url.password) : undefined;
+    return { server, username, password };
+  } catch {
+    // fallback: treat the whole string as server
+    return { server: proxy };
+  }
+}
+
 async function checkOneAccount(
   email: string,
   password: string,
   totpSecret?: string,
+  proxy?: string,
 ): Promise<BrowserLoginResult> {
   let totpCode: string | null = null;
   if (totpSecret) {
@@ -43,24 +58,36 @@ async function checkOneAccount(
   const StealthPlugin = (await import("puppeteer-extra-plugin-stealth")).default;
   puppeteerExtra.use(StealthPlugin());
 
+  const proxyParsed = proxy ? parseProxy(proxy) : null;
+  const launchArgs = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-extensions",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-size=1280,800",
+  ];
+  if (proxyParsed) {
+    launchArgs.push(`--proxy-server=${proxyParsed.server}`);
+  }
+
   const browser = await puppeteerExtra.launch({
     executablePath: getChromiumPath(),
     headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--disable-extensions",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--window-size=1280,800",
-    ],
+    args: launchArgs,
     defaultViewport: { width: 1280, height: 800 },
     timeout: BROWSER_TIMEOUT,
   });
 
   const page = await browser.newPage();
+
+  // Authenticate with proxy if credentials provided
+  if (proxyParsed?.username && proxyParsed?.password) {
+    await page.authenticate({ username: proxyParsed.username, password: proxyParsed.password });
+  }
+
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
   );
@@ -222,11 +249,12 @@ async function checkOneAccount(
 
 export async function browserLoginCheck(
   credentials: Array<{ email: string; password: string; totp?: string }>,
+  proxy?: string,
 ): Promise<BrowserLoginResult[]> {
   const results: BrowserLoginResult[] = [];
   // One at a time to avoid memory pressure on Replit
   for (const cred of credentials) {
-    const result = await checkOneAccount(cred.email, cred.password, cred.totp).catch(() => ({
+    const result = await checkOneAccount(cred.email, cred.password, cred.totp, proxy).catch(() => ({
       email: cred.email,
       status: "unknown" as BrowserLoginStatus,
       reason: "Browser check failed unexpectedly",
