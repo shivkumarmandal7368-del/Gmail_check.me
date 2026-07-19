@@ -18,11 +18,38 @@ export interface BrowserLoginResult {
 const BROWSER_TIMEOUT = 60000;
 
 function getChromiumPath(): string {
+  // Try which chromium first
   try {
-    return execSync("which chromium", { encoding: "utf8" }).trim();
-  } catch {
-    return "/nix/store/qa9cnw4v5xkxyip6mb9kxqfq1z4x2dx1-chromium-138.0.7204.100/bin/chromium";
+    const path = execSync("which chromium", { encoding: "utf8" }).trim();
+    if (path) return path;
+  } catch {}
+
+  // Try which chromium-browser
+  try {
+    const path = execSync("which chromium-browser", { encoding: "utf8" }).trim();
+    if (path) return path;
+  } catch {}
+
+  // Try which google-chrome
+  try {
+    const path = execSync("which google-chrome", { encoding: "utf8" }).trim();
+    if (path) return path;
+  } catch {}
+
+  // Termux-specific paths
+  const termuxPaths = [
+    "/data/data/com.termux/files/usr/bin/chromium",
+    "/data/data/com.termux/files/usr/bin/chromium-browser",
+  ];
+  for (const p of termuxPaths) {
+    try {
+      execSync(`test -f "${p}"`, { encoding: "utf8" });
+      return p;
+    } catch {}
   }
+
+  // Replit/Nix fallback
+  return "/nix/store/qa9cnw4v5xkxyip6mb9kxqfq1z4x2dx1-chromium-138.0.7204.100/bin/chromium";
 }
 
 async function sleep(ms: number) {
