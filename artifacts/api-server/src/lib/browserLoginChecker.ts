@@ -399,16 +399,27 @@ async function checkOneAccount(
 
     await sleep(rand(1500, 3000));
 
-    // If still on identifier page, try one more time
+    // If still on identifier page, try multiple strategies
     if (page.url().includes("identifier")) {
+      // Try form submit
       await page.evaluate(() => {
         const btn = document.querySelector("#identifierNext") as HTMLElement | null;
         if (btn) btn.click();
+        const form = document.querySelector("form") as HTMLFormElement | null;
+        if (form) form.submit();
       });
-      await sleep(500);
+      await sleep(1000);
       await page.keyboard.press("Enter");
       await page.waitForNavigation({ timeout: 10000, waitUntil: "networkidle2" }).catch(() => {});
       await sleep(rand(1000, 2000));
+
+      // Save debug screenshot so we can see what Google is showing
+      try {
+        const fs = await import("fs/promises");
+        await fs.mkdir("/tmp/gmail-debug", { recursive: true });
+        await (page as any).screenshot({ path: `/tmp/gmail-debug/identifier-page-${Date.now()}.png` });
+        console.log("[DEBUG] Screenshot saved to /tmp/gmail-debug/");
+      } catch {}
     }
 
     // Check page after email step
