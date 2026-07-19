@@ -376,41 +376,35 @@ async function checkOneAccount(
     }, email);
     await sleep(600); // let Google's JS validate the email
 
-    // Click Next — try pointer events + tap (touch) for ARM compatibility
-    const clickNext = async () => {
-      // Pointer + mouse + click events
-      await page.evaluate(() => {
-        const btn = document.querySelector("#identifierNext") as HTMLElement | null;
-        if (!btn) return;
-        ["pointerdown","mousedown","pointerup","mouseup","click"].forEach(type => {
-          btn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, buttons: 1 }));
-        });
-      });
-      await sleep(300);
-      if (!page.url().includes("identifier")) return;
+    // Try Enter key directly on the email field (simplest approach)
+    await page.focus("#identifierId").catch(() => {});
+    await sleep(200);
+    await page.keyboard.press("Enter");
+    await sleep(300);
 
-      // Tap (touch event) — works best on ARM Android
-      try {
-        const btn = await page.$("#identifierNext");
-        if (btn) {
-          const box = await btn.boundingBox();
-          if (box) await page.tap(`#identifierNext`).catch(() =>
-            page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
-          );
-        }
-      } catch {}
-      await sleep(300);
-      if (!page.url().includes("identifier")) return;
-
-      // Enter key fallback
-      await page.focus("#identifierId").catch(() => {});
+    // If still on identifier, Tab to Next button and activate it
+    if (page.url().includes("identifier")) {
+      // Tab past "Forgot email" link to reach Next button
+      await page.keyboard.press("Tab");
+      await sleep(100);
+      await page.keyboard.press("Tab");
+      await sleep(100);
       await page.keyboard.press("Enter");
-    };
+      await sleep(300);
+    }
 
-    await Promise.race([
-      page.waitForNavigation({ timeout: 10000, waitUntil: "networkidle2" }).catch(() => {}),
-      clickNext(),
-    ]);
+    // Last resort: touchscreen tap on Next button coordinates
+    if (page.url().includes("identifier")) {
+      try {
+        const box = await page.$eval("#identifierNext", el => {
+          const r = el.getBoundingClientRect();
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        });
+        await page.touchscreen.tap(box.x, box.y);
+      } catch {}
+    }
+
+    await page.waitForNavigation({ timeout: 8000, waitUntil: "networkidle2" }).catch(() => {});
     await sleep(400);
 
     // Check page after email step
