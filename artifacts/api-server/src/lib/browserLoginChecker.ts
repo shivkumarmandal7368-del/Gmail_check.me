@@ -262,16 +262,12 @@ async function checkOneAccount(
     return { url, text };
   }
 
-  // Helper: human-like typing
+  // Helper: fast typing (reduced delays)
   async function humanType(selector: string, text: string) {
     await page.click(selector);
-    await sleep(rand(200, 500));
-    for (const char of text) {
-      await page.type(selector, char, { delay: rand(50, 120) });
-      // Occasional longer pause (like a real human)
-      if (Math.random() < 0.05) await sleep(rand(200, 400));
-    }
-    await sleep(rand(200, 400));
+    await sleep(50);
+    await page.type(selector, text, { delay: isAndroid ? 20 : rand(30, 60) });
+    await sleep(100);
   }
 
   // Helper: human-like mouse move then click
@@ -360,49 +356,40 @@ async function checkOneAccount(
   }
 
   try {
-    // Random initial delay to stagger requests
-    await sleep(rand(500, 2000));
-
     // ── Step 1: Open Gmail login ──────────────────────────────────
     await page.goto(
       "https://accounts.google.com/v3/signin/identifier?service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
       { waitUntil: "networkidle2", timeout: BROWSER_TIMEOUT }
     );
-
-    // Short human pause after page load
-    await sleep(rand(800, 2000));
+    await sleep(300);
 
     // ── Step 2: Enter email ───────────────────────────────────────
     await page.waitForSelector("#identifierId", { timeout: 15000 });
-    await page.click("#identifierId");
-    await sleep(rand(200, 400));
     await humanType("#identifierId", email);
-    await sleep(rand(500, 800));
+    await sleep(200);
 
-    // Submit email — try all strategies, stop as soon as page navigates
+    // Submit email — all strategies fire quickly
     const submitEmail = async () => {
-      // S1: JS focus + click
+      // S1: JS click
       await page.evaluate(() => {
         const btn = document.querySelector("#identifierNext") as HTMLElement | null;
         if (btn) { btn.focus(); btn.click(); }
       });
-      await sleep(800);
+      await sleep(400);
       if (!page.url().includes("identifier")) return;
 
-      // S2: Enter key on the input
+      // S2: Enter on input
       await page.focus("#identifierId").catch(() => {});
-      await sleep(200);
       await page.keyboard.press("Enter");
-      await sleep(800);
+      await sleep(400);
       if (!page.url().includes("identifier")) return;
 
-      // S3: Tab to button, then Space + Enter
+      // S3: Tab + Space + Enter
       await page.keyboard.press("Tab");
-      await sleep(300);
+      await sleep(150);
       await page.keyboard.press("Space");
-      await sleep(200);
       await page.keyboard.press("Enter");
-      await sleep(800);
+      await sleep(400);
       if (!page.url().includes("identifier")) return;
 
       // S4: mouse bounding-box click
@@ -413,14 +400,14 @@ async function checkOneAccount(
           if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
         }
       } catch {}
-      await sleep(800);
+      await sleep(400);
     };
 
     await Promise.race([
-      page.waitForNavigation({ timeout: 25000, waitUntil: "networkidle2" }).catch(() => {}),
+      page.waitForNavigation({ timeout: 12000, waitUntil: "networkidle2" }).catch(() => {}),
       submitEmail(),
     ]);
-    await sleep(rand(1000, 2000));
+    await sleep(500);
 
     // Check page after email step
     {
@@ -461,14 +448,22 @@ async function checkOneAccount(
     }
 
     await humanType(pwSelector, password);
+    await sleep(150);
 
     try {
       await Promise.all([
-        page.waitForNavigation({ timeout: 25000, waitUntil: "networkidle2" }),
-        humanClick("#passwordNext"),
+        page.waitForNavigation({ timeout: 12000, waitUntil: "networkidle2" }),
+        (async () => {
+          await page.evaluate(() => {
+            const btn = document.querySelector("#passwordNext") as HTMLElement | null;
+            if (btn) { btn.focus(); btn.click(); }
+          });
+          await sleep(300);
+          await page.keyboard.press("Enter");
+        })(),
       ]);
     } catch { /* navigation may not happen */ }
-    await sleep(rand(1000, 2500));
+    await sleep(500);
 
     let { url, text } = await pageState();
 
@@ -490,16 +485,23 @@ async function checkOneAccount(
         const codeInput = await page.$('input[name="totpPin"], input[name="Pin"], input[id="totpPin"], input[type="tel"]').catch(() => null);
         if (codeInput) {
           await codeInput.click();
-          await sleep(rand(300, 600));
-          await codeInput.type(totpCode, { delay: rand(60, 100) });
-          await sleep(rand(300, 500));
+          await sleep(100);
+          await codeInput.type(totpCode, { delay: 20 });
+          await sleep(150);
           try {
             await Promise.all([
-              page.waitForNavigation({ timeout: 15000, waitUntil: "networkidle2" }),
-              humanClick('#totpNext, [jsname="LgbsSe"], button[type="submit"]'),
+              page.waitForNavigation({ timeout: 10000, waitUntil: "networkidle2" }),
+              (async () => {
+                await page.evaluate(() => {
+                  const btn = document.querySelector('#totpNext, [jsname="LgbsSe"], button[type="submit"]') as HTMLElement | null;
+                  if (btn) btn.click();
+                });
+                await sleep(200);
+                await page.keyboard.press("Enter");
+              })(),
             ]);
-          } catch { /* navigation may not happen if wrong code */ }
-          await sleep(rand(1000, 2000));
+          } catch { /* ignore */ }
+          await sleep(400);
           ({ url, text } = await pageState());
         }
       } else {
