@@ -92,56 +92,35 @@ async function checkOneAccount(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
   );
 
-  try {
-    // ── Step 1: Open Gmail login ──────────────────────────────────
-    await page.goto(
-      "https://accounts.google.com/v3/signin/identifier?service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
-      { waitUntil: "networkidle2", timeout: BROWSER_TIMEOUT }
-    );
+  // Helper: snapshot current page state
+  async function pageState() {
+    const url = page.url();
+    const text = (await page.evaluate(() => document.body?.innerText ?? "").catch(() => "")).toLowerCase();
+    return { url, text };
+  }
 
-    // ── Step 2: Enter email ───────────────────────────────────────
-    // Correct selector: id="identifierId", type="text"
-    await page.waitForSelector("#identifierId", { timeout: 15000 });
-    await sleep(400);
-    await page.click("#identifierId");
-    await page.type("#identifierId", email, { delay: 60 });
-    await sleep(400);
-
-    await Promise.all([
-      page.waitForNavigation({ timeout: 20000, waitUntil: "networkidle2" }),
-      page.click("#identifierNext"),
-    ]);
-    await sleep(1200);
-
-    // Check for "couldn't find your Google Account"
-    const bodyText = (await page.evaluate(() => document.body?.innerText ?? "")).toLowerCase();
+  // Helper: classify any page state into a result (or null = not yet deterministic)
+  async function classify(url: string, text: string): Promise<BrowserLoginResult | null> {
+    // Mailbox opened
     if (
-      bodyText.includes("couldn't find your google account") ||
-      bodyText.includes("no account found") ||
-      bodyText.includes("find your google account")
+      url.includes("mail.google.com") ||
+      url.includes("gmail.com/mail") ||
+      text.includes("inbox") ||
+      text.includes("compose") ||
+      text.includes("primary") ||
+      (await page.$('[gh="cm"], [data-tooltip="Compose"], [aria-label="Compose"]').catch(() => null)) !== null
+    ) {
+      return { email, status: "opened", reason: "Mailbox opened successfully ✅", totpCode };
+    }
+    // Account not found / wrong email
+    if (
+      text.includes("couldn't find your google account") ||
+      text.includes("no account found") ||
+      text.includes("find your google account")
     ) {
       return { email, status: "wrong_password", reason: "Google account not found", totpCode };
     }
-
-    // ── Step 3: Enter password ────────────────────────────────────
-    // Password field: input[name="Passwd"] or input[type="password"]
-    const pwSelector = 'input[name="Passwd"], input[type="password"]:not([name="hiddenPassword"])';
-    await page.waitForSelector(pwSelector, { timeout: 15000 });
-    await sleep(400);
-    await page.click(pwSelector);
-    await page.type(pwSelector, password, { delay: 70 });
-    await sleep(400);
-
-    await Promise.all([
-      page.waitForNavigation({ timeout: 25000, waitUntil: "networkidle2" }),
-      page.click("#passwordNext"),
-    ]);
-    await sleep(1500);
-
-    let url = page.url();
-    let text = (await page.evaluate(() => document.body?.innerText ?? "")).toLowerCase();
-
-    // ── Wrong password ────────────────────────────────────────────
+    // Wrong password
     if (
       text.includes("wrong password") ||
       text.includes("didn't recognize") ||
@@ -153,58 +132,7 @@ async function checkOneAccount(
     ) {
       return { email, status: "wrong_password", reason: "Wrong password — credentials are invalid", totpCode };
     }
-
-    // ── 2FA code required ─────────────────────────────────────────
-    const is2fa =
-      text.includes("2-step verification") ||
-      text.includes("authenticator app") ||
-      text.includes("enter the code") ||
-      text.includes("verification code") ||
-      (await page.$('input[name="totpPin"], input[name="Pin"], input[id="totpPin"]') !== null);
-
-    if (is2fa) {
-      if (totpCode) {
-        const codeInput = await page.$('input[name="totpPin"], input[name="Pin"], input[id="totpPin"], input[type="tel"]');
-        if (codeInput) {
-          await codeInput.click();
-          await codeInput.type(totpCode, { delay: 80 });
-          await sleep(300);
-          try {
-            await Promise.all([
-              page.waitForNavigation({ timeout: 15000, waitUntil: "networkidle2" }),
-              page.click('#totpNext, [jsname="LgbsSe"], button[type="submit"]'),
-            ]);
-          } catch { /* navigation may not happen if wrong code */ }
-          await sleep(1500);
-          url = page.url();
-          text = (await page.evaluate(() => document.body?.innerText ?? "")).toLowerCase();
-        }
-      } else {
-        return { email, status: "2fa_required", reason: "2FA code required — provide TOTP secret", totpCode };
-      }
-    }
-
-    // ── Verification / security challenge ─────────────────────────
-    if (
-      text.includes("verify your identity") ||
-      text.includes("verify your info") ||
-      text.includes("verify it's you") ||
-      text.includes("choose a way to verify") ||
-      (text.includes("verify") && text.includes("phone")) ||
-      text.includes("device check") ||
-      text.includes("confirm it's you") ||
-      url.includes("challenge") ||
-      (url.includes("verify") && !url.includes("mail"))
-    ) {
-      return {
-        email,
-        status: "verification_required",
-        reason: "Google is asking for phone/device verification",
-        totpCode,
-      };
-    }
-
-    // ── Wrong 2FA code ────────────────────────────────────────────
+    // Wrong 2FA code
     if (
       text.includes("wrong code") ||
       text.includes("that code didn't work") ||
@@ -218,24 +146,145 @@ async function checkOneAccount(
         totpCode,
       };
     }
-
-    // ── Mailbox opened ────────────────────────────────────────────
+    // Verification / challenge
     if (
-      url.includes("mail.google.com") ||
-      url.includes("gmail.com/mail") ||
-      text.includes("inbox") ||
-      text.includes("compose") ||
-      text.includes("primary") ||
-      (await page.$('[gh="cm"], [data-tooltip="Compose"], [aria-label="Compose"]') !== null)
+      text.includes("verify your identity") ||
+      text.includes("verify your info") ||
+      text.includes("verify it's you") ||
+      text.includes("choose a way to verify") ||
+      (text.includes("verify") && text.includes("phone")) ||
+      text.includes("device check") ||
+      text.includes("confirm it's you") ||
+      text.includes("unusual activity") ||
+      text.includes("suspicious activity") ||
+      text.includes("protect your account") ||
+      url.includes("challenge") ||
+      url.includes("InterstitialConfirmation") ||
+      (url.includes("verify") && !url.includes("mail"))
     ) {
-      return { email, status: "opened", reason: "Mailbox opened successfully ✅", totpCode };
+      return {
+        email,
+        status: "verification_required",
+        reason: "Google is asking for phone/device verification or account protection",
+        totpCode,
+      };
+    }
+    return null;
+  }
+
+  try {
+    // ── Step 1: Open Gmail login ──────────────────────────────────
+    await page.goto(
+      "https://accounts.google.com/v3/signin/identifier?service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
+      { waitUntil: "networkidle2", timeout: BROWSER_TIMEOUT }
+    );
+
+    // ── Step 2: Enter email ───────────────────────────────────────
+    await page.waitForSelector("#identifierId", { timeout: 15000 });
+    await sleep(400);
+    await page.click("#identifierId");
+    await page.type("#identifierId", email, { delay: 60 });
+    await sleep(400);
+
+    try {
+      await Promise.all([
+        page.waitForNavigation({ timeout: 20000, waitUntil: "networkidle2" }),
+        page.click("#identifierNext"),
+      ]);
+    } catch { /* navigation may not happen on some flows */ }
+    await sleep(1500);
+
+    // Check page after email step — might already be a terminal state
+    {
+      const { url, text } = await pageState();
+      // Google rejected the sign-in (usually datacenter proxy detected)
+      if (url.includes("/signin/rejected") || url.includes("signin/rejected")) {
+        return {
+          email,
+          status: "verification_required",
+          reason: "Google rejected sign-in — proxy IP is a datacenter/flagged IP. Use a residential proxy.",
+          totpCode,
+        };
+      }
+      const early = await classify(url, text);
+      if (early) return early;
     }
 
-    // ── Fallback: return what page says ──────────────────────────
+    // ── Step 3: Enter password ────────────────────────────────────
+    const pwSelector = 'input[name="Passwd"], input[type="password"]:not([name="hiddenPassword"])';
+    const pwFound = await page.waitForSelector(pwSelector, { timeout: 12000 }).catch(() => null);
+
+    if (!pwFound) {
+      // Password field never appeared — check what we're looking at
+      const { url, text } = await pageState();
+      const classified = await classify(url, text);
+      if (classified) return classified;
+      return {
+        email,
+        status: "verification_required",
+        reason: `Google did not show password field — page: ${url.slice(0, 80)}`,
+        totpCode,
+      };
+    }
+
+    await sleep(400);
+    await page.click(pwSelector);
+    await page.type(pwSelector, password, { delay: 70 });
+    await sleep(400);
+
+    try {
+      await Promise.all([
+        page.waitForNavigation({ timeout: 25000, waitUntil: "networkidle2" }),
+        page.click("#passwordNext"),
+      ]);
+    } catch { /* navigation may not happen */ }
+    await sleep(1500);
+
+    let { url, text } = await pageState();
+
+    // Check for early terminal state after password
+    {
+      const classified = await classify(url, text);
+      if (classified) return classified;
+    }
+
+    // ── Step 4: 2FA / TOTP ────────────────────────────────────────
+    const is2fa =
+      text.includes("2-step verification") ||
+      text.includes("authenticator app") ||
+      text.includes("enter the code") ||
+      text.includes("verification code") ||
+      (await page.$('input[name="totpPin"], input[name="Pin"], input[id="totpPin"]').catch(() => null)) !== null;
+
+    if (is2fa) {
+      if (totpCode) {
+        const codeInput = await page.$('input[name="totpPin"], input[name="Pin"], input[id="totpPin"], input[type="tel"]').catch(() => null);
+        if (codeInput) {
+          await codeInput.click();
+          await codeInput.type(totpCode, { delay: 80 });
+          await sleep(300);
+          try {
+            await Promise.all([
+              page.waitForNavigation({ timeout: 15000, waitUntil: "networkidle2" }),
+              page.click('#totpNext, [jsname="LgbsSe"], button[type="submit"]'),
+            ]);
+          } catch { /* navigation may not happen if wrong code */ }
+          await sleep(1500);
+          ({ url, text } = await pageState());
+        }
+      } else {
+        return { email, status: "2fa_required", reason: "2FA code required — provide TOTP secret", totpCode };
+      }
+    }
+
+    // ── Final classification ──────────────────────────────────────
+    const final = await classify(url, text);
+    if (final) return final;
+
     return {
       email,
       status: "unknown",
-      reason: `Unexpected page (${url.slice(0, 60)})`,
+      reason: `Unexpected page after login (${url.slice(0, 80)})`,
       totpCode,
     };
 
