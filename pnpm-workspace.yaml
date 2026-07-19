@@ -99,7 +99,7 @@ overrides:
   "esbuild>@esbuild/android-arm64": '-'
   "esbuild>@esbuild/android-x64": '-'
   "esbuild>@esbuild/openharmony-arm64": '-'
-  "lightningcss>lightningcss-android-arm64": "-"
+  # lightningcss android kept for Termux/Android compatibility
   "lightningcss>lightningcss-darwin-arm64": "-"
   "lightningcss>lightningcss-darwin-x64": "-"
   "lightningcss>lightningcss-freebsd-x64": "-"
@@ -108,7 +108,7 @@ overrides:
   "lightningcss>lightningcss-linux-arm64-musl": "-"
   "lightningcss>lightningcss-linux-x64-musl": "-"
   # lightningcss win32 kept for Windows compatibility
-  "@tailwindcss/oxide>@tailwindcss/oxide-android-arm64": "-"
+  # tailwindcss oxide android kept for Termux/Android compatibility
   "@tailwindcss/oxide>@tailwindcss/oxide-darwin-arm64": "-"
   "@tailwindcss/oxide>@tailwindcss/oxide-darwin-x64": "-"
   "@tailwindcss/oxide>@tailwindcss/oxide-freebsd-x64": "-"
