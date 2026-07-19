@@ -374,47 +374,53 @@ async function checkOneAccount(
 
     // ── Step 2: Enter email ───────────────────────────────────────
     await page.waitForSelector("#identifierId", { timeout: 15000 });
+    await page.click("#identifierId");
+    await sleep(rand(200, 400));
     await humanType("#identifierId", email);
-    await sleep(rand(300, 600));
+    await sleep(rand(500, 800));
 
-    // Multiple click strategies for Android/ARM compatibility
-    const navigated = await Promise.race([
-      page.waitForNavigation({ timeout: 20000, waitUntil: "networkidle2" }).then(() => true).catch(() => false),
-      (async () => {
-        // Strategy 1: JS click
-        await page.evaluate(() => {
-          const btn = document.querySelector("#identifierNext") as HTMLElement | null;
-          if (btn) btn.click();
-        });
-        await sleep(500);
-        // Strategy 2: Enter key
-        await page.keyboard.press("Enter");
-        await sleep(500);
-        // Strategy 3: Tab then Enter
-        await page.keyboard.press("Tab");
-        await sleep(200);
-        await page.keyboard.press("Enter");
-        return false;
-      })(),
-    ]);
-
-    await sleep(rand(1500, 3000));
-
-    // If still on identifier page, try multiple strategies
-    if (page.url().includes("identifier")) {
-      // Try form submit
+    // Submit email — try all strategies, stop as soon as page navigates
+    const submitEmail = async () => {
+      // S1: JS focus + click
       await page.evaluate(() => {
         const btn = document.querySelector("#identifierNext") as HTMLElement | null;
-        if (btn) btn.click();
-        const form = document.querySelector("form") as HTMLFormElement | null;
-        if (form) form.submit();
+        if (btn) { btn.focus(); btn.click(); }
       });
-      await sleep(1000);
-      await page.keyboard.press("Enter");
-      await page.waitForNavigation({ timeout: 10000, waitUntil: "networkidle2" }).catch(() => {});
-      await sleep(rand(1000, 2000));
+      await sleep(800);
+      if (!page.url().includes("identifier")) return;
 
-    }
+      // S2: Enter key on the input
+      await page.focus("#identifierId").catch(() => {});
+      await sleep(200);
+      await page.keyboard.press("Enter");
+      await sleep(800);
+      if (!page.url().includes("identifier")) return;
+
+      // S3: Tab to button, then Space + Enter
+      await page.keyboard.press("Tab");
+      await sleep(300);
+      await page.keyboard.press("Space");
+      await sleep(200);
+      await page.keyboard.press("Enter");
+      await sleep(800);
+      if (!page.url().includes("identifier")) return;
+
+      // S4: mouse bounding-box click
+      try {
+        const btn = await page.$("#identifierNext");
+        if (btn) {
+          const box = await btn.boundingBox();
+          if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        }
+      } catch {}
+      await sleep(800);
+    };
+
+    await Promise.race([
+      page.waitForNavigation({ timeout: 25000, waitUntil: "networkidle2" }).catch(() => {}),
+      submitEmail(),
+    ]);
+    await sleep(rand(1000, 2000));
 
     // Check page after email step
     {
