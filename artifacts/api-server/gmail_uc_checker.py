@@ -98,6 +98,55 @@ if (window.Notification) {
 
 // Touch support — real Android device always has ontouchstart
 window.ontouchstart = function(){};
+
+// ── WebGL fingerprint spoof — Pixel 8 uses Adreno 740 ──────────────────────
+(function() {
+  var getParam = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function(param) {
+    // UNMASKED_VENDOR_WEBGL
+    if (param === 37445) return 'Qualcomm';
+    // UNMASKED_RENDERER_WEBGL
+    if (param === 37446) return 'Adreno (TM) 740';
+    return getParam.call(this, param);
+  };
+  if (window.WebGL2RenderingContext) {
+    var getParam2 = WebGL2RenderingContext.prototype.getParameter;
+    WebGL2RenderingContext.prototype.getParameter = function(param) {
+      if (param === 37445) return 'Qualcomm';
+      if (param === 37446) return 'Adreno (TM) 740';
+      return getParam2.call(this, param);
+    };
+  }
+})();
+
+// ── Canvas fingerprint noise — prevents identical canvas hashes ─────────────
+(function() {
+  var origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+  HTMLCanvasElement.prototype.toDataURL = function(type) {
+    var ctx = this.getContext('2d');
+    if (ctx) {
+      // Add imperceptible noise — changes fingerprint hash but looks identical
+      var imageData = ctx.getImageData(0, 0, this.width || 1, this.height || 1);
+      if (imageData.data.length > 0) {
+        imageData.data[0] = imageData.data[0] ^ 1;
+        ctx.putImageData(imageData, 0, 0);
+      }
+    }
+    return origToDataURL.apply(this, arguments);
+  };
+})();
+
+// ── AudioContext fingerprint noise ──────────────────────────────────────────
+if (window.AudioContext || window.webkitAudioContext) {
+  var AC = window.AudioContext || window.webkitAudioContext;
+  var origCreateOscillator = AC.prototype.createOscillator;
+  AC.prototype.createOscillator = function() {
+    var osc = origCreateOscillator.call(this);
+    var origStart = osc.start.bind(osc);
+    osc.start = function(when) { return origStart(when || 0); };
+    return osc;
+  };
+}
 """
 
 
@@ -244,7 +293,14 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     chromium_path = get_chromium_path()
     log(f"Chromium: {chromium_path}, headless={headless}, display={display}")
 
+    # Persistent profile per email — Google sees same "device" every time
+    safe_email = email.replace("@", "_at_").replace(".", "_")
+    profile_dir = os.path.join(tempfile.gettempdir(), "gmail_checker_profiles", safe_email)
+    os.makedirs(profile_dir, exist_ok=True)
+    log(f"Chrome profile: {profile_dir}")
+
     options = uc.ChromeOptions()
+    options.add_argument(f"--user-data-dir={profile_dir}")
     proxy_ext_path: str | None = None
 
     # Proxy configuration
