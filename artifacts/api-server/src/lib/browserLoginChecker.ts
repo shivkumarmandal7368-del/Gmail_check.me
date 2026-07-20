@@ -358,15 +358,17 @@ async function checkOneAccount(
 
   try {
     // ── Step 1: Open Gmail login ──────────────────────────────────
+    console.log(`[BROWSER] ${email} — Step 1: Opening Google login...`);
     await page.goto(
       "https://accounts.google.com/v3/signin/identifier?service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
       { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT }
     );
+    console.log(`[BROWSER] ${email} — Step 1 done. URL: ${page.url().slice(0,60)}`);
     await sleep(300);
 
     // ── Step 2: Enter email ───────────────────────────────────────
+    console.log(`[BROWSER] ${email} — Step 2: Typing email...`);
     await page.waitForSelector("#identifierId", { timeout: 15000 });
-    // Use React-compatible value setter so Google's JS recognizes the input
     await page.evaluate((emailVal: string) => {
       const input = document.querySelector("#identifierId") as HTMLInputElement | null;
       if (!input) return;
@@ -375,17 +377,15 @@ async function checkOneAccount(
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
     }, email);
-    await sleep(600); // let Google's JS validate the email
+    await sleep(600);
 
-    // Try Enter key directly on the email field (simplest approach)
+    console.log(`[BROWSER] ${email} — Step 2: Clicking Next...`);
     await page.focus("#identifierId").catch(() => {});
     await sleep(200);
     await page.keyboard.press("Enter");
     await sleep(300);
 
-    // If still on identifier, Tab to Next button and activate it
     if (page.url().includes("identifier")) {
-      // Tab past "Forgot email" link to reach Next button
       await page.keyboard.press("Tab");
       await sleep(100);
       await page.keyboard.press("Tab");
@@ -394,7 +394,6 @@ async function checkOneAccount(
       await sleep(300);
     }
 
-    // Last resort: touchscreen tap on Next button coordinates
     if (page.url().includes("identifier")) {
       try {
         const box = await page.$eval("#identifierNext", el => {
@@ -407,6 +406,7 @@ async function checkOneAccount(
 
     await page.waitForNavigation({ timeout: 8000, waitUntil: "domcontentloaded" }).catch(() => {});
     await sleep(400);
+    console.log(`[BROWSER] ${email} — After email step. URL: ${page.url().slice(0,60)}`);
 
     // Check page after email step
     {
@@ -424,8 +424,10 @@ async function checkOneAccount(
     }
 
     // ── Step 3: Enter password ────────────────────────────────────
+    console.log(`[BROWSER] ${email} — Step 3: Waiting for password field...`);
     const pwSelector = 'input[name="Passwd"], input[type="password"]:not([name="hiddenPassword"])';
     const pwFound = await page.waitForSelector(pwSelector, { timeout: 12000 }).catch(() => null);
+    console.log(`[BROWSER] ${email} — Step 3: pwFound=${!!pwFound} url=${page.url().slice(0,60)}`);
 
     if (!pwFound) {
       const { url, text } = await pageState();
