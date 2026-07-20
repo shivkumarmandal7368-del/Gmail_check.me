@@ -146,17 +146,21 @@ export async function browserLoginCheck(
   credentials: Array<{ email: string; password: string; totp?: string }>,
   proxy?: string,
   concurrency = 3,
+  onAccountComplete?: (result: BrowserLoginResult) => void,
 ): Promise<BrowserLoginResult[]> {
   const tasks = credentials.map(
-    (cred) => () =>
-      checkOneAccount(cred.email, cred.password, cred.totp, proxy).catch(
+    (cred) => async () => {
+      const result = await checkOneAccount(cred.email, cred.password, cred.totp, proxy).catch(
         (err: unknown) => ({
           email: cred.email,
           status: "unknown" as BrowserLoginStatus,
           reason: `Browser check failed: ${err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)}`,
           totpCode: null,
         }),
-      ),
+      );
+      onAccountComplete?.(result);
+      return result;
+    },
   );
   return runWithConcurrency(tasks, concurrency);
 }

@@ -97,6 +97,54 @@ router.post("/emails/browser-check", async (req, res) => {
   });
 });
 
+// SSE streaming endpoint — sends each account result as it completes (real-time progress)
+router.post("/emails/browser-check-stream", async (req, res) => {
+  const parsed = BrowserCheckEmailsBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  const { credentials, proxy } = parsed.data;
+  if (credentials.length === 0) {
+    res.status(400).json({ error: "No credentials provided" });
+    return;
+  }
+  const concurrency = typeof req.body.concurrency === "number"
+    ? Math.max(1, Math.min(10, Math.floor(req.body.concurrency)))
+    : 3;
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  const sendEvent = (data: object) => {
+    try {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      // Force flush if available (Express 5 / Node streams)
+      if (typeof (res as any).flush === "function") (res as any).flush();
+    } catch {}
+  };
+
+  // Send "started" event so client knows total count
+  sendEvent({ type: "started", total: credentials.length, concurrency });
+
+  try {
+    await browserLoginCheck(
+      credentials as Array<{ email: string; password: string; totp?: string }>,
+      proxy,
+      concurrency,
+      (result) => sendEvent({ type: "result", ...result }),
+    );
+  } catch (err) {
+    sendEvent({ type: "error", message: String(err) });
+  }
+
+  sendEvent({ type: "done" });
+  res.end();
+});
+
 router.post("/emails/login-check", async (req, res) => {
   const parsed = LoginCheckEmailsBody.safeParse(req.body);
   if (!parsed.success) {

@@ -399,13 +399,12 @@ function LoginChecker() {
 function BrowserChecker() {
   const [inputText, setInputText] = useState("");
   const [proxy, setProxy] = useState("");
+  const [concurrency, setConcurrency] = useState(3);
   const [results, setResults] = useState<BrowserLoginResult[]>([]);
   const [activeList, setActiveList] = useState<"opened" | "not_opened">("opened");
-  const [progress, setProgress] = useState(0);
-  const [currentIdx, setCurrentIdx] = useState(0);
+  const [isChecking, setIsChecking] = useState(false);
   const [total, setTotal] = useState(0);
-
-  const browserMutation = useBrowserCheckEmails();
+  const abortRef = React.useRef<AbortController | null>(null);
 
   const parseCredentials = (text: string) => {
     return text.split(/\n+/).map(l => l.trim()).filter(Boolean).map(line => {
@@ -420,33 +419,107 @@ function BrowserChecker() {
     }).filter(Boolean) as Array<{ email: string; password: string; totp?: string }>;
   };
 
+  const runStream = async (credentials: Array<{ email: string; password: string; totp?: string }>, appendResults: boolean) => {
+    const abort = new AbortController();
+    abortRef.current = abort;
+
+    if (!appendResults) {
+      setResults([]);
+    }
+    setIsChecking(true);
+    setTotal(prev => appendResults ? prev : credentials.length);
+
+    try {
+      const resp = await fetch("/api/emails/browser-check-stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          credentials,
+          ...(proxy.trim() ? { proxy: proxy.trim() } : {}),
+          concurrency,
+        }),
+        signal: abort.signal,
+      });
+
+      if (!resp.ok || !resp.body) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const blocks = buf.split("\n\n");
+        buf = blocks.pop() ?? "";
+        for (const block of blocks) {
+          const dataLine = block.split("\n").find(l => l.startsWith("data: "));
+          if (!dataLine) continue;
+          try {
+            const evt = JSON.parse(dataLine.slice(6));
+            if (evt.type === "started") {
+              setTotal(appendResults ? (t => t + evt.total) as any : evt.total);
+            } else if (evt.type === "result") {
+              const { type: _t, ...result } = evt;
+              setResults(prev => {
+                // Replace existing entry for this email (retry), or append
+                const idx = prev.findIndex(r => r.email === result.email);
+                if (idx !== -1) {
+                  const next = [...prev];
+                  next[idx] = result as BrowserLoginResult;
+                  return next;
+                }
+                return [...prev, result as BrowserLoginResult];
+              });
+            }
+          } catch {}
+        }
+      }
+    } catch (err: any) {
+      if (err?.name !== "AbortError") console.error("[BrowserChecker]", err);
+    } finally {
+      setIsChecking(false);
+      abortRef.current = null;
+    }
+  };
+
   const handleCheck = () => {
     const credentials = parseCredentials(inputText);
     if (credentials.length === 0) return;
-    setResults([]); setProgress(5); setCurrentIdx(0); setTotal(credentials.length);
+    runStream(credentials, false);
+  };
 
-    // Progress: browser check is slow (~15-30s per account)
-    let done = 0;
-    const iv = setInterval(() => {
-      setProgress(p => Math.min(p + 2, Math.max(5, Math.round((done / credentials.length) * 95))));
-    }, 1000);
+  const handleStop = () => {
+    abortRef.current?.abort();
+  };
 
-    browserMutation.mutate(
-      { data: { credentials, ...(proxy.trim() ? { proxy: proxy.trim() } : {}) } },
-      {
-        onSuccess: (data) => {
-          clearInterval(iv);
-          setProgress(100);
-          setResults(data.results as BrowserLoginResult[]);
-        },
-        onError: () => { clearInterval(iv); setProgress(0); }
-      }
-    );
+  const handleRetry = (email: string) => {
+    const line = inputText.split(/\n+/).find(l => l.trim().startsWith(email + ":"));
+    if (!line) return;
+    const cred = parseCredentials(line);
+    if (cred.length === 0) return;
+    runStream(cred, true);
   };
 
   const opened = results.filter(r => r.status === "opened");
   const notOpened = results.filter(r => r.status !== "opened");
   const displayed = activeList === "opened" ? opened : notOpened;
+  const progress = total > 0 ? Math.round((results.length / total) * 100) : 0;
+
+  const downloadCSV = (rows: BrowserLoginResult[], name: string) => {
+    const header = "email,status,reason,totpCode";
+    const body = rows.map(r =>
+      [r.email, r.status, `"${(r.reason ?? "").replace(/"/g, '""')}"`, r.totpCode ?? ""].join(",")
+    ).join("\n");
+    download(header + "\n" + body, name + ".csv", "text/csv");
+  };
+
+  const downloadJSON = (rows: BrowserLoginResult[], name: string) => {
+    download(JSON.stringify(rows, null, 2), name + ".json", "application/json");
+  };
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -461,28 +534,24 @@ function BrowserChecker() {
           <CardContent className="space-y-3">
             <Textarea
               placeholder={"email@gmail.com:password\nemail2@gmail.com:password:2FA_SECRET"}
-              className="min-h-[200px] resize-y bg-background/50 font-mono text-sm leading-relaxed"
+              className="min-h-[180px] resize-y bg-background/50 font-mono text-sm leading-relaxed"
               value={inputText}
               onChange={e => setInputText(e.target.value)}
+              disabled={isChecking}
             />
-            {/* Proxy warning banner */}
+
+            {/* Proxy */}
             <div className={cn(
               "rounded-lg border p-2.5 text-[11px] font-mono space-y-1",
               proxy.trim()
                 ? "border-green-500/40 bg-green-500/5 text-green-400/90"
                 : "border-yellow-500/40 bg-yellow-500/5 text-yellow-400/90"
             )}>
-              {proxy.trim() ? (
-                <>
-                  <p className="font-semibold">🔀 Proxy active — traffic routed via proxy</p>
-                  <p className="text-yellow-300/70">Make sure it's a residential/mobile proxy, not datacenter.</p>
-                </>
-              ) : (
-                <>
-                  <p className="font-semibold">⚠ Residential proxy required on Replit</p>
-                  <p className="text-yellow-300/70">Google blocks datacenter IPs. Without a proxy all checks return <span className="text-orange-400">verification_required</span>.</p>
-                </>
-              )}
+              {proxy.trim()
+                ? <p className="font-semibold">🔀 Proxy active — traffic routed via proxy</p>
+                : <><p className="font-semibold">⚠ Residential proxy required on Replit</p>
+                    <p className="text-yellow-300/70">Google blocks datacenter IPs. Without proxy all checks return <span className="text-orange-400">verification_required</span>.</p></>
+              }
             </div>
             <div className="space-y-1.5">
               <label className="text-[10px] font-mono uppercase tracking-widest text-yellow-400/80 flex items-center gap-1">
@@ -490,31 +559,53 @@ function BrowserChecker() {
               </label>
               <Input
                 placeholder="http://user:pass@host:port"
-                className={cn(
-                  "font-mono text-sm bg-background/50 h-8",
-                  proxy.trim() ? "border-green-500/50" : "border-yellow-500/40"
-                )}
+                className={cn("font-mono text-sm bg-background/50 h-8", proxy.trim() ? "border-green-500/50" : "border-yellow-500/40")}
                 value={proxy}
                 onChange={e => setProxy(e.target.value)}
+                disabled={isChecking}
               />
             </div>
+
+            {/* Concurrency */}
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground flex items-center gap-1">
+                <Activity className="w-3 h-3" /> Concurrent Threads
+              </label>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setConcurrency(c => Math.max(1, c - 1))}
+                  disabled={isChecking || concurrency <= 1}
+                  className="w-8 h-8 rounded border border-border bg-card text-sm font-mono font-bold hover:bg-muted/50 disabled:opacity-30 transition-colors">−</button>
+                <div className="flex-1 text-center font-mono text-lg font-bold text-primary">{concurrency}</div>
+                <button
+                  onClick={() => setConcurrency(c => Math.min(10, c + 1))}
+                  disabled={isChecking || concurrency >= 10}
+                  className="w-8 h-8 rounded border border-border bg-card text-sm font-mono font-bold hover:bg-muted/50 disabled:opacity-30 transition-colors">+</button>
+              </div>
+              <p className="text-[10px] text-muted-foreground/60 font-mono text-center">{concurrency} browser{concurrency > 1 ? "s" : ""} simultaneously (1–10)</p>
+            </div>
+
             <div className="text-xs text-muted-foreground font-mono bg-muted/30 rounded p-2 border border-border space-y-1">
               <p className="text-foreground/70 font-medium">Format:</p>
               <p><span className="text-primary">email:password</span></p>
               <p><span className="text-primary">email:password:2FA_SECRET</span></p>
               <p className="text-yellow-400/70 mt-1">⚠ ~20–40s per account (real browser)</p>
             </div>
-            <Button className="w-full font-mono font-medium tracking-wide" size="lg"
-              onClick={handleCheck}
-              disabled={browserMutation.isPending || !inputText.trim()}>
-              {browserMutation.isPending
-                ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />CHECKING ({parseCredentials(inputText).length} accounts)...</>
-                : <><Globe className="w-4 h-4 mr-2" />OPEN BROWSER & CHECK</>}
-            </Button>
+
+            {isChecking ? (
+              <Button variant="destructive" className="w-full font-mono font-medium tracking-wide" size="lg" onClick={handleStop}>
+                <XCircle className="w-4 h-4 mr-2" />STOP CHECK
+              </Button>
+            ) : (
+              <Button className="w-full font-mono font-medium tracking-wide" size="lg"
+                onClick={handleCheck} disabled={!inputText.trim()}>
+                <Globe className="w-4 h-4 mr-2" />OPEN BROWSER & CHECK
+              </Button>
+            )}
           </CardContent>
         </Card>
 
-        {results.length > 0 && (
+        {(results.length > 0 || isChecking) && (
           <div className="grid grid-cols-2 gap-3">
             <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "opened" ? "border-green-500/60 bg-green-500/5" : "border-border bg-card/40")}
               onClick={() => setActiveList("opened")}>
@@ -538,17 +629,22 @@ function BrowserChecker() {
 
       {/* Results */}
       <div className="lg:col-span-2 space-y-5">
-        {browserMutation.isPending && (
+        {/* Live progress bar */}
+        {(isChecking || (results.length > 0 && results.length < total)) && (
           <div className="space-y-2">
             <div className="flex justify-between text-xs font-mono text-muted-foreground uppercase tracking-wider">
               <span className="flex items-center gap-2">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Opening Gmail in browser... (~{total * 30}s total)
+                {isChecking && <Loader2 className="w-3 h-3 animate-spin" />}
+                {isChecking ? `Checking ${results.length} / ${total} accounts...` : "Done"}
               </span>
               <span>{progress}%</span>
             </div>
             <Progress value={progress} className="h-1 bg-border" />
-            <p className="text-[11px] text-muted-foreground/60 font-mono">Each account takes 20–40s — please wait</p>
+            {isChecking && (
+              <p className="text-[11px] text-muted-foreground/60 font-mono">
+                {concurrency} browser{concurrency > 1 ? "s" : ""} running — results appear as each account finishes
+              </p>
+            )}
           </div>
         )}
 
@@ -566,17 +662,36 @@ function BrowserChecker() {
                 <MailX className="w-3.5 h-3.5" />NOT OPENED ({notOpened.length})
               </button>
             </div>
-            <Button variant="outline" size="sm" onClick={() => download(displayed.map(r => r.email).join("\n"), `gmail_browser_${activeList}.txt`)}
-              disabled={displayed.length === 0} className="font-mono text-xs h-8">
-              <Download className="w-3 h-3 mr-2" />EXPORT .TXT
-            </Button>
+            {/* Export buttons */}
+            <div className="flex gap-1.5">
+              <Button variant="outline" size="sm"
+                onClick={() => download(displayed.map(r => r.email).join("\n"), `gmail_${activeList}.txt`, "text/plain")}
+                disabled={displayed.length === 0} className="font-mono text-xs h-8 px-2">
+                <Download className="w-3 h-3 mr-1" />.TXT
+              </Button>
+              <Button variant="outline" size="sm"
+                onClick={() => downloadCSV(displayed, `gmail_${activeList}`)}
+                disabled={displayed.length === 0} className="font-mono text-xs h-8 px-2">
+                <Download className="w-3 h-3 mr-1" />.CSV
+              </Button>
+              <Button variant="outline" size="sm"
+                onClick={() => downloadJSON(displayed, `gmail_${activeList}`)}
+                disabled={displayed.length === 0} className="font-mono text-xs h-8 px-2">
+                <Download className="w-3 h-3 mr-1" />.JSON
+              </Button>
+            </div>
           </div>
 
           <div className="flex-1 overflow-auto">
-            {results.length === 0 ? (
+            {results.length === 0 && !isChecking ? (
               <EmptyState icon={<Globe className="w-8 h-8 mb-3 opacity-50" />} label="AWAITING CREDENTIALS" />
-            ) : displayed.length === 0 ? (
+            ) : displayed.length === 0 && !isChecking ? (
               <EmptyState label={`NO ${activeList === "opened" ? "OPENED" : "FAILED"} ACCOUNTS`} />
+            ) : displayed.length === 0 && isChecking ? (
+              <div className="h-full min-h-[200px] flex flex-col items-center justify-center text-muted-foreground font-mono text-sm p-8 opacity-60">
+                <Loader2 className="w-8 h-8 mb-3 animate-spin opacity-50" />
+                <p>Browsers running — waiting for first result...</p>
+              </div>
             ) : (
               <Table>
                 <TableHeader className="bg-background/50 sticky top-0 backdrop-blur-sm z-10">
@@ -588,11 +703,12 @@ function BrowserChecker() {
                     {displayed.some(r => r.totpCode) && (
                       <TableHead className="font-mono text-xs w-[100px]">TOTP</TableHead>
                     )}
+                    <TableHead className="font-mono text-xs w-[80px]">ACTION</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {displayed.map((r, idx) => (
-                    <TableRow key={idx} className="font-mono text-sm">
+                    <TableRow key={r.email} className="font-mono text-sm">
                       <TableCell className="text-center text-muted-foreground/50 text-xs tabular-nums sticky left-0 bg-card/80 backdrop-blur-sm">{idx + 1}</TableCell>
                       <TableCell className="font-medium text-foreground/90">{r.email}</TableCell>
                       <TableCell><BrowserStatusBadge status={r.status} /></TableCell>
@@ -601,9 +717,11 @@ function BrowserChecker() {
                         {(r as any).debugScreenshot && (
                           <div className="mt-2">
                             <p className={`text-[10px] font-mono mb-1 ${r.status === "opened" ? "text-green-400/70" : "text-yellow-400/70"}`}>
-                              {r.status === "opened" ? "📸 Mailbox screenshot (proof):" : "📸 Google ne kya dikhaya:"}
+                              {r.status === "opened" ? "📸 Mailbox screenshot:" : "📸 Google ne kya dikhaya:"}
                             </p>
-                            <img src={(r as any).debugScreenshot} alt="screenshot" className="rounded border border-border max-w-[320px] w-full cursor-pointer hover:opacity-90 transition-opacity" onClick={() => window.open((r as any).debugScreenshot)} />
+                            <img src={(r as any).debugScreenshot} alt="screenshot"
+                              className="rounded border border-border max-w-[320px] w-full cursor-pointer hover:opacity-90 transition-opacity"
+                              onClick={() => window.open((r as any).debugScreenshot)} />
                           </div>
                         )}
                       </TableCell>
@@ -614,6 +732,15 @@ function BrowserChecker() {
                             : <span className="text-muted-foreground">—</span>}
                         </TableCell>
                       )}
+                      <TableCell>
+                        {(r.status === "verification_required" || r.status === "unknown") && !isChecking ? (
+                          <button
+                            onClick={() => handleRetry(r.email)}
+                            className="flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded border border-border hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-colors">
+                            <RefreshCw className="w-2.5 h-2.5" />RETRY
+                          </button>
+                        ) : <span className="text-muted-foreground/30">—</span>}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -627,8 +754,8 @@ function BrowserChecker() {
 }
 
 /* ───────────────────────── SHARED HELPERS ───────────────────────── */
-function download(text: string, filename: string) {
-  const blob = new Blob([text], { type: "text/plain" });
+function download(text: string, filename: string, mime = "text/plain") {
+  const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url; a.download = filename;
