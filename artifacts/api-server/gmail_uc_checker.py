@@ -562,8 +562,9 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
 
     # ── Load or generate unique fingerprint (fresh_profile → always new) ──────
     fp = get_or_create_fingerprint(profile_dir)
-    log(f"Fingerprint: {fp['model']} | {fp['webglRenderer']} | "
-        f"{fp['screenW']}x{fp['screenH']} dpr={fp['dpr']} | canvas={fp['canvasSeed']}")
+    fp_summary = (f"{fp['model']} | {fp['webglRenderer']} | "
+                  f"{fp['screenW']}x{fp['screenH']} dpr={fp['dpr']} | canvas={fp['canvasSeed']}")
+    log(f"Fingerprint: {fp_summary}")
     MOBILE_UA = (
         f"Mozilla/5.0 (Linux; Android {fp['androidVersion']}; {fp['model']}) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -590,6 +591,20 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
                 options.add_argument(
                     f'--proxy-server=http://{proxy_info["host"]}:{proxy_info["port"]}'
                 )
+
+    # Fetch exit IP through proxy before browser starts (quick requests call)
+    exit_ip: str | None = None
+    if proxy:
+        try:
+            import requests as _req
+            _proxies = {"http": proxy, "https": proxy}
+            exit_ip = _req.get("http://api.ipify.org", proxies=_proxies, timeout=8).text.strip()
+            log(f"Exit IP via proxy: {exit_ip}")
+        except Exception as _e:
+            log(f"IP fetch failed: {_e}")
+            exit_ip = "fetch_failed"
+    else:
+        exit_ip = "no_proxy"
 
     # Chrome flags — use fingerprint dimensions/UA
     options.add_argument("--no-sandbox")
@@ -626,6 +641,8 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             "status": "unknown",
             "reason": f"Chrome launch failed: {str(e)[:300]}",
             "totpCode": totp_code,
+            "exitIp": exit_ip,
+            "fingerprint": fp_summary,
         }
 
     log("Chrome launched")
@@ -665,17 +682,21 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     except Exception as e:
         log(f"Network UA override warning: {e}")
 
+    _login_result: dict = {}
     try:
-        return _do_login(driver, email, password, totp_code)
+        _login_result = _do_login(driver, email, password, totp_code)
     except Exception as e:
         log(f"Login exception: {e}")
-        return {"status": "unknown", "reason": f"Login error: {str(e)[:300]}", "totpCode": totp_code}
+        _login_result = {"status": "unknown", "reason": f"Login error: {str(e)[:300]}", "totpCode": totp_code}
     finally:
         try:
             driver.quit()
         except Exception:
             pass
         _cleanup(proxy_ext_path)
+    _login_result["exitIp"] = exit_ip
+    _login_result["fingerprint"] = fp_summary
+    return _login_result
 
 
 def _cleanup(path: str | None):

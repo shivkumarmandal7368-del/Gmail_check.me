@@ -762,6 +762,12 @@ function BrowserChecker() {
                     <TableHead className="font-mono text-xs">EMAIL</TableHead>
                     <TableHead className="font-mono text-xs w-[130px]">STATUS</TableHead>
                     <TableHead className="font-mono text-xs min-w-[160px]">REASON</TableHead>
+                    {displayed.some(r => (r as any).exitIp) && (
+                      <TableHead className="font-mono text-xs w-[120px]">EXIT IP</TableHead>
+                    )}
+                    {displayed.some(r => (r as any).fingerprint) && (
+                      <TableHead className="font-mono text-xs min-w-[200px]">FINGERPRINT</TableHead>
+                    )}
                     {displayed.some(r => r.totpCode) && (
                       <TableHead className="font-mono text-xs w-[100px]">TOTP</TableHead>
                     )}
@@ -787,6 +793,16 @@ function BrowserChecker() {
                           </div>
                         )}
                       </TableCell>
+                      {displayed.some(x => (x as any).exitIp) && (
+                        <TableCell className="text-xs font-mono text-cyan-400/80 tabular-nums">
+                          {(r as any).exitIp ?? "—"}
+                        </TableCell>
+                      )}
+                      {displayed.some(x => (x as any).fingerprint) && (
+                        <TableCell className="text-[10px] font-mono text-purple-400/80 leading-relaxed">
+                          {(r as any).fingerprint ?? "—"}
+                        </TableCell>
+                      )}
                       {displayed.some(x => x.totpCode) && (
                         <TableCell>
                           {r.totpCode

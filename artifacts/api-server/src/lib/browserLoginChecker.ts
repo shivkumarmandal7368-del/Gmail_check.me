@@ -24,6 +24,8 @@ export interface BrowserLoginResult {
   reason: string;
   totpCode: string | null;
   debugScreenshot?: string;
+  exitIp?: string;
+  fingerprint?: string;
 }
 
 function getPython3(): string {
@@ -133,6 +135,8 @@ async function checkOneAccount(
           reason: parsed.reason ?? "No reason returned",
           totpCode: parsed.totpCode ?? totpCode,
           debugScreenshot: parsed.debugScreenshot ?? undefined,
+          exitIp: parsed.exitIp ?? undefined,
+          fingerprint: parsed.fingerprint ?? undefined,
         });
       } catch {
         const snippet = (stderr || stdout).slice(-400);
