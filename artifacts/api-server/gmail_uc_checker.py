@@ -60,137 +60,154 @@ def move_to_element(driver, element):
         pass
 
 
-STEALTH_JS = """
-// Hide webdriver flag
-Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-
-// Mobile: no plugins (real Android Chrome has none)
-Object.defineProperty(navigator, 'plugins', { get: () => { var p = []; p.length = 0; return p; } });
-
-// Mobile languages
-Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-
-// Pixel 8 hardware profile
-Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-
-// Mobile screen — Pixel 8 (412x915 logical, devicePixelRatio=2.625)
-Object.defineProperty(screen, 'width',       { get: () => 412 });
-Object.defineProperty(screen, 'height',      { get: () => 915 });
-Object.defineProperty(screen, 'availWidth',  { get: () => 412 });
-Object.defineProperty(screen, 'availHeight', { get: () => 891 });
-Object.defineProperty(screen, 'colorDepth',  { get: () => 24 });
-Object.defineProperty(screen, 'pixelDepth',  { get: () => 24 });
-Object.defineProperty(window, 'devicePixelRatio', { get: () => 2.625 });
-
-// Mobile: maxTouchPoints = 5 (key signal Google checks)
-Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 5 });
-
-// Platform must match Android UA
-Object.defineProperty(navigator, 'platform', { get: () => 'Linux armv81' });
-
-// Mobile: no appVersion mismatch
-Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
-
-// ── User-Agent Client Hints — CRITICAL FIX ─────────────────────────────────
-// Without this, navigator.userAgentData reports desktop Linux even with a
-// mobile --user-agent flag. Google checks this API and sees the mismatch.
-(function() {
-  var uaData = {
-    brands: [
-      { brand: 'Not=A?Brand', version: '24' },
-      { brand: 'Chromium', version: '138' },
-      { brand: 'Google Chrome', version: '138' }
-    ],
-    mobile: true,
-    platform: 'Android',
-    getHighEntropyValues: function(hints) {
-      return Promise.resolve({
-        brands: this.brands,
-        mobile: this.mobile,
-        platform: this.platform,
-        platformVersion: '14',
-        architecture: '',
-        bitness: '',
-        model: 'Pixel 8',
-        uaFullVersion: '138.0.7204.100',
-        fullVersionList: [
-          { brand: 'Not=A?Brand', version: '24.0.0.0' },
-          { brand: 'Chromium', version: '138.0.7204.100' },
-          { brand: 'Google Chrome', version: '138.0.7204.100' }
-        ],
-      });
+# ── Phone device profiles — each account gets one assigned randomly ───────────
+# Modelled on real flagship Android phones; covers different GPU, screen, memory.
+PHONE_PROFILES = [
+    {
+        "model": "Pixel 7",       "androidVersion": "14",
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 730",
     },
-    toJSON: function() {
-      return { brands: this.brands, mobile: this.mobile, platform: this.platform };
-    }
-  };
-  try {
-    Object.defineProperty(navigator, 'userAgentData', { get: () => uaData });
-  } catch(e) {}
-})();
+    {
+        "model": "Pixel 8",       "androidVersion": "14",
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 915, "availH": 891, "dpr": 2.625,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
+    },
+    {
+        "model": "Pixel 8 Pro",   "androidVersion": "14",
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 919, "availH": 895, "dpr": 2.625,
+        "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
+    },
+    {
+        "model": "SM-S928B",      "androidVersion": "14",   # Samsung Galaxy S24+
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 360, "screenH": 780, "availH": 756, "dpr": 3.0,
+        "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "Samsung Electronics Co., Ltd.", "webglRenderer": "Xclipse 940",
+    },
+    {
+        "model": "SM-S911B",      "androidVersion": "14",   # Samsung Galaxy S23
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 360, "screenH": 773, "availH": 749, "dpr": 3.0,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
+    },
+    {
+        "model": "CPH2447",       "androidVersion": "14",   # OnePlus 12
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 919, "availH": 895, "dpr": 2.625,
+        "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 750",
+    },
+    {
+        "model": "23049PCD8G",    "androidVersion": "14",   # Xiaomi 14
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
+        "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 750",
+    },
+    {
+        "model": "SM-A546B",      "androidVersion": "14",   # Samsung Galaxy A54
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 360, "screenH": 800, "availH": 776, "dpr": 2.0,
+        "hwConcurrency": 8, "deviceMemory": 6,  "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G68",
+    },
+]
 
-// Remove automation-specific chrome properties
-if (window.chrome && window.chrome.app) {
-  try { delete window.chrome.app; } catch(e) {}
-}
 
-// Fake notification permission
-if (window.Notification) {
-  Object.defineProperty(Notification, 'permission', { get: () => 'default' });
-}
+def get_or_create_fingerprint(profile_dir: str) -> dict:
+    """Load the saved fingerprint for this profile, or generate & save a new one.
+    This makes every account look like a consistent, unique device — same as
+    antidetect/cloner behaviour."""
+    fp_path = os.path.join(profile_dir, "fingerprint.json")
+    if os.path.exists(fp_path):
+        try:
+            with open(fp_path, "r") as f:
+                existing = json.load(f)
+            if all(k in existing for k in ("model", "screenW", "canvasSeed")):
+                return existing
+        except Exception:
+            pass
+    fp = random.choice(PHONE_PROFILES).copy()
+    fp["canvasSeed"]  = random.randint(1, 254)        # unique canvas XOR per account
+    fp["audioNoise"]  = round(random.uniform(0.00001, 0.00009), 7)  # unique audio shift
+    try:
+        with open(fp_path, "w") as f:
+            json.dump(fp, f, indent=2)
+    except Exception:
+        pass
+    return fp
 
-// Touch support — real Android device always has ontouchstart
-window.ontouchstart = function(){};
 
-// ── WebGL fingerprint spoof — Pixel 8 uses Adreno 740 ──────────────────────
-(function() {
-  var getParam = WebGLRenderingContext.prototype.getParameter;
-  WebGLRenderingContext.prototype.getParameter = function(param) {
-    // UNMASKED_VENDOR_WEBGL
-    if (param === 37445) return 'Qualcomm';
-    // UNMASKED_RENDERER_WEBGL
-    if (param === 37446) return 'Adreno (TM) 740';
-    return getParam.call(this, param);
-  };
-  if (window.WebGL2RenderingContext) {
-    var getParam2 = WebGL2RenderingContext.prototype.getParameter;
-    WebGL2RenderingContext.prototype.getParameter = function(param) {
-      if (param === 37445) return 'Qualcomm';
-      if (param === 37446) return 'Adreno (TM) 740';
-      return getParam2.call(this, param);
-    };
-  }
-})();
-
-// ── Canvas fingerprint noise — prevents identical canvas hashes ─────────────
-(function() {
-  var origToDataURL = HTMLCanvasElement.prototype.toDataURL;
-  HTMLCanvasElement.prototype.toDataURL = function(type) {
-    var ctx = this.getContext('2d');
-    if (ctx) {
-      // Add imperceptible noise — changes fingerprint hash but looks identical
-      var imageData = ctx.getImageData(0, 0, this.width || 1, this.height || 1);
-      if (imageData.data.length > 0) {
-        imageData.data[0] = imageData.data[0] ^ 1;
-        ctx.putImageData(imageData, 0, 0);
-      }
-    }
-    return origToDataURL.apply(this, arguments);
-  };
-})();
-
-// ── AudioContext fingerprint noise ──────────────────────────────────────────
-if (window.AudioContext || window.webkitAudioContext) {
-  var AC = window.AudioContext || window.webkitAudioContext;
-  var origCreateOscillator = AC.prototype.createOscillator;
-  AC.prototype.createOscillator = function() {
-    var osc = origCreateOscillator.call(this);
-    var origStart = osc.start.bind(osc);
-    osc.start = function(when) { return origStart(when || 0); };
-    return osc;
-  };
-}
+def make_stealth_js(fp: dict) -> str:
+    """Build the CDP stealth script with values from this account's fingerprint."""
+    cs  = fp["canvasSeed"]
+    an  = fp["audioNoise"]
+    wv  = fp["webglVendor"].replace("'", "\\'")
+    wr  = fp["webglRenderer"].replace("'", "\\'")
+    cv  = fp["chromeVersion"]
+    av  = fp["androidVersion"]
+    mdl = fp["model"].replace("'", "\\'")
+    return f"""
+Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
+Object.defineProperty(navigator,'plugins',{{get:()=>{{var p=[];p.length=0;return p;}}}});
+Object.defineProperty(navigator,'languages',{{get:()=>['en-US','en']}});
+Object.defineProperty(navigator,'hardwareConcurrency',{{get:()=>{fp['hwConcurrency']}}});
+Object.defineProperty(navigator,'deviceMemory',{{get:()=>{fp['deviceMemory']}}});
+Object.defineProperty(screen,'width',      {{get:()=>{fp['screenW']}}});
+Object.defineProperty(screen,'height',     {{get:()=>{fp['screenH']}}});
+Object.defineProperty(screen,'availWidth', {{get:()=>{fp['screenW']}}});
+Object.defineProperty(screen,'availHeight',{{get:()=>{fp['availH']}}});
+Object.defineProperty(screen,'colorDepth', {{get:()=>24}});
+Object.defineProperty(screen,'pixelDepth', {{get:()=>24}});
+Object.defineProperty(window,'devicePixelRatio',{{get:()=>{fp['dpr']}}});
+Object.defineProperty(navigator,'maxTouchPoints',{{get:()=>{fp['maxTouchPoints']}}});
+Object.defineProperty(navigator,'platform',{{get:()=>'{fp['platform']}'}});
+Object.defineProperty(navigator,'vendor',  {{get:()=>'Google Inc.'}});
+(function(){{
+  var d={{brands:[{{brand:'Not=A?Brand',version:'24'}},{{brand:'Chromium',version:'138'}},{{brand:'Google Chrome',version:'138'}}],mobile:true,platform:'Android',
+    getHighEntropyValues:function(h){{return Promise.resolve({{brands:this.brands,mobile:this.mobile,platform:this.platform,platformVersion:'{av}',architecture:'',bitness:'',model:'{mdl}',uaFullVersion:'{cv}',fullVersionList:[{{brand:'Not=A?Brand',version:'24.0.0.0'}},{{brand:'Chromium',version:'{cv}'}},{{brand:'Google Chrome',version:'{cv}'}}]}});}},
+    toJSON:function(){{return{{brands:this.brands,mobile:this.mobile,platform:this.platform}};}}}};
+  try{{Object.defineProperty(navigator,'userAgentData',{{get:()=>d}});}}catch(e){{}}
+}})();
+if(window.chrome&&window.chrome.app){{try{{delete window.chrome.app;}}catch(e){{}}}}
+if(window.Notification){{Object.defineProperty(Notification,'permission',{{get:()=>'default'}});}}
+window.ontouchstart=function(){{}};
+(function(){{
+  function patch(ctx){{
+    var gp=ctx.prototype.getParameter;
+    ctx.prototype.getParameter=function(p){{if(p===37445)return'{wv}';if(p===37446)return'{wr}';return gp.call(this,p);}};
+  }}
+  patch(WebGLRenderingContext);
+  if(window.WebGL2RenderingContext)patch(WebGL2RenderingContext);
+}})();
+(function(){{
+  var seed={cs};
+  var o=HTMLCanvasElement.prototype.toDataURL;
+  HTMLCanvasElement.prototype.toDataURL=function(t){{var c=this.getContext('2d');if(c){{var d=c.getImageData(0,0,this.width||1,this.height||1);d.data[0]=d.data[0]^seed;c.putImageData(d,0,0);}}return o.apply(this,arguments);}};
+  var og=CanvasRenderingContext2D.prototype.getImageData;
+  CanvasRenderingContext2D.prototype.getImageData=function(){{var d=og.apply(this,arguments);if(d&&d.data.length>0)d.data[0]=d.data[0]^seed;return d;}};
+}})();
+(function(){{
+  var noise={an};
+  var orig=AudioBuffer&&AudioBuffer.prototype.getChannelData;
+  if(orig)AudioBuffer.prototype.getChannelData=function(){{var d=orig.apply(this,arguments);if(d&&d.length>0)d[0]=d[0]+noise;return d;}};
+}})();
 """
 
 
@@ -343,6 +360,16 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     os.makedirs(profile_dir, exist_ok=True)
     log(f"Chrome profile: {profile_dir}")
 
+    # ── Load or generate unique persistent fingerprint (cloner-style) ─────────
+    fp = get_or_create_fingerprint(profile_dir)
+    log(f"Fingerprint: {fp['model']} | {fp['webglRenderer']} | "
+        f"{fp['screenW']}x{fp['screenH']} dpr={fp['dpr']} | canvas={fp['canvasSeed']}")
+    MOBILE_UA = (
+        f"Mozilla/5.0 (Linux; Android {fp['androidVersion']}; {fp['model']}) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{fp['chromeVersion']} Mobile Safari/537.36"
+    )
+
     options = uc.ChromeOptions()
     options.add_argument(f"--user-data-dir={profile_dir}")
     proxy_ext_path: str | None = None
@@ -353,7 +380,6 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         if proxy_info and proxy_info["host"]:
             log(f"Proxy: {proxy_info['host']}:{proxy_info['port']} user={proxy_info.get('username')}")
             if proxy_info.get("username") and not headless:
-                # Extension-based auth (requires non-headless / virtual display)
                 proxy_ext_path = make_proxy_extension(
                     proxy_info["host"], proxy_info["port"],
                     proxy_info["username"], proxy_info.get("password") or ""
@@ -361,23 +387,15 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
                 options.add_extension(proxy_ext_path)
                 log("Proxy auth extension loaded")
             else:
-                # Without extension: set proxy server (auth challenge won't be answered)
                 options.add_argument(
                     f'--proxy-server=http://{proxy_info["host"]}:{proxy_info["port"]}'
                 )
 
-    # Chrome flags
-    # Android mobile fingerprint — looks like a real phone to Google
-    MOBILE_UA = (
-        "Mozilla/5.0 (Linux; Android 14; Pixel 8) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/138.0.7204.100 Mobile Safari/537.36"
-    )
+    # Chrome flags — use fingerprint dimensions/UA
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    # Mobile viewport — 412×915 matches Pixel 8
-    options.add_argument("--window-size=412,915")
+    options.add_argument(f"--window-size={fp['screenW']},{fp['screenH']}")
     options.add_argument("--lang=en-US,en")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-popup-blocking")
@@ -389,7 +407,6 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-features=IsolateOrigins,site-per-process")
     options.add_argument(f"--user-agent={MOBILE_UA}")
-    # Enable touch events so Google sees a touch-capable device
     options.add_argument("--touch-events=enabled")
     if headless:
         options.add_argument("--disable-gpu")
@@ -413,39 +430,38 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
 
     log("Chrome launched")
 
-    # Inject stealth patches on every new page
+    # Inject stealth patches on every new page (fingerprint-specific values)
     try:
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": STEALTH_JS})
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
+                               {"source": make_stealth_js(fp)})
         log("Stealth JS injected via CDP")
     except Exception as e:
         log(f"Stealth JS warning: {e}")
 
-    # ── Fix UA Client Hints in actual HTTP headers ────────────────────────────
-    # --user-agent flag changes navigator.userAgent but NOT Sec-CH-UA headers.
-    # Network.setUserAgentOverride with userAgentMetadata fixes both.
+    # Fix UA Client Hints in actual HTTP headers using fingerprint values
     try:
         driver.execute_cdp_cmd("Network.enable", {})
         driver.execute_cdp_cmd("Network.setUserAgentOverride", {
             "userAgent": MOBILE_UA,
             "acceptLanguage": "en-US,en;q=0.9",
-            "platform": "Linux armv81",
+            "platform": fp["platform"],
             "userAgentMetadata": {
                 "brands": [
-                    {"brand": "Not=A?Brand", "version": "24"},
-                    {"brand": "Chromium",    "version": "138"},
-                    {"brand": "Google Chrome", "version": "138"},
+                    {"brand": "Not=A?Brand",   "version": "24"},
+                    {"brand": "Chromium",       "version": "138"},
+                    {"brand": "Google Chrome",  "version": "138"},
                 ],
-                "fullVersion": "138.0.7204.100",
+                "fullVersion": fp["chromeVersion"],
                 "platform": "Android",
-                "platformVersion": "14",
+                "platformVersion": fp["androidVersion"],
                 "architecture": "",
-                "model": "Pixel 8",
+                "model": fp["model"],
                 "mobile": True,
                 "bitness": "",
                 "wow64": False,
             },
         })
-        log("Network UA override applied (Sec-CH-UA → Android Pixel 8)")
+        log(f"Network UA override applied → {fp['model']} / Android {fp['androidVersion']}")
     except Exception as e:
         log(f"Network UA override warning: {e}")
 

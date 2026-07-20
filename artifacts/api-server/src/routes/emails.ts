@@ -77,7 +77,15 @@ router.post("/emails/browser-check", async (req, res) => {
     res.status(400).json({ error: "No credentials provided" });
     return;
   }
-  const results = await browserLoginCheck(credentials as Array<{ email: string; password: string; totp?: string }>, proxy);
+  // concurrency: how many accounts to check simultaneously (default 3, max 10)
+  const concurrency = typeof req.body.concurrency === "number"
+    ? Math.max(1, Math.min(10, Math.floor(req.body.concurrency)))
+    : 3;
+  const results = await browserLoginCheck(
+    credentials as Array<{ email: string; password: string; totp?: string }>,
+    proxy,
+    concurrency,
+  );
   res.json({
     results,
     total: results.length,

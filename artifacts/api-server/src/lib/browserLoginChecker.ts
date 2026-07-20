@@ -122,24 +122,41 @@ async function checkOneAccount(
   });
 }
 
+// Run tasks with limited parallelism — like an antidetect browser opening
+// N tabs at once, each with its own fingerprint/session.
+async function runWithConcurrency<T>(
+  tasks: Array<() => Promise<T>>,
+  concurrency: number,
+): Promise<T[]> {
+  const results = new Array<T>(tasks.length);
+  let next = 0;
+  async function worker() {
+    while (next < tasks.length) {
+      const i = next++;
+      results[i] = await tasks[i]();
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, tasks.length) }, worker),
+  );
+  return results;
+}
+
 export async function browserLoginCheck(
   credentials: Array<{ email: string; password: string; totp?: string }>,
   proxy?: string,
+  concurrency = 3,
 ): Promise<BrowserLoginResult[]> {
-  const results: BrowserLoginResult[] = [];
-  for (const cred of credentials) {
-    const result = await checkOneAccount(
-      cred.email,
-      cred.password,
-      cred.totp,
-      proxy,
-    ).catch((err: unknown) => ({
-      email: cred.email,
-      status: "unknown" as BrowserLoginStatus,
-      reason: `Browser check failed: ${err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)}`,
-      totpCode: null,
-    }));
-    results.push(result);
-  }
-  return results;
+  const tasks = credentials.map(
+    (cred) => () =>
+      checkOneAccount(cred.email, cred.password, cred.totp, proxy).catch(
+        (err: unknown) => ({
+          email: cred.email,
+          status: "unknown" as BrowserLoginStatus,
+          reason: `Browser check failed: ${err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)}`,
+          totpCode: null,
+        }),
+      ),
+  );
+  return runWithConcurrency(tasks, concurrency);
 }
