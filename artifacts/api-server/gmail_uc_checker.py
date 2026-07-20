@@ -92,6 +92,44 @@ Object.defineProperty(navigator, 'platform', { get: () => 'Linux armv81' });
 // Mobile: no appVersion mismatch
 Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
 
+// ── User-Agent Client Hints — CRITICAL FIX ─────────────────────────────────
+// Without this, navigator.userAgentData reports desktop Linux even with a
+// mobile --user-agent flag. Google checks this API and sees the mismatch.
+(function() {
+  var uaData = {
+    brands: [
+      { brand: 'Not=A?Brand', version: '24' },
+      { brand: 'Chromium', version: '138' },
+      { brand: 'Google Chrome', version: '138' }
+    ],
+    mobile: true,
+    platform: 'Android',
+    getHighEntropyValues: function(hints) {
+      return Promise.resolve({
+        brands: this.brands,
+        mobile: this.mobile,
+        platform: this.platform,
+        platformVersion: '14',
+        architecture: '',
+        bitness: '',
+        model: 'Pixel 8',
+        uaFullVersion: '138.0.7204.100',
+        fullVersionList: [
+          { brand: 'Not=A?Brand', version: '24.0.0.0' },
+          { brand: 'Chromium', version: '138.0.7204.100' },
+          { brand: 'Google Chrome', version: '138.0.7204.100' }
+        ],
+      });
+    },
+    toJSON: function() {
+      return { brands: this.brands, mobile: this.mobile, platform: this.platform };
+    }
+  };
+  try {
+    Object.defineProperty(navigator, 'userAgentData', { get: () => uaData });
+  } catch(e) {}
+})();
+
 // Remove automation-specific chrome properties
 if (window.chrome && window.chrome.app) {
   try { delete window.chrome.app; } catch(e) {}
@@ -382,6 +420,35 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     except Exception as e:
         log(f"Stealth JS warning: {e}")
 
+    # ── Fix UA Client Hints in actual HTTP headers ────────────────────────────
+    # --user-agent flag changes navigator.userAgent but NOT Sec-CH-UA headers.
+    # Network.setUserAgentOverride with userAgentMetadata fixes both.
+    try:
+        driver.execute_cdp_cmd("Network.enable", {})
+        driver.execute_cdp_cmd("Network.setUserAgentOverride", {
+            "userAgent": MOBILE_UA,
+            "acceptLanguage": "en-US,en;q=0.9",
+            "platform": "Linux armv81",
+            "userAgentMetadata": {
+                "brands": [
+                    {"brand": "Not=A?Brand", "version": "24"},
+                    {"brand": "Chromium",    "version": "138"},
+                    {"brand": "Google Chrome", "version": "138"},
+                ],
+                "fullVersion": "138.0.7204.100",
+                "platform": "Android",
+                "platformVersion": "14",
+                "architecture": "",
+                "model": "Pixel 8",
+                "mobile": True,
+                "bitness": "",
+                "wow64": False,
+            },
+        })
+        log("Network UA override applied (Sec-CH-UA → Android Pixel 8)")
+    except Exception as e:
+        log(f"Network UA override warning: {e}")
+
     try:
         return _do_login(driver, email, password, totp_code)
     except Exception as e:
@@ -466,6 +533,38 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
             return {
                 "status": "opened",
                 "reason": "Mailbox opened successfully ✅",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
+
+        # ── "This browser or app may not be secure" ──────────────────────────
+        # Google blocks when it detects automation signals (UA-CH mismatch, etc.)
+        # Clear the persistent profile so next attempt gets a fresh device identity.
+        if (
+            "couldn't sign you in" in text
+            or "not be secure" in text
+            or "browser or app may not" in text
+            or "signin/blocked" in url
+            or ("blocked" in url and "accounts.google.com" in url)
+        ):
+            shot = screenshot_b64()
+            # Wipe the persistent profile — it may be tainted / flagged by Google
+            try:
+                import shutil
+                _safe = email.replace("@", "_at_").replace(".", "_")
+                _prof = os.path.join(tempfile.gettempdir(), "gmail_checker_profiles", _safe)
+                if os.path.exists(_prof):
+                    shutil.rmtree(_prof, ignore_errors=True)
+                    log(f"Wiped stale Chrome profile: {_prof}")
+            except Exception as _pe:
+                log(f"Profile wipe warning: {_pe}")
+            return {
+                "status": "verification_required",
+                "reason": (
+                    "Google blocked this browser (automation detected). "
+                    "Profile wiped — retry once to get a fresh device identity. "
+                    "If persists, try a different proxy or wait 10-15 min."
+                ),
                 "totpCode": totp_code,
                 "debugScreenshot": shot,
             }

@@ -58,6 +58,8 @@ _Populate as you build — explicit user instructions worth remembering across s
 - Chromium path is resolved via `which chromium` with a Nix store fallback hardcoded in `browserLoginChecker.ts` — if Chromium version changes, update that path.
 - `pnpm install` must be run after cloning/importing before workflows will start (deps not committed).
 - Browser Check is sequential (~20-40s per account); long lists block the endpoint for the full duration.
+- **"Couldn't sign you in — not be secure" error** = UA-CH mismatch. Fixed via `Network.setUserAgentOverride` with `userAgentMetadata` (sets `Sec-CH-UA` HTTP headers to Android) + `navigator.userAgentData` spoof in STEALTH_JS. If this error recurs, the persistent Chrome profile for that account is auto-wiped and the next attempt starts fresh.
+- **`--user-agent` flag alone is not enough** — it changes `navigator.userAgent` but NOT `Sec-CH-UA` / `Sec-CH-UA-Mobile` / `Sec-CH-UA-Platform` HTTP headers. The CDP `Network.setUserAgentOverride` call with `userAgentMetadata` is required to align both.
 
 ## Pointers
 
