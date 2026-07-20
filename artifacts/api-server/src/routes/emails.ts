@@ -81,10 +81,16 @@ router.post("/emails/browser-check", async (req, res) => {
   const concurrency = typeof req.body.concurrency === "number"
     ? Math.max(1, Math.min(10, Math.floor(req.body.concurrency)))
     : 3;
+  // proxies: rotation list (one per account, round-robin). Falls back to single proxy if not provided.
+  const proxies: string[] = Array.isArray(req.body.proxies)
+    ? (req.body.proxies as unknown[]).filter((p): p is string => typeof p === "string" && p.trim().length > 0).map(p => p.trim())
+    : [];
   const results = await browserLoginCheck(
     credentials as Array<{ email: string; password: string; totp?: string }>,
     proxy,
     concurrency,
+    undefined,
+    proxies.length > 0 ? proxies : undefined,
   );
   res.json({
     results,
@@ -112,6 +118,9 @@ router.post("/emails/browser-check-stream", async (req, res) => {
   const concurrency = typeof req.body.concurrency === "number"
     ? Math.max(1, Math.min(10, Math.floor(req.body.concurrency)))
     : 3;
+  const proxies: string[] = Array.isArray(req.body.proxies)
+    ? (req.body.proxies as unknown[]).filter((p): p is string => typeof p === "string" && p.trim().length > 0).map(p => p.trim())
+    : [];
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -136,6 +145,7 @@ router.post("/emails/browser-check-stream", async (req, res) => {
       proxy,
       concurrency,
       (result) => sendEvent({ type: "result", ...result }),
+      proxies.length > 0 ? proxies : undefined,
     );
   } catch (err) {
     sendEvent({ type: "error", message: String(err) });

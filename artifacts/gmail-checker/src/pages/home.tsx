@@ -398,8 +398,11 @@ function LoginChecker() {
 /* ───────────────────────── BROWSER CHECKER ───────────────────────── */
 function BrowserChecker() {
   const [inputText, setInputText] = useState("");
-  const [proxy, setProxy] = useState("");
+  const [proxyText, setProxyText] = useState("");
   const [concurrency, setConcurrency] = useState(3);
+
+  const parseProxies = (text: string) =>
+    text.split(/\n+/).map(l => l.trim()).filter(Boolean);
   const [results, setResults] = useState<BrowserLoginResult[]>([]);
   const [activeList, setActiveList] = useState<"opened" | "not_opened">("opened");
   const [isChecking, setIsChecking] = useState(false);
@@ -429,13 +432,19 @@ function BrowserChecker() {
     setIsChecking(true);
     setTotal(prev => appendResults ? prev : credentials.length);
 
+    const proxies = parseProxies(proxyText);
+
     try {
       const resp = await fetch("/api/emails/browser-check-stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           credentials,
-          ...(proxy.trim() ? { proxy: proxy.trim() } : {}),
+          ...(proxies.length > 1
+            ? { proxies }
+            : proxies.length === 1
+              ? { proxy: proxies[0] }
+              : {}),
           concurrency,
         }),
         signal: abort.signal,
@@ -541,27 +550,47 @@ function BrowserChecker() {
             />
 
             {/* Proxy */}
-            <div className={cn(
-              "rounded-lg border p-2.5 text-[11px] font-mono space-y-1",
-              proxy.trim()
-                ? "border-green-500/40 bg-green-500/5 text-green-400/90"
-                : "border-yellow-500/40 bg-yellow-500/5 text-yellow-400/90"
-            )}>
-              {proxy.trim()
-                ? <p className="font-semibold">🔀 Proxy active — traffic routed via proxy</p>
-                : <><p className="font-semibold">⚠ Residential proxy required on Replit</p>
-                    <p className="text-yellow-300/70">Google blocks datacenter IPs. Without proxy all checks return <span className="text-orange-400">verification_required</span>.</p></>
-              }
-            </div>
+            {(() => {
+              const proxies = parseProxies(proxyText);
+              const count = proxies.length;
+              const creds = parseCredentials(inputText).length;
+              return (
+                <div className={cn(
+                  "rounded-lg border p-2.5 text-[11px] font-mono space-y-1",
+                  count > 0
+                    ? "border-green-500/40 bg-green-500/5 text-green-400/90"
+                    : "border-yellow-500/40 bg-yellow-500/5 text-yellow-400/90"
+                )}>
+                  {count === 0 ? (
+                    <><p className="font-semibold">⚠ Residential proxy required on Replit</p>
+                      <p className="text-yellow-300/70">Google blocks datacenter IPs. Without proxy all checks return <span className="text-orange-400">verification_required</span>.</p></>
+                  ) : count === 1 ? (
+                    <p className="font-semibold">🔀 1 proxy — sab accounts ek hi IP se chalenge</p>
+                  ) : (
+                    <>
+                      <p className="font-semibold">🔀 {count} proxies loaded — rotation active</p>
+                      <p className="text-green-300/70">
+                        {creds > 0
+                          ? `${creds} accounts → ${count} proxies (round-robin)`
+                          : "Har account ko alag IP milegi (round-robin)"}
+                      </p>
+                    </>
+                  )}
+                </div>
+              );
+            })()}
             <div className="space-y-1.5">
               <label className="text-[10px] font-mono uppercase tracking-widest text-yellow-400/80 flex items-center gap-1">
-                <Lock className="w-3 h-3" /> Residential Proxy
+                <Lock className="w-3 h-3" /> Residential Proxies (ek per line)
               </label>
-              <Input
-                placeholder="http://user:pass@host:port"
-                className={cn("font-mono text-sm bg-background/50 h-8", proxy.trim() ? "border-green-500/50" : "border-yellow-500/40")}
-                value={proxy}
-                onChange={e => setProxy(e.target.value)}
+              <Textarea
+                placeholder={"http://user:pass@host1:port\nhttp://user:pass@host2:port\nhttp://user:pass@host3:port"}
+                className={cn(
+                  "min-h-[80px] resize-y bg-background/50 font-mono text-xs leading-relaxed",
+                  parseProxies(proxyText).length > 0 ? "border-green-500/50" : "border-yellow-500/40"
+                )}
+                value={proxyText}
+                onChange={e => setProxyText(e.target.value)}
                 disabled={isChecking}
               />
             </div>

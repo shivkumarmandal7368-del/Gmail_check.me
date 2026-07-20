@@ -147,10 +147,19 @@ export async function browserLoginCheck(
   proxy?: string,
   concurrency = 3,
   onAccountComplete?: (result: BrowserLoginResult) => void,
+  proxies?: string[],   // rotation list — one proxy per account (round-robin)
 ): Promise<BrowserLoginResult[]> {
+  // Proxy selection: rotation list takes priority over single proxy
+  const getProxy = (idx: number): string | undefined => {
+    if (proxies && proxies.length > 0) return proxies[idx % proxies.length];
+    return proxy;
+  };
+
   const tasks = credentials.map(
-    (cred) => async () => {
-      const result = await checkOneAccount(cred.email, cred.password, cred.totp, proxy).catch(
+    (cred, idx) => async () => {
+      const assignedProxy = getProxy(idx);
+      console.log(`[BROWSER] ${cred.email} → proxy slot ${proxies && proxies.length > 0 ? (idx % proxies.length) + 1 : "single"}`);
+      const result = await checkOneAccount(cred.email, cred.password, cred.totp, assignedProxy).catch(
         (err: unknown) => ({
           email: cred.email,
           status: "unknown" as BrowserLoginStatus,
