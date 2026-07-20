@@ -106,7 +106,9 @@ chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}
 def generate_totp(secret: str) -> str | None:
     try:
         import pyotp
-        return pyotp.TOTP(secret).now()
+        # Strip spaces and uppercase (Google Authenticator shows keys with spaces)
+        clean = secret.replace(" ", "").replace("\t", "").upper()
+        return pyotp.TOTP(clean).now()
     except Exception as e:
         log(f"TOTP error: {e}")
         return None
