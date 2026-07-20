@@ -36,6 +36,34 @@ function getPython3(): string {
   throw new Error("python3 not found — add pkgs.python3 to replit.nix");
 }
 
+/**
+ * Inject a unique sticky-session ID into a rotating residential proxy URL.
+ *
+ * Most residential proxy providers (ProxyScrape, Bright Data, Oxylabs, etc.)
+ * support sticky sessions by appending  -session-<ID>  to the username.
+ * Same ID = same exit IP for the entire Chrome session.
+ * Different ID per account = different IPs, but each account stays on ONE IP.
+ *
+ * Example:
+ *   http://user:pass@rp.scrapegw.com:6060
+ *   → http://user-session-a3f9k2:pass@rp.scrapegw.com:6060
+ */
+function injectStickySession(proxyUrl: string, sessionId: string): string {
+  try {
+    const u = new URL(proxyUrl);
+    if (u.username) {
+      u.username = `${u.username}-session-${sessionId}`;
+      return u.toString();
+    }
+  } catch {}
+  // Fallback: plain  host:port:user:pass  or unrecognised format — return as-is
+  return proxyUrl;
+}
+
+function randomSessionId(): string {
+  return Math.random().toString(36).slice(2, 10); // e.g. "a3f9k2xb"
+}
+
 async function checkOneAccount(
   email: string,
   password: string,
@@ -165,8 +193,13 @@ export async function browserLoginCheck(
 
   const tasks = credentials.map(
     (cred, idx) => async () => {
-      const assignedProxy = getProxy(idx);
-      console.log(`[BROWSER] ${cred.email} → proxy slot ${proxies && proxies.length > 0 ? (idx % proxies.length) + 1 : "single"} | fresh=${freshProfile}`);
+      const baseProxy = getProxy(idx);
+      // Inject a unique sticky-session ID so the entire Chrome login for this
+      // account uses ONE fixed exit IP. Without this, a rotating proxy changes
+      // IP mid-session (between page loads) which Google flags as suspicious.
+      const sessionId = randomSessionId();
+      const assignedProxy = baseProxy ? injectStickySession(baseProxy, sessionId) : undefined;
+      console.log(`[BROWSER] ${cred.email} → proxy slot ${proxies && proxies.length > 0 ? (idx % proxies.length) + 1 : "single"} | session=${sessionId} | fresh=${freshProfile}`);
       const result = await checkOneAccount(cred.email, cred.password, cred.totp, assignedProxy, freshProfile).catch(
         (err: unknown) => ({
           email: cred.email,
