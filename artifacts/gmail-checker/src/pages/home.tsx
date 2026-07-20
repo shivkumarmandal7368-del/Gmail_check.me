@@ -400,6 +400,7 @@ function BrowserChecker() {
   const [inputText, setInputText] = useState("");
   const [proxyText, setProxyText] = useState("");
   const [concurrency, setConcurrency] = useState(3);
+  const [freshProfile, setFreshProfile] = useState(true); // fresh device per run (default ON)
 
   const parseProxies = (text: string) =>
     text.split(/\n+/).map(l => l.trim()).filter(Boolean);
@@ -446,6 +447,7 @@ function BrowserChecker() {
               ? { proxy: proxies[0] }
               : {}),
           concurrency,
+          freshProfile,
         }),
         signal: abort.signal,
       });
@@ -613,6 +615,37 @@ function BrowserChecker() {
               </div>
               <p className="text-[10px] text-muted-foreground/60 font-mono text-center">{concurrency} browser{concurrency > 1 ? "s" : ""} simultaneously (1–10)</p>
             </div>
+
+            {/* Fresh device toggle */}
+            <button
+              onClick={() => !isChecking && setFreshProfile(f => !f)}
+              disabled={isChecking}
+              className={cn(
+                "w-full rounded-lg border p-3 text-left transition-colors",
+                freshProfile
+                  ? "border-blue-500/40 bg-blue-500/5"
+                  : "border-border bg-card/30 opacity-60"
+              )}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] font-mono uppercase tracking-widest text-blue-400/80 flex items-center gap-1">
+                  <Smartphone className="w-3 h-3" /> Fresh Device Per Run
+                </span>
+                <div className={cn(
+                  "w-8 h-4 rounded-full transition-colors relative",
+                  freshProfile ? "bg-blue-500" : "bg-border"
+                )}>
+                  <div className={cn(
+                    "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
+                    freshProfile ? "left-4" : "left-0.5"
+                  )} />
+                </div>
+              </div>
+              <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
+                {freshProfile
+                  ? "✓ Har run mein naya device — Chrome profile + fingerprint wipe hoga"
+                  : "Same device reuse hoga (faster second check)"}
+              </p>
+            </button>
 
             <div className="text-xs text-muted-foreground font-mono bg-muted/30 rounded p-2 border border-border space-y-1">
               <p className="text-foreground/70 font-medium">Format:</p>

@@ -326,18 +326,19 @@ def main():
         print(json.dumps({"status": "unknown", "reason": f"Bad input JSON: {e}", "totpCode": None}), flush=True)
         return
 
-    email = data.get("email", "")
-    password = data.get("password", "")
-    totp_secret = data.get("totp")
-    proxy = data.get("proxy")
+    email        = data.get("email", "")
+    password     = data.get("password", "")
+    totp_secret  = data.get("totp")
+    proxy        = data.get("proxy")
+    fresh_profile = bool(data.get("freshProfile", False))
 
-    result = check_gmail(email, password, totp_secret, proxy)
+    result = check_gmail(email, password, totp_secret, proxy, fresh_profile)
     print(json.dumps(result), flush=True)
 
 
 # ── Browser check ─────────────────────────────────────────────────────────────
 
-def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str | None) -> dict:
+def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str | None, fresh_profile: bool = False) -> dict:
     totp_code = generate_totp(totp_secret) if totp_secret else None
 
     try:
@@ -354,13 +355,22 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     chromium_path = get_chromium_path()
     log(f"Chromium: {chromium_path}, headless={headless}, display={display}")
 
-    # Persistent profile per email — Google sees same "device" every time
+    # Profile directory — wiped on fresh_profile=True so Google sees a brand-new device
     safe_email = email.replace("@", "_at_").replace(".", "_")
     profile_dir = os.path.join(tempfile.gettempdir(), "gmail_checker_profiles", safe_email)
-    os.makedirs(profile_dir, exist_ok=True)
-    log(f"Chrome profile: {profile_dir}")
 
-    # ── Load or generate unique persistent fingerprint (cloner-style) ─────────
+    if fresh_profile and os.path.exists(profile_dir):
+        import shutil
+        try:
+            shutil.rmtree(profile_dir)
+            log(f"Fresh profile mode — wiped {profile_dir}")
+        except Exception as e:
+            log(f"Warning: could not wipe profile dir: {e}")
+
+    os.makedirs(profile_dir, exist_ok=True)
+    log(f"Chrome profile: {profile_dir} (fresh={fresh_profile})")
+
+    # ── Load or generate unique fingerprint (fresh_profile → always new) ──────
     fp = get_or_create_fingerprint(profile_dir)
     log(f"Fingerprint: {fp['model']} | {fp['webglRenderer']} | "
         f"{fp['screenW']}x{fp['screenH']} dpr={fp['dpr']} | canvas={fp['canvasSeed']}")

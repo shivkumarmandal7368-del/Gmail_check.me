@@ -41,6 +41,7 @@ async function checkOneAccount(
   password: string,
   totpSecret?: string,
   proxy?: string,
+  freshProfile = false,
 ): Promise<BrowserLoginResult> {
   let totpCode: string | null = null;
   if (totpSecret) {
@@ -48,7 +49,13 @@ async function checkOneAccount(
   }
 
   const python = getPython3();
-  const input = JSON.stringify({ email, password, totp: totpSecret ?? null, proxy: proxy ?? null });
+  const input = JSON.stringify({
+    email,
+    password,
+    totp: totpSecret ?? null,
+    proxy: proxy ?? null,
+    freshProfile,
+  });
 
   console.log(`[BROWSER] ${email} — spawning Python UC checker`);
 
@@ -147,7 +154,8 @@ export async function browserLoginCheck(
   proxy?: string,
   concurrency = 3,
   onAccountComplete?: (result: BrowserLoginResult) => void,
-  proxies?: string[],   // rotation list — one proxy per account (round-robin)
+  proxies?: string[],     // rotation list — one proxy per account (round-robin)
+  freshProfile = false,   // wipe Chrome profile + fingerprint before each check
 ): Promise<BrowserLoginResult[]> {
   // Proxy selection: rotation list takes priority over single proxy
   const getProxy = (idx: number): string | undefined => {
@@ -158,8 +166,8 @@ export async function browserLoginCheck(
   const tasks = credentials.map(
     (cred, idx) => async () => {
       const assignedProxy = getProxy(idx);
-      console.log(`[BROWSER] ${cred.email} → proxy slot ${proxies && proxies.length > 0 ? (idx % proxies.length) + 1 : "single"}`);
-      const result = await checkOneAccount(cred.email, cred.password, cred.totp, assignedProxy).catch(
+      console.log(`[BROWSER] ${cred.email} → proxy slot ${proxies && proxies.length > 0 ? (idx % proxies.length) + 1 : "single"} | fresh=${freshProfile}`);
+      const result = await checkOneAccount(cred.email, cred.password, cred.totp, assignedProxy, freshProfile).catch(
         (err: unknown) => ({
           email: cred.email,
           status: "unknown" as BrowserLoginStatus,

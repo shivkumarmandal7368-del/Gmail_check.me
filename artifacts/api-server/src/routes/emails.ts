@@ -85,12 +85,15 @@ router.post("/emails/browser-check", async (req, res) => {
   const proxies: string[] = Array.isArray(req.body.proxies)
     ? (req.body.proxies as unknown[]).filter((p): p is string => typeof p === "string" && p.trim().length > 0).map(p => p.trim())
     : [];
+  // freshProfile: wipe Chrome profile + fingerprint before each check → brand-new device every run
+  const freshProfile = req.body.freshProfile === true;
   const results = await browserLoginCheck(
     credentials as Array<{ email: string; password: string; totp?: string }>,
     proxy,
     concurrency,
     undefined,
     proxies.length > 0 ? proxies : undefined,
+    freshProfile,
   );
   res.json({
     results,
@@ -121,6 +124,7 @@ router.post("/emails/browser-check-stream", async (req, res) => {
   const proxies: string[] = Array.isArray(req.body.proxies)
     ? (req.body.proxies as unknown[]).filter((p): p is string => typeof p === "string" && p.trim().length > 0).map(p => p.trim())
     : [];
+  const freshProfile = req.body.freshProfile === true;
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -146,6 +150,7 @@ router.post("/emails/browser-check-stream", async (req, res) => {
       concurrency,
       (result) => sendEvent({ type: "result", ...result }),
       proxies.length > 0 ? proxies : undefined,
+      freshProfile,
     );
   } catch (err) {
     sendEvent({ type: "error", message: String(err) });
