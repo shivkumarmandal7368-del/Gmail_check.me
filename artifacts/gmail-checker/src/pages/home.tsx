@@ -567,7 +567,10 @@ function BrowserChecker() {
                     <><p className="font-semibold">⚠ Residential proxy required on Replit</p>
                       <p className="text-yellow-300/70">Google blocks datacenter IPs. Without proxy all checks return <span className="text-orange-400">verification_required</span>.</p></>
                   ) : count === 1 ? (
-                    <p className="font-semibold">🔀 1 proxy — sab accounts ek hi IP se chalenge</p>
+                    <>
+                      <p className="font-semibold">✅ Rotating proxy detected — har account alag IP se chalega</p>
+                      <p className="text-green-300/70">Har account ko unique sticky session milega → alag exit IP (scrapegw / residential rotating proxies ke liye)</p>
+                    </>
                   ) : (
                     <>
                       <p className="font-semibold">🔀 {count} proxies loaded — rotation active</p>
