@@ -1,66 +1,73 @@
-# Vanguard MX
+# Vanguard MX — Gmail Bulk Checker
 
-Email verification tool with three modes: SMTP check, IMAP login check, and browser-based Gmail login check.
+A pnpm monorepo with a React frontend and Express API server for bulk Gmail verification using SMTP, IMAP, and browser automation.
 
-## Run & Operate
+## How to Run
 
-- Frontend (Vite dev server): `PORT=18726 BASE_PATH=/ pnpm --filter @workspace/gmail-checker run dev`
-- API server (Express): `PORT=8080 pnpm --filter @workspace/api-server run dev`
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- `DATABASE_URL` is auto-provided by Replit's built-in PostgreSQL (runtime-managed)
+Two workflows run in parallel (start via the **▶ Project** button):
 
-## Stack
+| Workflow | Command | Port |
+|---|---|---|
+| `Gmail Checker (frontend)` | `pnpm --filter @workspace/gmail-checker run dev` | 18726 |
+| `API Server` | `pnpm --filter @workspace/api-server run dev` | 8080 |
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+## Architecture
 
-## Where things live
+```
+artifacts/
+  api-server/                        ← Express API (TypeScript, esbuild)
+    gmail_uc_checker.py              ← Python Selenium browser automation
+    src/lib/browserLoginChecker.ts   ← Node wrapper spawning Python per account
+    src/lib/imapChecker.ts           ← IMAP login checker
+    src/lib/emailVerifier.ts         ← SMTP MX verifier
+    src/routes/emails.ts             ← API routes
+  gmail-checker/                     ← React + Vite + Tailwind frontend
+    src/pages/home.tsx               ← Main UI (SMTP / IMAP / Browser tabs)
+lib/
+  api-zod/                           ← Shared Zod schemas
+  api-client-react/                  ← Generated React Query hooks
+```
 
-- `artifacts/gmail-checker/` — React + Vite frontend (port 18726)
-- `artifacts/api-server/` — Express 5 API server (port 8080)
-- `artifacts/api-server/src/lib/browserLoginChecker.ts` — Puppeteer-based Gmail browser login checker
-- `artifacts/api-server/src/lib/imapChecker.ts` — IMAP credential checker
-- `artifacts/api-server/src/lib/emailVerifier.ts` — SMTP email verifier
-- `artifacts/api-server/src/routes/emails.ts` — all three check endpoints
-- `artifacts/gmail-checker/src/pages/home.tsx` — main UI (SMTP / IMAP / Browser Check tabs)
-- `scripts/post-merge.sh` — runs `pnpm install --frozen-lockfile` + DB push on merge
+## Check Modes
 
-## Architecture decisions
+1. **SMTP Check** — MX/SMTP handshake, no credentials needed
+2. **IMAP Check** — Direct IMAP login, requires email + password
+3. **Browser Check** — Selenium + undetected-chromedriver signs into Gmail
+   - Requires a residential/mobile proxy (Replit datacenter IP is blocked by Google)
+   - 28 real Android phone fingerprint profiles (antidetect)
+   - Sticky proxy sessions per account
+   - TOTP/2FA auto-entry via pyotp
+   - Concurrent checking (1–10 threads)
 
-- Browser Check uses Puppeteer + puppeteer-extra-plugin-stealth against Chromium from Nix store. Google blocks Replit's datacenter IP, so a **residential proxy is required** for browser check to work.
-- API is built with esbuild to `dist/index.mjs` before starting (no ts-node in prod or dev).
-- All three check modes share a single Express router; the frontend switches between them client-side.
-- Orval codegen generates typed React Query hooks from the OpenAPI spec — run `pnpm --filter @workspace/api-spec run codegen` after spec changes.
+## Python Dependencies
 
-## Product
+```bash
+pip install -r artifacts/api-server/requirements.txt
+```
 
-Three email verification modes accessible from one UI:
-1. **SMTP Check** — verifies email address existence via SMTP handshake (no credentials needed)
-2. **IMAP Check** — tests Gmail credentials via IMAP login (app password required)
-3. **Browser Check** — uses a real Chromium browser to log into Gmail (supports TOTP; requires residential proxy on Replit)
+Packages: `undetected-chromedriver`, `selenium`, `pyotp`, `requests`
 
-Results can be filtered and downloaded as `.txt` lists.
+## Test the API Directly
 
-## User preferences
+```bash
+curl -s -X POST http://localhost:8080/api/emails/browser-check \
+  -H "Content-Type: application/json" \
+  --max-time 300 \
+  -d '{
+    "credentials":[{"email":"user@gmail.com","password":"pass","totp":"BASE32SECRET"}],
+    "proxy":"http://user:pass@rp.example.com:6060",
+    "concurrency":2,
+    "freshProfile":true
+  }'
+```
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+## Important Notes
 
-## Gotchas
+- **Browser Check requires a residential proxy** — datacenter IPs are blocked by Google
+- **Chrome launch lock** — a cross-process `fcntl` file lock (`/tmp/gmail_checker_chrome_launch.lock`) serializes Chrome launches to prevent OOM crashes when running concurrent accounts
+- **Fingerprints** are saved to `/tmp/gmail_checker_profiles/<email>/fingerprint.json`; `freshProfile: true` wipes them before each run
+- Chromium is provided by Nix (`nixpkgs.geckodriver` entry; actual Chromium resolved via `which chromium`)
 
-- **Browser Check requires a residential proxy on Replit** — Replit's datacenter IP is blocked by Google. Without a proxy all accounts return `verification_required`.
-- Chromium path is resolved via `which chromium` with a Nix store fallback hardcoded in `browserLoginChecker.ts` — if Chromium version changes, update that path.
-- `pnpm install` must be run after cloning/importing before workflows will start (deps not committed).
-- Browser Check is sequential (~20-40s per account); long lists block the endpoint for the full duration.
-- **"Couldn't sign you in — not be secure" error** = UA-CH mismatch. Fixed via `Network.setUserAgentOverride` with `userAgentMetadata` (sets `Sec-CH-UA` HTTP headers to Android) + `navigator.userAgentData` spoof in STEALTH_JS. If this error recurs, the persistent Chrome profile for that account is auto-wiped and the next attempt starts fresh.
-- **`--user-agent` flag alone is not enough** — it changes `navigator.userAgent` but NOT `Sec-CH-UA` / `Sec-CH-UA-Mobile` / `Sec-CH-UA-Platform` HTTP headers. The CDP `Network.setUserAgentOverride` call with `userAgentMetadata` is required to align both.
+## User Preferences
 
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- Keep the existing project structure and stack
