@@ -380,32 +380,38 @@ async function checkOneAccount(
     await sleep(600);
 
     console.log(`[BROWSER] ${email} — Step 2: Clicking Next...`);
+
+    // Start navigation listener BEFORE clicking (classic puppeteer race pattern)
+    const navPromise = page.waitForNavigation({ timeout: 10000, waitUntil: "domcontentloaded" }).catch(() => null);
+
+    // Try all strategies rapidly
     await page.focus("#identifierId").catch(() => {});
-    await sleep(200);
     await page.keyboard.press("Enter");
     await sleep(300);
 
     if (page.url().includes("identifier")) {
       await page.keyboard.press("Tab");
-      await sleep(100);
       await page.keyboard.press("Tab");
-      await sleep(100);
       await page.keyboard.press("Enter");
-      await sleep(300);
+      await sleep(200);
     }
 
     if (page.url().includes("identifier")) {
       try {
-        const box = await page.$eval("#identifierNext", el => {
-          const r = el.getBoundingClientRect();
-          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-        });
-        await page.touchscreen.tap(box.x, box.y);
+        const box = await Promise.race([
+          page.$eval("#identifierNext", el => {
+            const r = el.getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          }),
+          sleep(2000).then(() => null),
+        ]);
+        if (box) await page.touchscreen.tap(box.x, box.y);
       } catch {}
     }
 
-    await page.waitForNavigation({ timeout: 8000, waitUntil: "domcontentloaded" }).catch(() => {});
-    await sleep(400);
+    // Wait for the navigation we started before clicking
+    await navPromise;
+    await sleep(300);
     console.log(`[BROWSER] ${email} — After email step. URL: ${page.url().slice(0,60)}`);
 
     // Check page after email step
