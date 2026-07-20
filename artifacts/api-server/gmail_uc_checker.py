@@ -581,9 +581,17 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
         ]) or any(x in url for x in ["WrongPassword", "wrongpassword"]):
             return {"status": "wrong_password", "reason": "Wrong password", "totpCode": totp_code}
 
-        # "challenge/pwd" is the NORMAL password page — do NOT flag it as verification
+        # "challenge/pwd" is the normal password page — do NOT flag it as verification
+        # "challenge/dp"  is the device-protection / 2FA selection page — handle separately
+        # "challenge/totp" / "challenge/ipp" are TOTP pages — handle separately
+        _2fa_urls = ("challenge/dp", "challenge/totp", "challenge/ipp",
+                     "challenge/selection", "challenge/sk")
         is_real_challenge = (
-            ("challenge" in url and "challenge/pwd" not in url)
+            (
+                "challenge" in url
+                and "challenge/pwd" not in url
+                and not any(x in url for x in _2fa_urls)
+            )
             or "InterstitialConfirmation" in url
             or ("verify" in url and "mail" not in url and "challenge/pwd" not in url)
         )
@@ -780,40 +788,66 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
 
         # Click the Google Authenticator option
         log(f"{email} — Clicking 'Google Authenticator' option")
-        try:
-            driver.execute_script("""
-                // Try by data-challengetype (totp = 6)
-                var byType = document.querySelector('[data-challengetype="6"]');
-                if (byType) { byType.click(); return; }
-                // Try by visible text containing "authenticator"
-                var allEls = Array.from(document.querySelectorAll(
-                    'li, div[role="listitem"], [data-challengetype]'));
-                var found = allEls.find(function(el) {
-                    return el.innerText && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
-                });
-                if (found) { found.click(); return; }
-                // Broader fallback — any clickable element with the word
-                var broader = Array.from(document.querySelectorAll('*')).find(function(el) {
-                    return el.children.length === 0
-                        && el.innerText
-                        && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
-                });
-                if (broader) broader.click();
-            """)
-        except Exception as e:
-            log(f"Authenticator click error: {e}")
 
+        def _click_authenticator():
+            try:
+                driver.execute_script("""
+                    // Try by data-challengetype (totp = 6)
+                    var byType = document.querySelector('[data-challengetype="6"]');
+                    if (byType) { byType.click(); return; }
+                    // Try by visible text containing "authenticator"
+                    var allEls = Array.from(document.querySelectorAll(
+                        'li, div[role="listitem"], [data-challengetype]'));
+                    var found = allEls.find(function(el) {
+                        return el.innerText && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
+                    });
+                    if (found) { found.click(); return; }
+                    // Broader fallback — any clickable element with the word
+                    var broader = Array.from(document.querySelectorAll('*')).find(function(el) {
+                        return el.children.length === 0
+                            && el.innerText
+                            && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
+                    });
+                    if (broader) broader.click();
+                """)
+            except Exception as e:
+                log(f"Authenticator click error: {e}")
+
+        _click_authenticator()
         rand_sleep(1800, 2800)
 
-        # Wait for the TOTP input to appear
-        totp_field = wait_for_any([
+        TOTP_SELECTORS = [
             'input[name="totpPin"]', 'input[name="Pin"]', 'input[id="totpPin"]',
             'input[autocomplete="one-time-code"]', 'input[type="tel"]',
-            'input[aria-label*="code"]',
-        ], timeout=12)
+            'input[aria-label*="code"]', 'input[aria-label*="Code"]',
+            'input[type="number"]',
+        ]
+
+        # Wait for the TOTP input to appear (longer timeout — SPA navigation on dp page)
+        totp_field = wait_for_any(TOTP_SELECTORS, timeout=18)
+
+        # Fallback: try "Try another way" → then click authenticator again
+        if totp_field is None:
+            log(f"{email} — TOTP not found after first click, trying 'Try another way'")
+            try:
+                driver.execute_script("""
+                    var links = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+                    var found = links.find(function(el) {
+                        var t = (el.innerText || '').toLowerCase();
+                        return t.indexOf('another way') !== -1 || t.indexOf('different') !== -1
+                            || t.indexOf('more options') !== -1 || t.indexOf('try again') !== -1;
+                    });
+                    if (found) found.click();
+                """)
+                rand_sleep(1500, 2500)
+                _click_authenticator()
+                rand_sleep(1500, 2500)
+                totp_field = wait_for_any(TOTP_SELECTORS, timeout=15)
+            except Exception as e:
+                log(f"Try another way error: {e}")
 
         url, text = page_state()
-        log(f"{email} — After authenticator click: {url[:70]}")
+        log(f"{email} — After authenticator click: {url[:70]}, totp_field={'found' if totp_field else 'NOT found'}")
 
     # ── Enter TOTP code (whether we just navigated here or were already here) ─
     if totp_field is not None:
