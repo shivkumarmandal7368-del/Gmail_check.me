@@ -31,6 +31,76 @@ def rand_sleep(min_ms: int, max_ms: int):
     time.sleep(random.uniform(min_ms / 1000, max_ms / 1000))
 
 
+def human_type(element, text: str):
+    """Type text character by character with realistic random delays."""
+    for char in text:
+        element.send_keys(char)
+        # Most keystrokes: 60-160ms, occasional pause (typo-think)
+        delay = random.uniform(0.06, 0.16)
+        if random.random() < 0.05:  # 5% chance of longer pause
+            delay += random.uniform(0.2, 0.5)
+        time.sleep(delay)
+
+
+def move_to_element(driver, element):
+    """Move mouse naturally to element before interacting."""
+    try:
+        from selenium.webdriver.common.action_chains import ActionChains
+        ac = ActionChains(driver)
+        ac.move_to_element(element)
+        ac.pause(random.uniform(0.1, 0.3))
+        ac.perform()
+    except Exception:
+        pass
+
+
+STEALTH_JS = """
+// Hide webdriver flag
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+// Fake plugins list
+Object.defineProperty(navigator, 'plugins', {
+  get: () => {
+    var plugins = [
+      { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+      { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+    ];
+    plugins.length = 3;
+    plugins[Symbol.iterator] = Array.prototype[Symbol.iterator];
+    return plugins;
+  }
+});
+
+// Fake languages
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+
+// Fake hardware concurrency
+Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+
+// Fake device memory
+Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+
+// Fake screen resolution
+Object.defineProperty(screen, 'width', { get: () => 1920 });
+Object.defineProperty(screen, 'height', { get: () => 1080 });
+Object.defineProperty(screen, 'availWidth', { get: () => 1920 });
+Object.defineProperty(screen, 'availHeight', { get: () => 1040 });
+Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+
+// Remove automation-specific chrome properties
+if (window.chrome && window.chrome.app) {
+  try { delete window.chrome.app; } catch(e) {}
+}
+
+// Fake notification permission
+if (window.Notification) {
+  Object.defineProperty(Notification, 'permission', { get: () => 'default' });
+}
+"""
+
+
 def get_chromium_path() -> str | None:
     for cmd in ("chromium", "chromium-browser", "google-chrome"):
         try:
@@ -200,8 +270,8 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1366,768")
-    options.add_argument("--lang=en-US")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--lang=en-US,en")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-save-password-bubble")
@@ -209,6 +279,13 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--disable-infobars")
     options.add_argument("--password-store=basic")
     options.add_argument("--metrics-recording-only")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-features=IsolateOrigins,site-per-process")
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/138.0.0.0 Safari/537.36"
+    )
     if headless:
         options.add_argument("--disable-gpu")
 
@@ -230,6 +307,14 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         }
 
     log("Chrome launched")
+
+    # Inject stealth patches on every new page
+    try:
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": STEALTH_JS})
+        log("Stealth JS injected via CDP")
+    except Exception as e:
+        log(f"Stealth JS warning: {e}")
+
     try:
         return _do_login(driver, email, password, totp_code)
     except Exception as e:
@@ -361,9 +446,14 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
     log(f"{email} — Step 1: warming up google.com")
     try:
         driver.get("https://www.google.com")
-        rand_sleep(800, 1500)
+        rand_sleep(1200, 2200)
+        # Simulate reading the page — scroll down slowly
+        driver.execute_script("window.scrollBy(0, 150)")
+        rand_sleep(300, 600)
         driver.execute_script("window.scrollBy(0, 100)")
-        rand_sleep(400, 800)
+        rand_sleep(400, 900)
+        driver.execute_script("window.scrollBy(0, -80)")
+        rand_sleep(500, 1000)
     except Exception as e:
         log(f"Warmup warning: {e}")
 
@@ -418,12 +508,14 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
             "debugScreenshot": shot,
         }
 
+    move_to_element(driver, email_field)
+    rand_sleep(200, 400)
     email_field.click()
-    rand_sleep(150, 300)
-    email_field.send_keys(email)
-    rand_sleep(400, 700)
+    rand_sleep(300, 600)
+    human_type(email_field, email)
+    rand_sleep(500, 900)
     email_field.send_keys(Keys.ENTER)
-    rand_sleep(2000, 3000)
+    rand_sleep(2500, 3500)
 
     url, text = page_state()
     log(f"{email} — After email submit: {url[:70]}")
@@ -463,8 +555,12 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
             "debugScreenshot": shot,
         }
 
-    pw_field.send_keys(password)
-    rand_sleep(300, 600)
+    move_to_element(driver, pw_field)
+    rand_sleep(200, 400)
+    pw_field.click()
+    rand_sleep(300, 500)
+    human_type(pw_field, password)
+    rand_sleep(500, 900)
     pw_field.send_keys(Keys.ENTER)
     rand_sleep(2500, 3500)
 
@@ -553,9 +649,11 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
 
         log(f"{email} — Entering TOTP code: {totp_code}")
         try:
+            move_to_element(driver, totp_field)
+            rand_sleep(150, 300)
             totp_field.clear()
             rand_sleep(100, 200)
-            totp_field.send_keys(totp_code)
+            human_type(totp_field, totp_code)
             rand_sleep(400, 600)
             totp_field.send_keys(Keys.ENTER)
         except Exception as e:
