@@ -133,14 +133,24 @@ async function checkOneAccount(
   const puppeteerExtra = await getPuppeteer();
 
   const proxyParsed = proxy ? parseProxy(proxy) : null;
-
   const profileDir = getProfileDir(proxy);
+
+  // Xvfb must be resolved BEFORE building launchArgs (useHeadless used in args)
+  const xvfbDisplay = await ensureXvfb();
+  const useHeadless = xvfbDisplay === null;
+
+  if (xvfbDisplay) {
+    process.env.DISPLAY = xvfbDisplay;
+    console.log(`[BROWSER] ${email} — virtual display ${xvfbDisplay} (non-headless)`);
+  } else {
+    console.log(`[BROWSER] ${email} — headless fallback`);
+  }
 
   const launchArgs = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
-    "--disable-gpu",
+    ...(useHeadless ? ["--disable-gpu"] : []), // keep GPU on virtual display
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-blink-features=AutomationControlled",
@@ -155,28 +165,16 @@ async function checkOneAccount(
     "--window-size=1366,768",
     "--lang=en-US",
     "--password-store=basic",
-    `--user-data-dir=${profileDir}`,
-    // Android only
     ...(isAndroid ? ["--disable-features=VizDisplayCompositor"] : []),
   ];
 
   if (proxyParsed) launchArgs.push(`--proxy-server=${proxyParsed.server}`);
 
-  // Try Xvfb virtual display first (non-headless = Google cannot detect automation)
-  const xvfbDisplay = await ensureXvfb();
-  const useHeadless = xvfbDisplay === null;
-
-  if (xvfbDisplay) {
-    process.env.DISPLAY = xvfbDisplay;
-    console.log(`[BROWSER] ${email} — using virtual display ${xvfbDisplay} (non-headless)`);
-  } else {
-    console.log(`[BROWSER] ${email} — Xvfb unavailable, falling back to headless`);
-  }
-
   const browser = await puppeteerExtra.launch({
     executablePath: getChromiumPath(),
     headless: useHeadless ? ("new" as any) : false,
     args: launchArgs,
+    userDataDir: profileDir,
     defaultViewport: { width: 1366, height: 768, deviceScaleFactor: 1 },
     timeout: BROWSER_TIMEOUT,
     ignoreHTTPSErrors: true,
@@ -364,39 +362,61 @@ async function checkOneAccount(
   }
 
   try {
-    // ── Step 1: Warm up — build realistic session cookies ─────
-    console.log(`[BROWSER] ${email} — Step 1: warming up...`);
-    const warmupSites = ["https://www.google.com", "https://www.youtube.com"];
-    for (const site of warmupSites) {
-      try {
-        await page.goto(site, { waitUntil: "domcontentloaded", timeout: 15000 });
-        await sleep(rand(600, 1200));
-        // Realistic scroll + mouse movement
-        await page.mouse.move(rand(200, 900), rand(100, 400));
-        await sleep(rand(200, 500));
-        await page.evaluate(() => window.scrollBy(0, Math.random() * 300 + 100));
-        await sleep(rand(300, 700));
-      } catch { /* non-fatal — continue */ }
-    }
-
-    // ── Step 1b: Go directly to Gmail sign-in ─────────────────
-    console.log(`[BROWSER] ${email} — Step 1b: goto Gmail sign-in...`);
-    const signinUrl =
-      "https://accounts.google.com/v3/signin/identifier" +
-      "?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F%3Fservice%3Dmail" +
-      "%26flowName%3DGlifWebSignIn%26flowEntry%3DAccountChooser" +
-      "%26ec%3Dasw-gmail-globalnav-signin" +
-      "&uj=gafb-gmail_asw-globalnav-en" +
-      "&flowName=GlifWebSignIn&flowEntry=ServiceLogin";
+    // ── Step 1: Warm up on google.com + natural Sign in click ───
+    console.log(`[BROWSER] ${email} — Step 1: warming up google.com...`);
     try {
-      await page.goto(signinUrl, { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
+      await page.goto("https://www.google.com", { waitUntil: "domcontentloaded", timeout: 20000 });
     } catch (e: any) {
       if (e?.message?.includes("ERR_") || e?.message?.includes("net::")) {
         await sleep(3000);
-        await page.goto(signinUrl, { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
+        await page.goto("https://www.google.com", { waitUntil: "domcontentloaded", timeout: 20000 });
       } else throw e;
     }
-    console.log(`[BROWSER] ${email} — Step 1 done. url=${page.url().slice(0, 55)}`);
+    // Human-like browsing behaviour
+    await page.mouse.move(rand(300, 800), rand(200, 500));
+    await sleep(rand(700, 1300));
+    await page.evaluate(() => window.scrollBy(0, 120));
+    await sleep(rand(400, 800));
+    await page.mouse.move(rand(400, 900), rand(100, 350));
+    await sleep(rand(300, 600));
+
+    // ── Step 1b: Click "Sign in" button — natural referrer ────
+    console.log(`[BROWSER] ${email} — Step 1b: clicking Sign in...`);
+    const signinSelectors = [
+      'a[href*="accounts.google.com/ServiceLogin"]',
+      'a[href*="accounts.google.com/signin"]',
+      'a[data-action="sign in"]',
+      'a[aria-label="Sign in"]',
+      '.gb_B a',  // top-right account area
+      '#gb_70',   // "Sign in" link id
+      'a.gb_de',
+    ];
+    let clicked = false;
+    for (const sel of signinSelectors) {
+      try {
+        const el = await page.$(sel);
+        if (el) {
+          await el.click();
+          await page.waitForNavigation({ timeout: 10000, waitUntil: "domcontentloaded" }).catch(() => {});
+          clicked = true;
+          break;
+        }
+      } catch {}
+    }
+
+    // Fallback: navigate directly if click didn't work
+    if (!clicked || !page.url().includes("accounts.google.com")) {
+      console.log(`[BROWSER] ${email} — Sign in click missed, direct navigate...`);
+      await page.goto(
+        "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F&service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
+        { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT }
+      ).catch(async () => {
+        await sleep(2000);
+        await page.goto("https://accounts.google.com/signin/v2/identifier?service=mail", { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
+      });
+    }
+
+    console.log(`[BROWSER] ${email} — Step 1 done. url=${page.url().slice(0, 60)}`);
     await sleep(rand(500, 900));
 
     // ── Step 2: Enter email ────────────────────────────────────
