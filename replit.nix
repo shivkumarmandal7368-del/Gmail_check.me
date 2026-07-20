@@ -1,5 +1,7 @@
 {pkgs}: {
   deps = [
+    pkgs.xorg.xorgserver
+    pkgs.xvfb-run
     pkgs.dbus
     pkgs.glib
     pkgs.cairo

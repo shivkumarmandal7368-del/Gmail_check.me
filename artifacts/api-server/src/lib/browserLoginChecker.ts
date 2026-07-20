@@ -1,5 +1,49 @@
-import { execSync } from "child_process";
+import { execSync, spawn } from "child_process";
+import { createHash } from "crypto";
+import { mkdirSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { generateTOTP } from "./totp.js";
+
+// Persistent profile dir per proxy — cookies & fingerprint survive across runs
+function getProfileDir(proxy?: string): string {
+  const key = proxy
+    ? createHash("md5").update(proxy).digest("hex").slice(0, 10)
+    : "no-proxy";
+  const dir = join(tmpdir(), `vanguard-chrome-${key}`);
+  try { mkdirSync(dir, { recursive: true }); } catch {}
+  return dir;
+}
+
+// Virtual display management — one Xvfb per display number
+let xvfbDisplay: number | null = null;
+let xvfbProc: ReturnType<typeof spawn> | null = null;
+
+async function ensureXvfb(): Promise<string | null> {
+  // Return existing display if already running
+  if (xvfbDisplay !== null) return `:${xvfbDisplay}`;
+
+  const display = 99;
+  try {
+    // Kill any stale Xvfb on that display
+    try { execSync(`pkill -f "Xvfb :${display}"`, { stdio: "ignore" }); } catch {}
+    await new Promise<void>(r => setTimeout(r, 300));
+
+    xvfbProc = spawn("Xvfb", [`:${display}`, "-screen", "0", "1366x768x24", "-ac"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    xvfbProc.unref();
+    await new Promise<void>(r => setTimeout(r, 800)); // wait for Xvfb to start
+
+    xvfbDisplay = display;
+    console.log(`[BROWSER] Xvfb started on :${display}`);
+    return `:${display}`;
+  } catch (e) {
+    console.log(`[BROWSER] Xvfb unavailable: ${e}`);
+    return null;
+  }
+}
 
 export type BrowserLoginStatus =
   | "opened"
@@ -64,6 +108,17 @@ const isAndroid =
     !!process.env.PREFIX?.includes("com.termux") ||
     (() => { try { return require("fs").existsSync("/data/data/com.termux"); } catch { return false; } })());
 
+// Module-level singleton — stealth plugin must be registered once only
+let _puppeteerExtraInstance: any = null;
+async function getPuppeteer() {
+  if (_puppeteerExtraInstance) return _puppeteerExtraInstance;
+  const puppeteerExtra = (await import("puppeteer-extra")).default;
+  const StealthPlugin = (await import("puppeteer-extra-plugin-stealth")).default;
+  puppeteerExtra.use(StealthPlugin());
+  _puppeteerExtraInstance = puppeteerExtra;
+  return puppeteerExtra;
+}
+
 async function checkOneAccount(
   email: string,
   password: string,
@@ -75,11 +130,11 @@ async function checkOneAccount(
     try { totpCode = generateTOTP(totpSecret); } catch {}
   }
 
-  const puppeteerExtra = (await import("puppeteer-extra")).default;
-  const StealthPlugin = (await import("puppeteer-extra-plugin-stealth")).default;
-  puppeteerExtra.use(StealthPlugin());
+  const puppeteerExtra = await getPuppeteer();
 
   const proxyParsed = proxy ? parseProxy(proxy) : null;
+
+  const profileDir = getProfileDir(proxy);
 
   const launchArgs = [
     "--no-sandbox",
@@ -89,29 +144,43 @@ async function checkOneAccount(
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-blink-features=AutomationControlled",
-    "--disable-features=IsolateOrigins,site-per-process",
-    "--disable-web-security",
-    "--allow-running-insecure-content",
+    "--disable-infobars",
     "--disable-notifications",
     "--disable-popup-blocking",
-    "--enable-features=NetworkService,NetworkServiceInProcess",
+    "--disable-save-password-bubble",
+    "--disable-translate",
+    "--disable-extensions",
     "--metrics-recording-only",
     "--use-mock-keychain",
-    "--window-size=1280,800",
-    "--lang=en-US,en",
-    // Android: no-zygote removed — it breaks networking on many devices
+    "--window-size=1366,768",
+    "--lang=en-US",
+    "--password-store=basic",
+    `--user-data-dir=${profileDir}`,
+    // Android only
     ...(isAndroid ? ["--disable-features=VizDisplayCompositor"] : []),
   ];
 
   if (proxyParsed) launchArgs.push(`--proxy-server=${proxyParsed.server}`);
 
+  // Try Xvfb virtual display first (non-headless = Google cannot detect automation)
+  const xvfbDisplay = await ensureXvfb();
+  const useHeadless = xvfbDisplay === null;
+
+  if (xvfbDisplay) {
+    process.env.DISPLAY = xvfbDisplay;
+    console.log(`[BROWSER] ${email} — using virtual display ${xvfbDisplay} (non-headless)`);
+  } else {
+    console.log(`[BROWSER] ${email} — Xvfb unavailable, falling back to headless`);
+  }
+
   const browser = await puppeteerExtra.launch({
     executablePath: getChromiumPath(),
-    headless: "new" as any,
+    headless: useHeadless ? ("new" as any) : false,
     args: launchArgs,
-    defaultViewport: { width: 1280, height: 800, deviceScaleFactor: 1 },
+    defaultViewport: { width: 1366, height: 768, deviceScaleFactor: 1 },
     timeout: BROWSER_TIMEOUT,
     ignoreHTTPSErrors: true,
+    env: xvfbDisplay ? { ...process.env, DISPLAY: xvfbDisplay } : process.env,
   });
 
   const page = await browser.newPage();
@@ -125,18 +194,52 @@ async function checkOneAccount(
   );
 
   await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, "webdriver",          { get: () => undefined });
-    Object.defineProperty(navigator, "languages",          { get: () => ["en-US", "en"] });
-    Object.defineProperty(navigator, "language",           { get: () => "en-US" });
-    Object.defineProperty(navigator, "platform",           { get: () => "Win32" });
-    Object.defineProperty(navigator, "hardwareConcurrency",{ get: () => 8 });
-    Object.defineProperty(navigator, "deviceMemory",       { get: () => 8 });
-    (window as any).chrome = { runtime: {} };
-    const getParam = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function(p) {
-      if (p === 37445) return "Intel Inc.";
-      if (p === 37446) return "Intel Iris OpenGL Engine";
-      return getParam.call(this, p);
+    // Hide webdriver
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    delete (navigator as any).__proto__.webdriver;
+
+    // Realistic navigator values
+    Object.defineProperty(navigator, "languages",           { get: () => ["en-US", "en"] });
+    Object.defineProperty(navigator, "language",            { get: () => "en-US" });
+    Object.defineProperty(navigator, "platform",            { get: () => "Win32" });
+    Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 8 });
+    Object.defineProperty(navigator, "deviceMemory",        { get: () => 8 });
+    Object.defineProperty(navigator, "maxTouchPoints",      { get: () => 0 });
+    Object.defineProperty(navigator, "vendor",              { get: () => "Google Inc." });
+    Object.defineProperty(navigator, "appVersion",          { get: () => "5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36" });
+
+    // Realistic chrome object
+    (window as any).chrome = {
+      app: { isInstalled: false, InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" }, RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" } },
+      runtime: { onConnect: { addListener: () => {} }, onMessage: { addListener: () => {} } },
+      loadTimes: () => ({}),
+      csi: () => ({}),
+    };
+
+    // Permissions API
+    const origQuery = (window.navigator.permissions as any)?.query;
+    if (origQuery) {
+      (window.navigator.permissions as any).query = (parameters: any) =>
+        parameters.name === "notifications"
+          ? Promise.resolve({ state: Notification.permission })
+          : origQuery(parameters);
+    }
+
+    // WebGL — spoof GPU vendor
+    try {
+      const getParam = WebGLRenderingContext.prototype.getParameter;
+      WebGLRenderingContext.prototype.getParameter = function(p) {
+        if (p === 37445) return "Intel Inc.";
+        if (p === 37446) return "Intel Iris OpenGL Engine";
+        return getParam.call(this, p);
+      };
+    } catch {}
+
+    // Hide automation in toString
+    const nativeToString = Function.prototype.toString;
+    Function.prototype.toString = function() {
+      if (this === (window.navigator.permissions as any)?.query) return "function query() { [native code] }";
+      return nativeToString.call(this);
     };
   });
 
@@ -261,61 +364,40 @@ async function checkOneAccount(
   }
 
   try {
-    // ── Step 1: Warm up on google.com first (get cookies) ─────
-    console.log(`[BROWSER] ${email} — Step 1: warming up google.com...`);
-    try {
-      await page.goto("https://www.google.com", { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
-    } catch (e: any) {
-      if (e?.message?.includes("ERR_") || e?.message?.includes("net::")) {
-        console.log(`[BROWSER] ${email} — network error on warmup, retrying...`);
-        await sleep(3000);
-        await page.goto("https://www.google.com", { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
-      } else throw e;
+    // ── Step 1: Warm up — build realistic session cookies ─────
+    console.log(`[BROWSER] ${email} — Step 1: warming up...`);
+    const warmupSites = ["https://www.google.com", "https://www.youtube.com"];
+    for (const site of warmupSites) {
+      try {
+        await page.goto(site, { waitUntil: "domcontentloaded", timeout: 15000 });
+        await sleep(rand(600, 1200));
+        // Realistic scroll + mouse movement
+        await page.mouse.move(rand(200, 900), rand(100, 400));
+        await sleep(rand(200, 500));
+        await page.evaluate(() => window.scrollBy(0, Math.random() * 300 + 100));
+        await sleep(rand(300, 700));
+      } catch { /* non-fatal — continue */ }
     }
-    // Simulate brief human interaction
-    await page.mouse.move(rand(200, 800), rand(200, 500));
-    await sleep(rand(800, 1500));
-    await page.mouse.move(rand(300, 700), rand(100, 400));
-    await sleep(rand(400, 800));
 
-    // ── Step 1b: Navigate via mail.google.com (natural redirect) ─
-    console.log(`[BROWSER] ${email} — Step 1: goto mail.google.com...`);
+    // ── Step 1b: Go directly to Gmail sign-in ─────────────────
+    console.log(`[BROWSER] ${email} — Step 1b: goto Gmail sign-in...`);
+    const signinUrl =
+      "https://accounts.google.com/v3/signin/identifier" +
+      "?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F%3Fservice%3Dmail" +
+      "%26flowName%3DGlifWebSignIn%26flowEntry%3DAccountChooser" +
+      "%26ec%3Dasw-gmail-globalnav-signin" +
+      "&uj=gafb-gmail_asw-globalnav-en" +
+      "&flowName=GlifWebSignIn&flowEntry=ServiceLogin";
     try {
-      await page.goto("https://mail.google.com/mail/", { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
+      await page.goto(signinUrl, { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
     } catch (e: any) {
       if (e?.message?.includes("ERR_") || e?.message?.includes("net::")) {
-        console.log(`[BROWSER] ${email} — network error, retrying in 3s...`);
         await sleep(3000);
-        await page.goto("https://mail.google.com/mail/", { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
+        await page.goto(signinUrl, { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
       } else throw e;
-    }
-    // ── Step 1c: Handle workspace.google.com redirect ─────────
-    {
-      const landedUrl = page.url();
-      if (
-        landedUrl.includes("workspace.google.com") ||
-        landedUrl.includes("google.com/intl") ||
-        (!landedUrl.includes("accounts.google.com") && !landedUrl.includes("mail.google.com"))
-      ) {
-        console.log(`[BROWSER] ${email} — redirected to ${landedUrl.slice(0, 60)}, forcing accounts.google.com...`);
-        try {
-          await page.goto(
-            "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F%3Fservice%3Dmail%26flowName%3DGlifWebSignIn%26flowEntry%3DAccountChooser%26ec%3Dasw-gmail-globalnav-signin&uj=gafb-gmail_asw-globalnav-en&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
-            { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT }
-          );
-        } catch (e: any) {
-          if (e?.message?.includes("ERR_") || e?.message?.includes("net::")) {
-            await sleep(2000);
-            await page.goto(
-              "https://accounts.google.com/signin/v2/identifier?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F&service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
-              { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT }
-            );
-          } else throw e;
-        }
-      }
     }
     console.log(`[BROWSER] ${email} — Step 1 done. url=${page.url().slice(0, 55)}`);
-    await sleep(rand(400, 700));
+    await sleep(rand(500, 900));
 
     // ── Step 2: Enter email ────────────────────────────────────
     console.log(`[BROWSER] ${email} — Step 2: url=${page.url().slice(0, 80)}`);
