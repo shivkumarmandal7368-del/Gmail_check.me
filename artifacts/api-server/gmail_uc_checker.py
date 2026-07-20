@@ -32,12 +32,18 @@ def rand_sleep(min_ms: int, max_ms: int):
 
 
 def human_type(element, text: str):
-    """Type text character by character with realistic random delays."""
+    """Type text character by character with realistic random delays.
+    Re-finds the element if a stale reference is hit."""
+    from selenium.common.exceptions import StaleElementReferenceException
     for char in text:
-        element.send_keys(char)
-        # Most keystrokes: 60-160ms, occasional pause (typo-think)
+        for _attempt in range(3):
+            try:
+                element.send_keys(char)
+                break
+            except StaleElementReferenceException:
+                time.sleep(0.3)  # brief wait then retry
         delay = random.uniform(0.06, 0.16)
-        if random.random() < 0.05:  # 5% chance of longer pause
+        if random.random() < 0.05:
             delay += random.uniform(0.2, 0.5)
         time.sleep(delay)
 
@@ -446,7 +452,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
                 or ("primary" in text and at_mailbox)
             )
 
-        if at_mailbox and (has_compose or has_inbox_text or "mail/u/" in url):
+        if at_mailbox and (has_compose or has_inbox_text or "mail/u/" in url or "mail/mu/" in url or "/mail/mp/" in url):
             rand_sleep(1500, 2000)
             shot = screenshot_b64()
             # ── Logout immediately so Google doesn't flag a suspicious active session ──
@@ -786,22 +792,55 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
 
         dismissed = False
 
-        # gds.google.com — recovery options, home address, etc. (optional Google setup pages)
+        # gds.google.com — recovery options, home address, etc.
+        # Click "Not now" / "Skip" / "Later" properly so the auth session finalises
         if "gds.google.com" in host:
-            log(f"{email} — gds interstitial ({url[url.find('/web/'):][:40]}), skipping to Gmail")
+            page_name = url[url.find('/web/'):url.find('?')] if '/web/' in url else url[:50]
+            log(f"{email} — gds interstitial ({page_name}), clicking dismiss")
             try:
-                driver.get("https://mail.google.com/mail/u/0/#inbox")
-            except Exception:
-                pass
+                clicked = driver.execute_script("""
+                    var skip_texts = ['not now','skip','later','no thanks','dismiss',
+                                      'cancel','maybe later','remind me later'];
+                    var btns = Array.from(document.querySelectorAll('button, a[role="button"]'));
+                    for (var t of skip_texts) {
+                        var found = btns.find(function(b) {
+                            return b.innerText && b.innerText.trim().toLowerCase() === t;
+                        });
+                        if (found) { found.click(); return true; }
+                    }
+                    // Fallback: last button (usually the secondary/skip action)
+                    if (btns.length > 1) { btns[btns.length - 1].click(); return true; }
+                    return false;
+                """)
+                if not clicked:
+                    # Nothing to click — just navigate away
+                    driver.get("https://mail.google.com/mail/u/0/#inbox")
+            except Exception as e:
+                log(f"gds dismiss error: {e}")
+                try:
+                    driver.get("https://mail.google.com/mail/u/0/#inbox")
+                except Exception:
+                    pass
             dismissed = True
 
-        # uplevelingstep — Google account security upgrade prompt (skip it)
+        # uplevelingstep — Google account security upgrade prompt
         elif "uplevelingstep" in url:
-            log(f"{email} — uplevelingstep interstitial, skipping to Gmail")
+            log(f"{email} — uplevelingstep interstitial, clicking skip")
             try:
-                driver.get("https://mail.google.com/mail/u/0/#inbox")
+                driver.execute_script("""
+                    var btns = Array.from(document.querySelectorAll('button'));
+                    var skip = btns.find(function(b) {
+                        var t = (b.innerText || '').trim().toLowerCase();
+                        return t === 'skip' || t === 'not now' || t === 'later' || t === 'dismiss';
+                    });
+                    if (skip) { skip.click(); return; }
+                    if (btns.length > 1) btns[btns.length - 1].click();
+                """)
             except Exception:
-                pass
+                try:
+                    driver.get("https://mail.google.com/mail/u/0/#inbox")
+                except Exception:
+                    pass
             dismissed = True
 
         # signin/continue redirect page
@@ -813,7 +852,50 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
                 pass
             dismissed = True
 
-        # Any accounts.google.com interstitial — try clicking primary CTA
+        # TOTP page reappeared — enter a fresh code and continue
+        elif "challenge/totp" in url or "challenge/selection" in url:
+            log(f"{email} — TOTP/selection page reappeared in interstitial loop, re-entering")
+            if totp_secret:
+                fresh_code = generate_totp(totp_secret)
+                log(f"{email} — Fresh TOTP code: {fresh_code}")
+                try:
+                    # On selection page, click authenticator first
+                    if "challenge/selection" in url:
+                        driver.execute_script("""
+                            var byType = document.querySelector('[data-challengetype="6"]');
+                            if (byType) { byType.click(); return; }
+                            var all = Array.from(document.querySelectorAll('*'));
+                            var found = all.find(function(el) {
+                                return el.children.length === 0 && el.innerText &&
+                                       el.innerText.toLowerCase().indexOf('authenticator') !== -1;
+                            });
+                            if (found) found.click();
+                        """)
+                        rand_sleep(1500, 2500)
+                    tf = wait_for_any([
+                        'input[name="totpPin"]', 'input[name="Pin"]',
+                        'input[autocomplete="one-time-code"]', 'input[type="tel"]',
+                        'input[aria-label*="code"]',
+                    ], timeout=8)
+                    if tf:
+                        tf.clear()
+                        rand_sleep(100, 200)
+                        human_type(tf, fresh_code)
+                        rand_sleep(400, 600)
+                        tf.send_keys(Keys.ENTER)
+                        rand_sleep(2000, 3000)
+                        dismissed = True
+                except Exception as e:
+                    log(f"Re-TOTP error: {e}")
+            if not dismissed:
+                # No TOTP secret or field not found — skip to Gmail
+                try:
+                    driver.get("https://mail.google.com/mail/u/0/#inbox")
+                    dismissed = True
+                except Exception:
+                    break
+
+        # Any other accounts.google.com interstitial — try clicking primary CTA
         elif "accounts.google.com" in host:
             log(f"{email} — accounts interstitial ({url[:60]}), trying to proceed")
             try:
@@ -827,7 +909,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
                 pass
 
         else:
-            # Not at Gmail and not a known interstitial — force navigate
+            # Unknown domain — force navigate to Gmail
             log(f"{email} — unknown page ({url[:60]}), forcing Gmail navigation")
             try:
                 driver.get("https://mail.google.com/mail/u/0/#inbox")
