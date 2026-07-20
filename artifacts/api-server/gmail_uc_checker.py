@@ -604,7 +604,84 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
     if result:
         return result
 
-    # ── Final fallback ────────────────────────────────────────────────────────
+    # ── Post-login interstitial handler ───────────────────────────────────────
+    # Google sometimes shows recovery-info, terms, or continue screens after
+    # a successful login before landing on mail.google.com.
+    for _attempt in range(4):
+        url, text = page_state()
+        host = get_hostname(url)
+
+        if "mail.google.com" in host:
+            break
+
+        dismissed = False
+
+        # Recovery-info popup (gds.google.com/web/recoveryoptions)
+        if "gds.google.com" in host or "recoveryoptions" in url:
+            log(f"{email} — Recovery info page, clicking Cancel")
+            try:
+                driver.execute_script("""
+                    var btns = Array.from(document.querySelectorAll('button'));
+                    var cancel = btns.find(function(b) {
+                        return b.textContent.trim().toLowerCase() === 'cancel'
+                            || b.textContent.trim().toLowerCase() === 'not now';
+                    });
+                    if (cancel) { cancel.click(); return; }
+                    // fallback: first secondary/outlined button
+                    var sec = document.querySelector('button:not([type="submit"])');
+                    if (sec) sec.click();
+                """)
+                dismissed = True
+            except Exception as e:
+                log(f"Cancel click error: {e}")
+
+        # signin/continue redirect page
+        elif "signin/continue" in url:
+            log(f"{email} — signin/continue, navigating directly to Gmail")
+            try:
+                driver.get("https://mail.google.com/mail/u/0/#inbox")
+            except Exception:
+                pass
+            dismissed = True
+
+        # Any other accounts.google.com interstitial — try clicking primary CTA
+        elif "accounts.google.com" in host:
+            log(f"{email} — accounts interstitial ({url[:60]}), trying to proceed")
+            try:
+                driver.execute_script("""
+                    var btn = document.querySelector(
+                        'button[type="submit"], #confirm, [data-action="confirm"], button');
+                    if (btn) btn.click();
+                """)
+                dismissed = True
+            except Exception:
+                pass
+
+        else:
+            # Unknown domain — stop trying
+            break
+
+        if dismissed:
+            rand_sleep(2000, 3000)
+        else:
+            break
+
+    # Wait for Gmail to finish loading after interstitial dismissal
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if "mail.google.com" in get_hostname(driver.current_url):
+            break
+        time.sleep(0.8)
+
+    rand_sleep(1500, 2500)
+    url, text = page_state()
+    log(f"{email} — Final page after interstitials: {url[:70]}")
+
+    result = classify(url, text)
+    if result:
+        return result
+
+    # ── True final fallback ───────────────────────────────────────────────────
     shot = screenshot_b64()
     return {
         "status": "unknown",
