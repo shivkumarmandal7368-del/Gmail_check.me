@@ -63,8 +63,25 @@ def move_to_element(driver, element):
 # ── Phone device profiles — each account gets one assigned randomly ───────────
 # Modelled on real flagship Android phones; covers different GPU, screen, memory.
 PHONE_PROFILES = [
+    # ── Google Pixel ──────────────────────────────────────────────────────────
     {
-        "model": "Pixel 7",       "androidVersion": "14",
+        "model": "Pixel 6",       "androidVersion": "14",   # Tensor G1
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G78 MP20",
+    },
+    {
+        "model": "Pixel 6a",      "androidVersion": "14",   # Tensor G1
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
+        "hwConcurrency": 8, "deviceMemory": 6,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G78 MP20",
+    },
+    {
+        "model": "Pixel 7",       "androidVersion": "14",   # Tensor G2
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
         "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
@@ -72,7 +89,15 @@ PHONE_PROFILES = [
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 730",
     },
     {
-        "model": "Pixel 8",       "androidVersion": "14",
+        "model": "Pixel 7a",      "androidVersion": "14",   # Tensor G2
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G710 MP7",
+    },
+    {
+        "model": "Pixel 8",       "androidVersion": "14",   # Tensor G3
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 915, "availH": 891, "dpr": 2.625,
         "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
@@ -80,12 +105,69 @@ PHONE_PROFILES = [
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
     },
     {
-        "model": "Pixel 8 Pro",   "androidVersion": "14",
+        "model": "Pixel 8 Pro",   "androidVersion": "14",   # Tensor G3
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 919, "availH": 895, "dpr": 2.625,
         "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
         "platform": "Linux armv81",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
+    },
+    {
+        "model": "Pixel 9",       "androidVersion": "15",   # Tensor G4
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
+        "hwConcurrency": 9, "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G715 MP7",
+    },
+    {
+        "model": "Pixel 9 Pro",   "androidVersion": "15",   # Tensor G4
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
+        "hwConcurrency": 9, "deviceMemory": 16, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G715 MP7",
+    },
+    # ── Samsung Galaxy S-series ───────────────────────────────────────────────
+    {
+        "model": "SM-G991B",      "androidVersion": "14",   # Samsung Galaxy S21
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 360, "screenH": 800, "availH": 776, "dpr": 3.0,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G78 MP14",
+    },
+    {
+        "model": "SM-S901B",      "androidVersion": "14",   # Samsung Galaxy S22
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 360, "screenH": 780, "availH": 756, "dpr": 3.0,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "Samsung Electronics Co., Ltd.", "webglRenderer": "Xclipse 920",
+    },
+    {
+        "model": "SM-S908B",      "androidVersion": "14",   # Samsung Galaxy S22 Ultra
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 384, "screenH": 854, "availH": 830, "dpr": 3.0,
+        "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "Samsung Electronics Co., Ltd.", "webglRenderer": "Xclipse 920",
+    },
+    {
+        "model": "SM-S911B",      "androidVersion": "14",   # Samsung Galaxy S23
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 360, "screenH": 773, "availH": 749, "dpr": 3.0,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
+    },
+    {
+        "model": "SM-S711B",      "androidVersion": "14",   # Samsung Galaxy S23 FE
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 360, "screenH": 780, "availH": 756, "dpr": 2.625,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "Samsung Electronics Co., Ltd.", "webglRenderer": "Xclipse 920",
     },
     {
         "model": "SM-S928B",      "androidVersion": "14",   # Samsung Galaxy S24+
@@ -95,12 +177,46 @@ PHONE_PROFILES = [
         "platform": "Linux aarch64",
         "webglVendor": "Samsung Electronics Co., Ltd.", "webglRenderer": "Xclipse 940",
     },
+    # ── Samsung Galaxy A-series ───────────────────────────────────────────────
     {
-        "model": "SM-S911B",      "androidVersion": "14",   # Samsung Galaxy S23
+        "model": "SM-A536B",      "androidVersion": "14",   # Samsung Galaxy A53
         "chromeVersion": "138.0.7204.100",
-        "screenW": 360, "screenH": 773, "availH": 749, "dpr": 3.0,
+        "screenW": 360, "screenH": 800, "availH": 776, "dpr": 2.0,
+        "hwConcurrency": 8, "deviceMemory": 6,  "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G68 MC4",
+    },
+    {
+        "model": "SM-A546B",      "androidVersion": "14",   # Samsung Galaxy A54
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 360, "screenH": 800, "availH": 776, "dpr": 2.0,
+        "hwConcurrency": 8, "deviceMemory": 6,  "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G68",
+    },
+    {
+        "model": "SM-A346B",      "androidVersion": "14",   # Samsung Galaxy A34
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 360, "screenH": 800, "availH": 776, "dpr": 2.0,
+        "hwConcurrency": 8, "deviceMemory": 6,  "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G68",
+    },
+    {
+        "model": "SM-A736B",      "androidVersion": "14",   # Samsung Galaxy A73
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 360, "screenH": 800, "availH": 776, "dpr": 3.0,
         "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
         "platform": "Linux aarch64",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 642L",
+    },
+    # ── OnePlus ───────────────────────────────────────────────────────────────
+    {
+        "model": "CPH2423",       "androidVersion": "14",   # OnePlus 11
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 919, "availH": 895, "dpr": 2.625,
+        "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
     },
     {
@@ -112,6 +228,23 @@ PHONE_PROFILES = [
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 750",
     },
     {
+        "model": "CPH2493",       "androidVersion": "14",   # OnePlus Nord 3
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 919, "availH": 895, "dpr": 2.625,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G710 MC10",
+    },
+    # ── Xiaomi / Redmi ────────────────────────────────────────────────────────
+    {
+        "model": "2211133G",      "androidVersion": "14",   # Xiaomi 13
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
+        "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
+    },
+    {
         "model": "23049PCD8G",    "androidVersion": "14",   # Xiaomi 14
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
@@ -120,12 +253,61 @@ PHONE_PROFILES = [
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 750",
     },
     {
-        "model": "SM-A546B",      "androidVersion": "14",   # Samsung Galaxy A54
+        "model": "23078PND5G",    "androidVersion": "14",   # Xiaomi 13T Pro
         "chromeVersion": "138.0.7204.100",
-        "screenW": 360, "screenH": 800, "availH": 776, "dpr": 2.0,
-        "hwConcurrency": 8, "deviceMemory": 6,  "maxTouchPoints": 5,
-        "platform": "Linux aarch64",
-        "webglVendor": "ARM", "webglRenderer": "Mali-G68",
+        "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
+        "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G715 MC11",
+    },
+    {
+        "model": "22101316G",     "androidVersion": "13",   # Redmi Note 12 Pro
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G68 MC4",
+    },
+    # ── Others ────────────────────────────────────────────────────────────────
+    {
+        "model": "RMX3706",       "androidVersion": "14",   # Realme GT 5
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
+        "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
+    },
+    {
+        "model": "A065",          "androidVersion": "14",   # Nothing Phone 2
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
+        "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 730",
+    },
+    {
+        "model": "XT2303-2",      "androidVersion": "14",   # Motorola Edge 40
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G77 MC9",
+    },
+    {
+        "model": "V2246",         "androidVersion": "14",   # Vivo V29
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
+        "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 642L",
+    },
+    {
+        "model": "PGEM10",        "androidVersion": "14",   # Oppo Find X6
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
+        "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G715 MC11",
     },
 ]
 
