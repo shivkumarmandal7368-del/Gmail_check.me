@@ -289,6 +289,31 @@ async function checkOneAccount(
         await page.goto("https://mail.google.com/mail/", { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
       } else throw e;
     }
+    // ── Step 1c: Handle workspace.google.com redirect ─────────
+    {
+      const landedUrl = page.url();
+      if (
+        landedUrl.includes("workspace.google.com") ||
+        landedUrl.includes("google.com/intl") ||
+        (!landedUrl.includes("accounts.google.com") && !landedUrl.includes("mail.google.com"))
+      ) {
+        console.log(`[BROWSER] ${email} — redirected to ${landedUrl.slice(0, 60)}, forcing accounts.google.com...`);
+        try {
+          await page.goto(
+            "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F%3Fservice%3Dmail%26flowName%3DGlifWebSignIn%26flowEntry%3DAccountChooser%26ec%3Dasw-gmail-globalnav-signin&uj=gafb-gmail_asw-globalnav-en&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
+            { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT }
+          );
+        } catch (e: any) {
+          if (e?.message?.includes("ERR_") || e?.message?.includes("net::")) {
+            await sleep(2000);
+            await page.goto(
+              "https://accounts.google.com/signin/v2/identifier?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F&service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
+              { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT }
+            );
+          } else throw e;
+        }
+      }
+    }
     console.log(`[BROWSER] ${email} — Step 1 done. url=${page.url().slice(0, 55)}`);
     await sleep(rand(400, 700));
 
