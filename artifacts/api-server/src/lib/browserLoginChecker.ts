@@ -381,37 +381,38 @@ async function checkOneAccount(
 
     console.log(`[BROWSER] ${email} — Step 2: Clicking Next...`);
 
-    // Start navigation listener BEFORE clicking (classic puppeteer race pattern)
-    const navPromise = page.waitForNavigation({ timeout: 10000, waitUntil: "domcontentloaded" }).catch(() => null);
+    // Hard 10s timeout on entire email-submit block
+    await Promise.race([
+      (async () => {
+        const navPromise = page.waitForNavigation({ timeout: 9000, waitUntil: "domcontentloaded" }).catch(() => null);
+        await page.focus("#identifierId").catch(() => {});
+        await page.keyboard.press("Enter");
+        await sleep(250);
+        if (page.url().includes("identifier")) {
+          await page.keyboard.press("Tab");
+          await page.keyboard.press("Tab");
+          await page.keyboard.press("Enter");
+          await sleep(200);
+        }
+        if (page.url().includes("identifier")) {
+          await page.evaluate(() => {
+            const btn = document.querySelector("#identifierNext") as HTMLElement | null;
+            if (btn) btn.click();
+          }).catch(() => {});
+          await sleep(200);
+        }
+        if (page.url().includes("identifier")) {
+          await Promise.race([
+            page.touchscreen.tap(800, 400),
+            sleep(1500),
+          ]).catch(() => {});
+        }
+        await navPromise;
+      })(),
+      sleep(10000),
+    ]);
 
-    // Try all strategies rapidly
-    await page.focus("#identifierId").catch(() => {});
-    await page.keyboard.press("Enter");
-    await sleep(300);
-
-    if (page.url().includes("identifier")) {
-      await page.keyboard.press("Tab");
-      await page.keyboard.press("Tab");
-      await page.keyboard.press("Enter");
-      await sleep(200);
-    }
-
-    if (page.url().includes("identifier")) {
-      try {
-        const box = await Promise.race([
-          page.$eval("#identifierNext", el => {
-            const r = el.getBoundingClientRect();
-            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-          }),
-          sleep(2000).then(() => null),
-        ]);
-        if (box) await page.touchscreen.tap(box.x, box.y);
-      } catch {}
-    }
-
-    // Wait for the navigation we started before clicking
-    await navPromise;
-    await sleep(300);
+    await sleep(200);
     console.log(`[BROWSER] ${email} — After email step. URL: ${page.url().slice(0,60)}`);
 
     // Check page after email step
