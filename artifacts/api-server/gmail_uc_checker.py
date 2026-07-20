@@ -269,36 +269,44 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
         except Exception:
             return None
 
+    def get_hostname(url: str) -> str:
+        """Return the actual hostname from the URL (not query string)."""
+        try:
+            from urllib.parse import urlparse
+            return urlparse(url).hostname or ""
+        except Exception:
+            return ""
+
     def classify(url: str, text: str) -> dict | None:
-        at_mailbox = "mail.google.com" in url or "gmail.com/mail" in url
+        host = get_hostname(url)
+        # Must literally BE at mail.google.com — not just have it in a ?continue= param
+        at_mailbox = host == "mail.google.com" or host.endswith(".mail.google.com")
 
         has_compose = False
-        try:
-            has_compose = len(driver.find_elements(By.CSS_SELECTOR,
-                '[gh="cm"],[data-tooltip="Compose"],[aria-label="Compose"]')) > 0
-        except Exception:
-            pass
+        if at_mailbox:
+            try:
+                has_compose = len(driver.find_elements(By.CSS_SELECTOR,
+                    '[gh="cm"],[data-tooltip="Compose"],[aria-label="Compose"]')) > 0
+            except Exception:
+                pass
 
-        has_inbox_text = (
-            "compose" in text
-            or ("inbox" in text and "sign in" not in text)
-            or ("primary" in text and "mail.google.com" in url)
-        )
+        has_inbox_text = False
+        if at_mailbox:
+            has_inbox_text = (
+                "compose" in text
+                or ("inbox" in text and "sign in" not in text and "create an account" not in text)
+                or ("primary" in text and at_mailbox)
+            )
 
-        if at_mailbox or has_compose or has_inbox_text:
-            if not at_mailbox and not has_compose and (
-                "sign in" in text or "create an account" in text
-            ):
-                pass  # marketing page, not logged in
-            else:
-                rand_sleep(1500, 2000)
-                shot = screenshot_b64()
-                return {
-                    "status": "opened",
-                    "reason": "Mailbox opened successfully ✅",
-                    "totpCode": totp_code,
-                    "debugScreenshot": shot,
-                }
+        if at_mailbox and (has_compose or has_inbox_text or "mail/u/" in url):
+            rand_sleep(1500, 2000)
+            shot = screenshot_b64()
+            return {
+                "status": "opened",
+                "reason": "Mailbox opened successfully ✅",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
 
         if any(x in text for x in [
             "couldn't find your google account", "no account found",
@@ -312,17 +320,23 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
         ]) or any(x in url for x in ["WrongPassword", "wrongpassword"]):
             return {"status": "wrong_password", "reason": "Wrong password", "totpCode": totp_code}
 
+        # "challenge/pwd" is the NORMAL password page — do NOT flag it as verification
+        is_real_challenge = (
+            ("challenge" in url and "challenge/pwd" not in url)
+            or "InterstitialConfirmation" in url
+            or ("verify" in url and "mail" not in url and "challenge/pwd" not in url)
+        )
         if any(x in text for x in [
             "verify your identity", "verify it's you", "choose a way to verify",
             "confirm it's you", "unusual activity", "suspicious activity",
             "protect your account"
-        ]) or "challenge" in url or "InterstitialConfirmation" in url or (
-            "verify" in url and "mail" not in url
-        ):
+        ]) or is_real_challenge:
+            shot = screenshot_b64()
             return {
                 "status": "verification_required",
                 "reason": "Google is asking for phone/device verification",
                 "totpCode": totp_code,
+                "debugScreenshot": shot,
             }
 
         return None
@@ -455,46 +469,142 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
     url, text = page_state()
     log(f"{email} — After password submit: {url[:70]}")
 
-    result = classify(url, text)
-    if result:
-        return result
+    # ── Quick wrong-password check (before anything else) ─────────────────────
+    if any(x in text for x in [
+        "wrong password", "didn't recognize", "that password is incorrect",
+        "incorrect password", "password you entered"
+    ]) or any(x in url for x in ["WrongPassword", "wrongpassword"]):
+        return {"status": "wrong_password", "reason": "Wrong password", "totpCode": totp_code}
 
-    # ── Step 4: 2FA / TOTP ────────────────────────────────────────────────────
+    # ── Step 4: 2FA — check BEFORE classify so we handle it ourselves ─────────
+
+    # Detect method-selection page ("2-Step Verification — choose how you want")
+    is_2fa_select = any(x in text for x in [
+        "2-step verification",
+        "choose how you want to sign in",
+        "how do you want to sign in",
+        "verify it's you",
+    ])
+
+    # Detect direct TOTP-input page (input already visible)
     totp_field = None
     try:
-        totp_field = driver.find_element(
-            By.CSS_SELECTOR,
-            'input[name="totpPin"],input[name="Pin"],input[id="totpPin"],input[type="tel"]'
-        )
+        totp_field = driver.find_element(By.CSS_SELECTOR,
+            'input[name="totpPin"],input[name="Pin"],input[id="totpPin"],'
+            'input[autocomplete="one-time-code"],input[aria-label*="code"]')
     except Exception:
         pass
 
-    is_2fa = (
-        totp_field is not None
-        or any(x in text for x in [
-            "2-step verification", "authenticator app",
-            "enter the code", "verification code"
-        ])
-    )
-
-    if is_2fa:
+    if is_2fa_select and totp_field is None:
+        log(f"{email} — 2FA method-selection page detected")
         if not totp_code:
-            return {"status": "2fa_required", "reason": "2FA required — provide TOTP secret", "totpCode": None}
-        if totp_field:
-            totp_field.send_keys(totp_code)
-            rand_sleep(300, 500)
-            totp_field.send_keys(Keys.ENTER)
-            rand_sleep(2000, 3000)
-            url, text = page_state()
-            result = classify(url, text)
-            if result:
-                return result
+            shot = screenshot_b64()
+            return {
+                "status": "2fa_required",
+                "reason": "2FA required — add TOTP secret as 3rd field: email:password:totp_secret",
+                "totpCode": None,
+                "debugScreenshot": shot,
+            }
 
-    # ── Final fallback ────────────────────────────────────────────────────────
+        # Click the Google Authenticator option
+        log(f"{email} — Clicking 'Google Authenticator' option")
+        try:
+            driver.execute_script("""
+                // Try by data-challengetype (totp = 6)
+                var byType = document.querySelector('[data-challengetype="6"]');
+                if (byType) { byType.click(); return; }
+                // Try by visible text containing "authenticator"
+                var allEls = Array.from(document.querySelectorAll(
+                    'li, div[role="listitem"], [data-challengetype]'));
+                var found = allEls.find(function(el) {
+                    return el.innerText && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
+                });
+                if (found) { found.click(); return; }
+                // Broader fallback — any clickable element with the word
+                var broader = Array.from(document.querySelectorAll('*')).find(function(el) {
+                    return el.children.length === 0
+                        && el.innerText
+                        && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
+                });
+                if (broader) broader.click();
+            """)
+        except Exception as e:
+            log(f"Authenticator click error: {e}")
+
+        rand_sleep(1800, 2800)
+
+        # Wait for the TOTP input to appear
+        totp_field = wait_for_any([
+            'input[name="totpPin"]', 'input[name="Pin"]', 'input[id="totpPin"]',
+            'input[autocomplete="one-time-code"]', 'input[type="tel"]',
+            'input[aria-label*="code"]',
+        ], timeout=12)
+
+        url, text = page_state()
+        log(f"{email} — After authenticator click: {url[:70]}")
+
+    # ── Enter TOTP code (whether we just navigated here or were already here) ─
+    if totp_field is not None:
+        if not totp_code:
+            shot = screenshot_b64()
+            return {"status": "2fa_required", "reason": "2FA required — provide TOTP secret", "totpCode": None, "debugScreenshot": shot}
+
+        log(f"{email} — Entering TOTP code: {totp_code}")
+        try:
+            totp_field.clear()
+            rand_sleep(100, 200)
+            totp_field.send_keys(totp_code)
+            rand_sleep(400, 600)
+            totp_field.send_keys(Keys.ENTER)
+        except Exception as e:
+            log(f"TOTP entry error: {e}")
+
+        rand_sleep(1500, 2500)
+
+        # Wait for Gmail to fully load (signin/continue is an auto-redirect page)
+        log(f"{email} — Waiting for Gmail redirect after TOTP…")
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            url = driver.current_url
+            if "mail.google.com" in get_hostname(url):
+                break
+            # signin/continue may need a button click to proceed
+            if "signin/continue" in url:
+                try:
+                    driver.execute_script("""
+                        var btn = document.querySelector(
+                            '#confirm, button[type="submit"], [data-action], button');
+                        if (btn) btn.click();
+                    """)
+                except Exception:
+                    pass
+            time.sleep(1.0)
+
+        rand_sleep(1500, 2500)
+        url, text = page_state()
+        log(f"{email} — After TOTP submit (final): {url[:70]}")
+
+        # Wrong TOTP
+        if any(x in text for x in [
+            "wrong code", "that code didn't work", "code is incorrect",
+            "enter the code again", "code expired"
+        ]):
+            return {
+                "status": "wrong_password",
+                "reason": f"TOTP code {totp_code} was wrong or expired",
+                "totpCode": totp_code,
+            }
+
+        result = classify(url, text)
+        if result:
+            return result
+
+    # ── Classify whatever page we're on ───────────────────────────────────────
     result = classify(url, text)
     if result:
         return result
 
+    # ── Final fallback ────────────────────────────────────────────────────────
     shot = screenshot_b64()
     return {
         "status": "unknown",
