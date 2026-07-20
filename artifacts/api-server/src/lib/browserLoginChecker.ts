@@ -154,14 +154,29 @@ async function checkOneAccount(
   }
 
   async function classify(url: string, text: string): Promise<BrowserLoginResult | null> {
-    if (
+    // "opened" requires the URL to be at mail.google.com — homepage/marketing page must NOT count
+    const atMailbox =
       url.includes("mail.google.com") ||
-      url.includes("gmail.com/mail") ||
-      text.includes("inbox") ||
+      url.includes("gmail.com/mail");
+
+    const hasInboxElements =
+      (await page.$('[gh="cm"],[data-tooltip="Compose"],[aria-label="Compose"]').catch(() => null)) !== null ||
+      (await page.$('[data-tooltip="Inbox"],[aria-label="Inbox"],[gh="inbox"]').catch(() => null)) !== null;
+
+    const hasInboxText =
       text.includes("compose") ||
-      text.includes("primary") ||
-      (await page.$('[gh="cm"],[data-tooltip="Compose"],[aria-label="Compose"]').catch(() => null))
-    ) {
+      (text.includes("inbox") && !text.includes("sign in") && !text.includes("create an account")) ||
+      (text.includes("primary") && url.includes("mail.google.com"));
+
+    if (atMailbox || hasInboxElements || hasInboxText) {
+      // Extra guard: if we see "sign in" it's the public homepage, not a mailbox
+      if (
+        !atMailbox &&
+        !hasInboxElements &&
+        (text.includes("sign in") || text.includes("create an account") || text.includes("for work"))
+      ) {
+        return null; // not actually logged in
+      }
       // Take a screenshot of the opened mailbox as proof
       let mailboxScreenshot: string | undefined;
       try {
