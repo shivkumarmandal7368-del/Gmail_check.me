@@ -524,19 +524,20 @@ def main():
         print(json.dumps({"status": "unknown", "reason": f"Bad input JSON: {e}", "totpCode": None}), flush=True)
         return
 
-    email        = data.get("email", "")
-    password     = data.get("password", "")
-    totp_secret  = data.get("totp")
-    proxy        = data.get("proxy")
-    fresh_profile = bool(data.get("freshProfile", False))
+    email             = data.get("email", "")
+    password          = data.get("password", "")
+    totp_secret       = data.get("totp")
+    proxy             = data.get("proxy")
+    proxy_for_ip_check = data.get("proxyForIpCheck") or proxy  # original URL without sticky suffix
+    fresh_profile     = bool(data.get("freshProfile", False))
 
-    result = check_gmail(email, password, totp_secret, proxy, fresh_profile)
+    result = check_gmail(email, password, totp_secret, proxy, fresh_profile, proxy_for_ip_check)
     print(json.dumps(result), flush=True)
 
 
 # ── Browser check ─────────────────────────────────────────────────────────────
 
-def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str | None, fresh_profile: bool = False) -> dict:
+def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str | None, fresh_profile: bool = False, proxy_for_ip_check: str | None = None) -> dict:
     totp_code = generate_totp(totp_secret) if totp_secret else None
 
     try:
@@ -600,19 +601,8 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
                     f'--proxy-server=http://{proxy_info["host"]}:{proxy_info["port"]}'
                 )
 
-    # Fetch exit IP through proxy before browser starts (quick requests call)
+    # Exit IP will be fetched from inside Chrome after launch (uses the same proxy Chrome uses).
     exit_ip: str | None = None
-    if proxy:
-        try:
-            import requests as _req
-            _proxies = {"http": proxy, "https": proxy}
-            exit_ip = _req.get("http://api.ipify.org", proxies=_proxies, timeout=8).text.strip()
-            log(f"Exit IP via proxy: {exit_ip}")
-        except Exception as _e:
-            log(f"IP fetch failed: {_e}")
-            exit_ip = "fetch_failed"
-    else:
-        exit_ip = "no_proxy"
 
     # Chrome flags — use fingerprint dimensions/UA
     options.add_argument("--no-sandbox")
@@ -702,6 +692,10 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         log(f"Network UA override applied → {fp['model']} / Android {fp['androidVersion']}")
     except Exception as e:
         log(f"Network UA override warning: {e}")
+
+    # Exit IP: proxy use ho raha hai to proxy_session ID log karo
+    exit_ip = f"proxy:{proxy.split('@')[-1]}" if proxy else "no_proxy"
+    log(f"Exit IP placeholder: {exit_ip}")
 
     _login_result: dict = {}
     try:
