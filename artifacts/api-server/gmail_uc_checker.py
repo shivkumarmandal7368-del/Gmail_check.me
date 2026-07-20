@@ -370,6 +370,14 @@ Object.defineProperty(navigator,'vendor',  {{get:()=>'Google Inc.'}});
 if(window.chrome&&window.chrome.app){{try{{delete window.chrome.app;}}catch(e){{}}}}
 if(window.Notification){{Object.defineProperty(Notification,'permission',{{get:()=>'default'}});}}
 window.ontouchstart=function(){{}};
+try{{Object.defineProperty(screen,'orientation',{{get:()=>({{{{'type':'portrait-primary','angle':0}}}})}}); }}catch(e){{}}
+try{{
+  var conn={{'effectiveType':'4g','rtt':Math.floor(40+Math.random()*60),'downlink':parseFloat((8+Math.random()*6).toFixed(1)),'saveData':false,'type':'cellular','onchange':null}};
+  Object.defineProperty(navigator,'connection',{{get:()=>conn}});
+  Object.defineProperty(navigator,'mozConnection',{{get:()=>undefined}});
+  Object.defineProperty(navigator,'webkitConnection',{{get:()=>undefined}});
+}}catch(e){{}}
+try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e){{}}
 (function(){{
   function patch(ctx){{
     var gp=ctx.prototype.getParameter;
