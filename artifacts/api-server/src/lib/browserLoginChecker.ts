@@ -279,7 +279,11 @@ async function checkOneAccount(
     {
       const { url, text } = await pageState();
       if (url.includes("signin/rejected")) {
-        return { email, status: "verification_required", reason: "Google rejected sign-in — IP blocked. Use a residential proxy.", totpCode };
+        return {
+          email, status: "verification_required",
+          reason: "Google rejected sign-in — headless browser detected or account needs phone verification. Try with a residential proxy or use IMAP Check instead.",
+          totpCode,
+        };
       }
       const early = await classify(url, text);
       if (early) return early;
