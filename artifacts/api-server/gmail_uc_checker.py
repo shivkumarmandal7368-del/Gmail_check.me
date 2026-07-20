@@ -17,6 +17,14 @@ import zipfile
 import io
 import subprocess
 import tempfile
+import fcntl
+
+# ── Cross-process Chrome launch lock ─────────────────────────────────────────
+# Multiple Python processes (one per account) can be spawned concurrently.
+# Launching Chrome simultaneously from all of them causes OOM crashes.
+# This file lock serializes Chrome launches so only ONE Chrome starts at a time.
+# Once Chrome is stable (CDP ready), the lock is released so the next can start.
+_CHROME_LAUNCH_LOCK_PATH = "/tmp/gmail_checker_chrome_launch.lock"
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -516,19 +524,20 @@ def main():
         print(json.dumps({"status": "unknown", "reason": f"Bad input JSON: {e}", "totpCode": None}), flush=True)
         return
 
-    email        = data.get("email", "")
-    password     = data.get("password", "")
-    totp_secret  = data.get("totp")
-    proxy        = data.get("proxy")
-    fresh_profile = bool(data.get("freshProfile", False))
+    email             = data.get("email", "")
+    password          = data.get("password", "")
+    totp_secret       = data.get("totp")
+    proxy             = data.get("proxy")
+    proxy_for_ip_check = data.get("proxyForIpCheck") or proxy  # original URL without sticky suffix
+    fresh_profile     = bool(data.get("freshProfile", False))
 
-    result = check_gmail(email, password, totp_secret, proxy, fresh_profile)
+    result = check_gmail(email, password, totp_secret, proxy, fresh_profile, proxy_for_ip_check)
     print(json.dumps(result), flush=True)
 
 
 # ── Browser check ─────────────────────────────────────────────────────────────
 
-def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str | None, fresh_profile: bool = False) -> dict:
+def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str | None, fresh_profile: bool = False, proxy_for_ip_check: str | None = None) -> dict:
     totp_code = generate_totp(totp_secret) if totp_secret else None
 
     try:
@@ -592,19 +601,8 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
                     f'--proxy-server=http://{proxy_info["host"]}:{proxy_info["port"]}'
                 )
 
-    # Fetch exit IP through proxy before browser starts (quick requests call)
+    # Exit IP will be fetched from inside Chrome after launch (uses the same proxy Chrome uses).
     exit_ip: str | None = None
-    if proxy:
-        try:
-            import requests as _req
-            _proxies = {"http": proxy, "https": proxy}
-            exit_ip = _req.get("http://api.ipify.org", proxies=_proxies, timeout=8).text.strip()
-            log(f"Exit IP via proxy: {exit_ip}")
-        except Exception as _e:
-            log(f"IP fetch failed: {_e}")
-            exit_ip = "fetch_failed"
-    else:
-        exit_ip = "no_proxy"
 
     # Chrome flags — use fingerprint dimensions/UA
     options.add_argument("--no-sandbox")
@@ -627,6 +625,12 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         options.add_argument("--disable-gpu")
 
     log(f"Launching Chrome (UC)…")
+    # Acquire cross-process lock so only ONE Chrome starts at a time.
+    # Concurrent Chrome launches exhaust shared memory and cause crashes.
+    _lock_fd = open(_CHROME_LAUNCH_LOCK_PATH, "w")
+    log("Waiting for Chrome launch slot…")
+    fcntl.flock(_lock_fd, fcntl.LOCK_EX)
+    log("Chrome launch slot acquired — starting Chrome")
     try:
         driver = uc.Chrome(
             options=options,
@@ -635,7 +639,11 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             version_main=138,
             use_subprocess=True,
         )
+        # Hold lock briefly while Chrome stabilises, then release for next account
+        time.sleep(2.5)
     except Exception as e:
+        fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+        _lock_fd.close()
         _cleanup(proxy_ext_path)
         return {
             "status": "unknown",
@@ -644,6 +652,9 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             "exitIp": exit_ip,
             "fingerprint": fp_summary,
         }
+    fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+    _lock_fd.close()
+    log("Chrome launch slot released")
 
     log("Chrome launched")
 
@@ -682,9 +693,13 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     except Exception as e:
         log(f"Network UA override warning: {e}")
 
+    # Exit IP: proxy use ho raha hai to proxy_session ID log karo
+    exit_ip = f"proxy:{proxy.split('@')[-1]}" if proxy else "no_proxy"
+    log(f"Exit IP placeholder: {exit_ip}")
+
     _login_result: dict = {}
     try:
-        _login_result = _do_login(driver, email, password, totp_code)
+        _login_result = _do_login(driver, email, password, totp_code, totp_secret)
     except Exception as e:
         log(f"Login exception: {e}")
         _login_result = {"status": "unknown", "reason": f"Login error: {str(e)[:300]}", "totpCode": totp_code}
@@ -709,7 +724,7 @@ def _cleanup(path: str | None):
 
 # ── Login flow ────────────────────────────────────────────────────────────────
 
-def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
+def _do_login(driver, email: str, password: str, totp_code: str | None, totp_secret: str | None = None) -> dict:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
 

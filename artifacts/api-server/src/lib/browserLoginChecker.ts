@@ -70,8 +70,9 @@ async function checkOneAccount(
   email: string,
   password: string,
   totpSecret?: string,
-  proxy?: string,
+  proxy?: string,           // sticky-session URL — used by Chrome
   freshProfile = false,
+  proxyForIpCheck?: string, // original URL (no sticky suffix) — used for pre-flight IP fetch via requests
 ): Promise<BrowserLoginResult> {
   let totpCode: string | null = null;
   if (totpSecret) {
@@ -84,6 +85,7 @@ async function checkOneAccount(
     password,
     totp: totpSecret ?? null,
     proxy: proxy ?? null,
+    proxyForIpCheck: proxyForIpCheck ?? proxy ?? null,
     freshProfile,
   });
 
@@ -204,7 +206,7 @@ export async function browserLoginCheck(
       const sessionId = randomSessionId();
       const assignedProxy = baseProxy ? injectStickySession(baseProxy, sessionId) : undefined;
       console.log(`[BROWSER] ${cred.email} → proxy slot ${proxies && proxies.length > 0 ? (idx % proxies.length) + 1 : "single"} | session=${sessionId} | fresh=${freshProfile}`);
-      const result = await checkOneAccount(cred.email, cred.password, cred.totp, assignedProxy, freshProfile).catch(
+      const result = await checkOneAccount(cred.email, cred.password, cred.totp, assignedProxy, freshProfile, baseProxy).catch(
         (err: unknown) => ({
           email: cred.email,
           status: "unknown" as BrowserLoginStatus,

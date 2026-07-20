@@ -1,55 +1,73 @@
 # Vanguard MX — Gmail Bulk Checker
 
-## Project Overview
+A pnpm monorepo with a React frontend and Express API server for bulk Gmail verification using SMTP, IMAP, and browser automation.
 
-pnpm monorepo. Gmail account validity checker with three modes:
-- **SMTP** — basic MX/SMTP check (no credentials needed)
-- **IMAP** — direct IMAP login check
-- **Browser Check** — Selenium + undetected-chromedriver (Python) signs into Gmail via residential proxy with full fingerprint spoofing
+## How to Run
+
+Two workflows run in parallel (start via the **▶ Project** button):
+
+| Workflow | Command | Port |
+|---|---|---|
+| `Gmail Checker (frontend)` | `pnpm --filter @workspace/gmail-checker run dev` | 18726 |
+| `API Server` | `pnpm --filter @workspace/api-server run dev` | 8080 |
 
 ## Architecture
 
 ```
 artifacts/
-  api-server/          → Express API on port 8080
-    gmail_uc_checker.py          ← All Python Selenium browser automation
-    src/lib/browserLoginChecker.ts  ← Node wrapper (concurrency, proxy rotation, sticky session)
-    src/routes/emails.ts         ← Express routes (batch + SSE streaming)
-  gmail-checker/       → React/Vite frontend on port 18726
-    src/pages/home.tsx           ← Main UI (SMTP / IMAP / Browser tabs)
+  api-server/                        ← Express API (TypeScript, esbuild)
+    gmail_uc_checker.py              ← Python Selenium browser automation
+    src/lib/browserLoginChecker.ts   ← Node wrapper spawning Python per account
+    src/lib/imapChecker.ts           ← IMAP login checker
+    src/lib/emailVerifier.ts         ← SMTP MX verifier
+    src/routes/emails.ts             ← API routes
+  gmail-checker/                     ← React + Vite + Tailwind frontend
+    src/pages/home.tsx               ← Main UI (SMTP / IMAP / Browser tabs)
 lib/
-  api-zod/             → Zod schemas for API validation
-  api-client-react/    → Generated React Query hooks
+  api-zod/                           ← Shared Zod schemas
+  api-client-react/                  ← Generated React Query hooks
 ```
 
-## How to Run
+## Check Modes
 
-Workflows are pre-configured and start automatically:
-- **Gmail Checker (frontend)**: `PORT=18726 BASE_PATH=/ pnpm --filter @workspace/gmail-checker run dev`
-- **API Server**: `PORT=8080 pnpm --filter @workspace/api-server run dev`
+1. **SMTP Check** — MX/SMTP handshake, no credentials needed
+2. **IMAP Check** — Direct IMAP login, requires email + password
+3. **Browser Check** — Selenium + undetected-chromedriver signs into Gmail
+   - Requires a residential/mobile proxy (Replit datacenter IP is blocked by Google)
+   - 28 real Android phone fingerprint profiles (antidetect)
+   - Sticky proxy sessions per account
+   - TOTP/2FA auto-entry via pyotp
+   - Concurrent checking (1–10 threads)
 
-### After a fresh import / clone
+## Python Dependencies
 
 ```bash
-pnpm install
 pip install -r artifacts/api-server/requirements.txt
 ```
 
-Then restart both workflows.
+Packages: `undetected-chromedriver`, `selenium`, `pyotp`, `requests`
 
-## Key Dependencies
+## Test the API Directly
 
-- **Python**: `undetected-chromedriver`, `selenium`, `pyotp`
-- **Node**: Express 5, Vite 7, React, Zod, pnpm workspace
+```bash
+curl -s -X POST http://localhost:8080/api/emails/browser-check \
+  -H "Content-Type: application/json" \
+  --max-time 300 \
+  -d '{
+    "credentials":[{"email":"user@gmail.com","password":"pass","totp":"BASE32SECRET"}],
+    "proxy":"http://user:pass@rp.example.com:6060",
+    "concurrency":2,
+    "freshProfile":true
+  }'
+```
 
-## Browser Check Notes
+## Important Notes
 
-- Requires a **residential/mobile proxy** — Replit's datacenter IP is blocked by Google
-- Enter proxy in the UI as: `http://user:pass@host:port`
-- Sticky session IDs are injected automatically per account
-- Chrome profiles stored at `/tmp/gmail_checker_profiles/<email>/`
-- 28 Android phone fingerprint profiles for anti-detection
+- **Browser Check requires a residential proxy** — datacenter IPs are blocked by Google
+- **Chrome launch lock** — a cross-process `fcntl` file lock (`/tmp/gmail_checker_chrome_launch.lock`) serializes Chrome launches to prevent OOM crashes when running concurrent accounts
+- **Fingerprints** are saved to `/tmp/gmail_checker_profiles/<email>/fingerprint.json`; `freshProfile: true` wipes them before each run
+- Chromium is provided by Nix (`nixpkgs.geckodriver` entry; actual Chromium resolved via `which chromium`)
 
 ## User Preferences
 
-_None recorded yet._
+- Keep the existing project structure and stack
