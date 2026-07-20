@@ -107,7 +107,7 @@ async function checkOneAccount(
 
   const browser = await puppeteerExtra.launch({
     executablePath: getChromiumPath(),
-    headless: true,
+    headless: "new" as any,
     args: launchArgs,
     defaultViewport: { width: 1280, height: 800, deviceScaleFactor: 1 },
     timeout: BROWSER_TIMEOUT,
@@ -239,38 +239,74 @@ async function checkOneAccount(
   }
 
   try {
-    // ── Step 1: Open Google login ──────────────────────────────
-    const googleUrl =
-      "https://accounts.google.com/v3/signin/identifier?service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin";
-    console.log(`[BROWSER] ${email} — Step 1: goto...`);
-
+    // ── Step 1: Warm up on google.com first (get cookies) ─────
+    console.log(`[BROWSER] ${email} — Step 1: warming up google.com...`);
     try {
-      await page.goto(googleUrl, { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
+      await page.goto("https://www.google.com", { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
+    } catch (e: any) {
+      if (e?.message?.includes("ERR_") || e?.message?.includes("net::")) {
+        console.log(`[BROWSER] ${email} — network error on warmup, retrying...`);
+        await sleep(3000);
+        await page.goto("https://www.google.com", { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
+      } else throw e;
+    }
+    // Simulate brief human interaction
+    await page.mouse.move(rand(200, 800), rand(200, 500));
+    await sleep(rand(800, 1500));
+    await page.mouse.move(rand(300, 700), rand(100, 400));
+    await sleep(rand(400, 800));
+
+    // ── Step 1b: Navigate via mail.google.com (natural redirect) ─
+    console.log(`[BROWSER] ${email} — Step 1: goto mail.google.com...`);
+    try {
+      await page.goto("https://mail.google.com/mail/", { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
     } catch (e: any) {
       if (e?.message?.includes("ERR_") || e?.message?.includes("net::")) {
         console.log(`[BROWSER] ${email} — network error, retrying in 3s...`);
         await sleep(3000);
-        await page.goto(googleUrl, { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
+        await page.goto("https://mail.google.com/mail/", { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
       } else throw e;
     }
     console.log(`[BROWSER] ${email} — Step 1 done. url=${page.url().slice(0, 55)}`);
-    await sleep(300);
+    await sleep(rand(400, 700));
 
     // ── Step 2: Enter email ────────────────────────────────────
-    console.log(`[BROWSER] ${email} — Step 2: typing email...`);
-    await page.waitForSelector("#identifierId", { timeout: 15000 });
-    await page.click("#identifierId");
-    await sleep(100);
-    // Use page.type — fires proper keyboard events Google listens for
-    await page.type("#identifierId", email, { delay: isAndroid ? 25 : 40 });
-    await sleep(500);
+    console.log(`[BROWSER] ${email} — Step 2: url=${page.url().slice(0, 80)}`);
+    const emailSelectors = [
+      "#identifierId",
+      'input[type="email"]',
+      'input[name="identifier"]',
+      'input[autocomplete="username"]',
+      'input[name="Email"]',
+    ];
+    let emailSel: string | null = null;
+    for (const sel of emailSelectors) {
+      const found = await page.waitForSelector(sel, { timeout: 8000 }).catch(() => null);
+      if (found) { emailSel = sel; break; }
+    }
+    if (!emailSel) {
+      const { url, text } = await pageState();
+      const classified = await classify(url, text);
+      if (classified) return classified;
+      let debugScreenshot: string | undefined;
+      try {
+        const buf = await (page as any).screenshot({ type: "png", fullPage: false });
+        debugScreenshot = `data:image/png;base64,${Buffer.from(buf).toString("base64")}`;
+      } catch {}
+      return { email, status: "unknown", reason: `Email field not found. URL: ${url.slice(0,80)}`, totpCode, debugScreenshot };
+    }
+    console.log(`[BROWSER] ${email} — Step 2: typing email (sel=${emailSel})...`);
+    await page.click(emailSel);
+    await sleep(rand(150, 300));
+    await page.type(emailSel, email, { delay: isAndroid ? 25 : 40 });
+    await sleep(rand(400, 700));
 
     // ── Step 2b: Submit email ──────────────────────────────────
     console.log(`[BROWSER] ${email} — Step 2: submitting...`);
-    const nav1 = page.waitForNavigation({ timeout: 10000, waitUntil: "domcontentloaded" }).catch(() => null);
+    const nav1 = page.waitForNavigation({ timeout: 12000, waitUntil: "domcontentloaded" }).catch(() => null);
     await page.keyboard.press("Enter");
     await sleep(300);
-    await clickButton("#identifierNext");
+    await clickButton("#identifierNext,[jsname='LgbsSe'][type='button']");
     await nav1;
     await sleep(300);
     console.log(`[BROWSER] ${email} — Step 2 done. url=${page.url().slice(0, 55)}`);
