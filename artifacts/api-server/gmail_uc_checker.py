@@ -693,9 +693,25 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     except Exception as e:
         log(f"Network UA override warning: {e}")
 
-    # Exit IP: proxy use ho raha hai to proxy_session ID log karo
-    exit_ip = f"proxy:{proxy.split('@')[-1]}" if proxy else "no_proxy"
-    log(f"Exit IP placeholder: {exit_ip}")
+    # Exit IP: actual IP fetch via HTTP request through proxy
+    exit_ip = "no_proxy"
+    if proxy:
+        _ip_src = proxy_for_ip_check or proxy  # prefer original URL (no sticky suffix, same auth)
+        try:
+            import requests as _req
+            _pp = parse_proxy(_ip_src)
+            if _pp and _pp.get("username"):
+                _auth = f"{_pp['username']}:{_pp.get('password', '')}@{_pp['host']}:{_pp['port']}"
+                _ip_proxies = {"http": f"http://{_auth}", "https": f"http://{_auth}"}
+            else:
+                _ip_proxies = {"http": _ip_src, "https": _ip_src}
+            _resp = _req.get("https://api.ipify.org?format=json",
+                             proxies=_ip_proxies, timeout=10)
+            exit_ip = _resp.json().get("ip", "unknown")
+            log(f"Exit IP: {exit_ip}")
+        except Exception as _ie:
+            exit_ip = f"proxy:{proxy.split('@')[-1]}"
+            log(f"Exit IP check failed ({type(_ie).__name__}): {_ie} — using {exit_ip}")
 
     _login_result: dict = {}
     try:
@@ -1154,6 +1170,17 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         "incorrect password", "password you entered"
     ]) or any(x in url for x in ["WrongPassword", "wrongpassword"]):
         return {"status": "wrong_password", "reason": "Wrong password", "totpCode": totp_code}
+
+    # If Google returned us BACK to the password page → wrong password
+    # (Google doesn't always show an error message — sometimes it just reloads the page)
+    if "challenge/pwd" in url or "ServicePasswordChallenge" in url:
+        shot = screenshot_b64()
+        return {
+            "status": "wrong_password",
+            "reason": "Wrong password (Google returned to password page without error message)",
+            "totpCode": totp_code,
+            "debugScreenshot": shot,
+        }
 
     # ── Step 4: 2FA — check BEFORE classify so we handle it ourselves ─────────
 
