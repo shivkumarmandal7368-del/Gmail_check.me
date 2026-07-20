@@ -58,36 +58,33 @@ STEALTH_JS = """
 // Hide webdriver flag
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 
-// Fake plugins list
-Object.defineProperty(navigator, 'plugins', {
-  get: () => {
-    var plugins = [
-      { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-      { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-      { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
-    ];
-    plugins.length = 3;
-    plugins[Symbol.iterator] = Array.prototype[Symbol.iterator];
-    return plugins;
-  }
-});
+// Mobile: no plugins (real Android Chrome has none)
+Object.defineProperty(navigator, 'plugins', { get: () => { var p = []; p.length = 0; return p; } });
 
-// Fake languages
+// Mobile languages
 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
 
-// Fake hardware concurrency
+// Pixel 8 hardware profile
 Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-
-// Fake device memory
 Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
 
-// Fake screen resolution
-Object.defineProperty(screen, 'width', { get: () => 1920 });
-Object.defineProperty(screen, 'height', { get: () => 1080 });
-Object.defineProperty(screen, 'availWidth', { get: () => 1920 });
-Object.defineProperty(screen, 'availHeight', { get: () => 1040 });
-Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
-Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+// Mobile screen — Pixel 8 (412x915 logical, devicePixelRatio=2.625)
+Object.defineProperty(screen, 'width',       { get: () => 412 });
+Object.defineProperty(screen, 'height',      { get: () => 915 });
+Object.defineProperty(screen, 'availWidth',  { get: () => 412 });
+Object.defineProperty(screen, 'availHeight', { get: () => 891 });
+Object.defineProperty(screen, 'colorDepth',  { get: () => 24 });
+Object.defineProperty(screen, 'pixelDepth',  { get: () => 24 });
+Object.defineProperty(window, 'devicePixelRatio', { get: () => 2.625 });
+
+// Mobile: maxTouchPoints = 5 (key signal Google checks)
+Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 5 });
+
+// Platform must match Android UA
+Object.defineProperty(navigator, 'platform', { get: () => 'Linux armv81' });
+
+// Mobile: no appVersion mismatch
+Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
 
 // Remove automation-specific chrome properties
 if (window.chrome && window.chrome.app) {
@@ -98,6 +95,9 @@ if (window.chrome && window.chrome.app) {
 if (window.Notification) {
   Object.defineProperty(Notification, 'permission', { get: () => 'default' });
 }
+
+// Touch support — real Android device always has ontouchstart
+window.ontouchstart = function(){};
 """
 
 
@@ -267,10 +267,17 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
                 )
 
     # Chrome flags
+    # Android mobile fingerprint — looks like a real phone to Google
+    MOBILE_UA = (
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/138.0.7204.100 Mobile Safari/537.36"
+    )
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
+    # Mobile viewport — 412×915 matches Pixel 8
+    options.add_argument("--window-size=412,915")
     options.add_argument("--lang=en-US,en")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-popup-blocking")
@@ -281,11 +288,9 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--metrics-recording-only")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-features=IsolateOrigins,site-per-process")
-    options.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/138.0.0.0 Safari/537.36"
-    )
+    options.add_argument(f"--user-agent={MOBILE_UA}")
+    # Enable touch events so Google sees a touch-capable device
+    options.add_argument("--touch-events=enabled")
     if headless:
         options.add_argument("--disable-gpu")
 
@@ -388,6 +393,14 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
         if at_mailbox and (has_compose or has_inbox_text or "mail/u/" in url):
             rand_sleep(1500, 2000)
             shot = screenshot_b64()
+            # ── Logout immediately so Google doesn't flag a suspicious active session ──
+            try:
+                log("Mailbox opened — logging out to avoid suspicious-session flag")
+                driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
+                rand_sleep(1500, 2500)
+                log("Logout complete")
+            except Exception as _le:
+                log(f"Logout warning (non-fatal): {_le}")
             return {
                 "status": "opened",
                 "reason": "Mailbox opened successfully ✅",
@@ -705,9 +718,10 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
         return result
 
     # ── Post-login interstitial handler ───────────────────────────────────────
-    # Google sometimes shows recovery-info, terms, or continue screens after
-    # a successful login before landing on mail.google.com.
-    for _attempt in range(4):
+    # Google often shows recovery/address/terms screens before landing on Gmail.
+    # Strategy: try to dismiss nicely first; if still not at Gmail after a few
+    # attempts, force-navigate directly to the inbox.
+    for _attempt in range(8):
         url, text = page_state()
         host = get_hostname(url)
 
@@ -716,24 +730,23 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
 
         dismissed = False
 
-        # Recovery-info popup (gds.google.com/web/recoveryoptions)
-        if "gds.google.com" in host or "recoveryoptions" in url:
-            log(f"{email} — Recovery info page, clicking Cancel")
+        # gds.google.com — recovery options, home address, etc. (optional Google setup pages)
+        if "gds.google.com" in host:
+            log(f"{email} — gds interstitial ({url[url.find('/web/'):][:40]}), skipping to Gmail")
             try:
-                driver.execute_script("""
-                    var btns = Array.from(document.querySelectorAll('button'));
-                    var cancel = btns.find(function(b) {
-                        return b.textContent.trim().toLowerCase() === 'cancel'
-                            || b.textContent.trim().toLowerCase() === 'not now';
-                    });
-                    if (cancel) { cancel.click(); return; }
-                    // fallback: first secondary/outlined button
-                    var sec = document.querySelector('button:not([type="submit"])');
-                    if (sec) sec.click();
-                """)
-                dismissed = True
-            except Exception as e:
-                log(f"Cancel click error: {e}")
+                driver.get("https://mail.google.com/mail/u/0/#inbox")
+            except Exception:
+                pass
+            dismissed = True
+
+        # uplevelingstep — Google account security upgrade prompt (skip it)
+        elif "uplevelingstep" in url:
+            log(f"{email} — uplevelingstep interstitial, skipping to Gmail")
+            try:
+                driver.get("https://mail.google.com/mail/u/0/#inbox")
+            except Exception:
+                pass
+            dismissed = True
 
         # signin/continue redirect page
         elif "signin/continue" in url:
@@ -744,7 +757,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
                 pass
             dismissed = True
 
-        # Any other accounts.google.com interstitial — try clicking primary CTA
+        # Any accounts.google.com interstitial — try clicking primary CTA
         elif "accounts.google.com" in host:
             log(f"{email} — accounts interstitial ({url[:60]}), trying to proceed")
             try:
@@ -758,16 +771,21 @@ def _do_login(driver, email: str, password: str, totp_code: str | None) -> dict:
                 pass
 
         else:
-            # Unknown domain — stop trying
-            break
+            # Not at Gmail and not a known interstitial — force navigate
+            log(f"{email} — unknown page ({url[:60]}), forcing Gmail navigation")
+            try:
+                driver.get("https://mail.google.com/mail/u/0/#inbox")
+                dismissed = True
+            except Exception:
+                break
 
         if dismissed:
-            rand_sleep(2000, 3000)
+            rand_sleep(2500, 3500)
         else:
             break
 
-    # Wait for Gmail to finish loading after interstitial dismissal
-    deadline = time.time() + 20
+    # Wait for Gmail to fully load
+    deadline = time.time() + 25
     while time.time() < deadline:
         if "mail.google.com" in get_hostname(driver.current_url):
             break
