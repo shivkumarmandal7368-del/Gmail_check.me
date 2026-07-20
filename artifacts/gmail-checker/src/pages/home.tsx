@@ -598,8 +598,10 @@ function BrowserChecker() {
                         {r.reason}
                         {(r as any).debugScreenshot && (
                           <div className="mt-2">
-                            <p className="text-[10px] text-yellow-400/70 font-mono mb-1">📸 Google ne kya dikhaya:</p>
-                            <img src={(r as any).debugScreenshot} alt="debug" className="rounded border border-border max-w-[280px] w-full cursor-pointer" onClick={() => window.open((r as any).debugScreenshot)} />
+                            <p className={`text-[10px] font-mono mb-1 ${r.status === "opened" ? "text-green-400/70" : "text-yellow-400/70"}`}>
+                              {r.status === "opened" ? "📸 Mailbox screenshot (proof):" : "📸 Google ne kya dikhaya:"}
+                            </p>
+                            <img src={(r as any).debugScreenshot} alt="screenshot" className="rounded border border-border max-w-[320px] w-full cursor-pointer hover:opacity-90 transition-opacity" onClick={() => window.open((r as any).debugScreenshot)} />
                           </div>
                         )}
                       </TableCell>

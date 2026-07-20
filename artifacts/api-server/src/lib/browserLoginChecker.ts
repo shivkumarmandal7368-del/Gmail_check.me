@@ -162,7 +162,14 @@ async function checkOneAccount(
       text.includes("primary") ||
       (await page.$('[gh="cm"],[data-tooltip="Compose"],[aria-label="Compose"]').catch(() => null))
     ) {
-      return { email, status: "opened", reason: "Mailbox opened successfully ✅", totpCode };
+      // Take a screenshot of the opened mailbox as proof
+      let mailboxScreenshot: string | undefined;
+      try {
+        await sleep(1500); // wait for inbox to fully render
+        const buf = await page.screenshot({ type: "jpeg", quality: 70, fullPage: false });
+        mailboxScreenshot = `data:image/jpeg;base64,${buf.toString("base64")}`;
+      } catch {}
+      return { email, status: "opened", reason: "Mailbox opened successfully ✅", totpCode, debugScreenshot: mailboxScreenshot };
     }
     if (
       text.includes("couldn't find your google account") ||
