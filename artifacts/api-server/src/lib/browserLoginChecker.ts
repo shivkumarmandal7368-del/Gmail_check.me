@@ -358,11 +358,18 @@ async function checkOneAccount(
 
   try {
     // ── Step 1: Open Gmail login ──────────────────────────────────
+    const googleUrl = "https://accounts.google.com/v3/signin/identifier?service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin";
     console.log(`[BROWSER] ${email} — Step 1: Opening Google login...`);
-    await page.goto(
-      "https://accounts.google.com/v3/signin/identifier?service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin",
-      { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT }
-    );
+    try {
+      await page.goto(googleUrl, { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
+    } catch (e: any) {
+      // Retry once on network errors (ERR_SOCKET_NOT_CONNECTED etc.)
+      if (e?.message?.includes("ERR_") || e?.message?.includes("net::")) {
+        console.log(`[BROWSER] ${email} — Step 1 network error, retrying... (${e.message.slice(0,40)})`);
+        await sleep(2000);
+        await page.goto(googleUrl, { waitUntil: "domcontentloaded", timeout: BROWSER_TIMEOUT });
+      } else throw e;
+    }
     console.log(`[BROWSER] ${email} — Step 1 done. URL: ${page.url().slice(0,60)}`);
     await sleep(300);
 
