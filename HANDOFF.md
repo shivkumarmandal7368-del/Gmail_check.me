@@ -504,18 +504,21 @@ artifacts/api-server: API Server    → backend
 
 ### Fix Applied (`gmail_uc_checker.py` — 2 changes)
 
-**Fix 1 — `_on_totp_url` extended (line ~1601):**
+**Fix 1 — `_on_totp_url` extended (line ~1626):**
 ```python
 _on_totp_url = (
     "challenge/totp" in url
     or "challenge/ipp" in url
-    or ("v3/signin" in url and "v3/signin/identifier" not in url)  # ← NEW
+    or ("v3/signin" in url and "v3/signin/identifier" not in url and "challenge" not in url)  # ← NEW
 )
 ```
-Now `v3/signin/TL=...` URLs use `wait_for_any(timeout=8)` for field detection AND take the correct "already on TOTP input page" branch (wait 15s for field, skip Authenticator click).
+`"challenge" not in url` is critical — it excludes `v3/signin/challenge/dp` (method selection page) and only catches `v3/signin/TL=...` (the actual TOTP input page).
 
 **Fix 2 — `classify()` safety net:**
-Added after the Gmail `opened` block: if URL is `v3/signin/TL=...` AND page text contains "google authenticator" / "verification code from" / "verify that it's you" → return `opened` immediately. Per user confirmation: these accounts are confirmed accessible (password accepted, Google is just asking TOTP). Captures a screenshot.
+Added after the Gmail `opened` block: if URL is `v3/signin/TL=...` AND `"challenge" not in url` AND page text contains "google authenticator" / "verification code from" / "verify that it's you" → return `opened` immediately. Per user confirmation: these accounts are confirmed accessible (password accepted, Google is just asking TOTP). Captures a screenshot.
+
+**⚠️ Bug caught and corrected (Session 16):**
+Initial fix used `"v3/signin" in url` without `"challenge" not in url`. The 2-Step Verification method selection page URL is `v3/signin/challenge/dp` — this also matched, causing the method selection page to be marked as `opened` too early. Fixed by adding `"challenge" not in url` to both checks.
 
 ### Expected Behavior After Fix
 - `v3/signin/TL=...` page → `_on_totp_url = True` → wait for TOTP field → enter fresh TOTP → login → `opened` ✅

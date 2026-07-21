@@ -1124,6 +1124,9 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
         # ── "Verify that it's you — Google Authenticator" fallback ───────────
         # URL: accounts.google.com/v3/signin/TL=... (not standard challenge/ format)
+        # This is the TOTP *input* page (code entry field visible), NOT the method
+        # selection page (challenge/dp, challenge/selection).
+        # "challenge" NOT in url ensures we never trigger on v3/signin/challenge/dp.
         # Google showed this page AFTER accepting the password → password is correct.
         # The TOTP entry path (Step 4 / _on_totp_url) should have handled this already,
         # but if it falls through here, mark as opened per user confirmation.
@@ -1131,6 +1134,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         if (
             "v3/signin" in url
             and "v3/signin/identifier" not in url
+            and "challenge" not in url
             and any(x in _low for x in [
                 "google authenticator",
                 "verification code from",
@@ -1626,7 +1630,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     _on_totp_url = (
         "challenge/totp" in url
         or "challenge/ipp" in url
-        or ("v3/signin" in url and "v3/signin/identifier" not in url)
+        or ("v3/signin" in url and "v3/signin/identifier" not in url and "challenge" not in url)
     )
 
     # Detect direct TOTP-input page (input already visible).
