@@ -513,6 +513,24 @@ artifacts/api-server: API Server    → backend
 
 **No behaviour change** for `opened` accounts — yeh changes sirf verification_required path affect karte hain.
 
+### ✅ Interstitial loop speed-up — fast dismiss for all non-verification screens
+
+**User requirement:** Sirf "Verify your info to continue" pe instant return. Baaki sab screens (gds, uplevelingstep dismissable, signin/continue, etc.) pe fast dismiss + Gmail jaldi kholo.
+
+**Changes in `artifacts/api-server/gmail_uc_checker.py`:**
+
+| What | Before | After |
+|---|---|---|
+| `rand_sleep` after every dismiss | 2500–3500ms | 500–800ms |
+| Final Gmail wait loop timeout | 25s | 12s |
+| Final wait loop poll interval | 0.8s | 0.5s |
+| Post-loop `rand_sleep` before classify | 1500–2500ms | 300–600ms |
+| uplevelingstep HTML Gmail wait | 2000–3000ms | 800–1200ms |
+| HTML Gmail success logout wait | 1500–2000ms | 800–1200ms |
+| HTML Gmail screenshot wait | 800–1200ms | 400–700ms |
+
+**Time saving (interstitial path):** ~6–10s less per dismissed screen
+
 ### ✅ uplevelingstep phone/device verification — immediate detection (actual root cause)
 
 **Real root cause (logs se mila):** `donnalyncht681` ka 101s `challenge/az` se nahi, balki `uplevelingstep/selection` URL se tha. Woh URL `uplevelingstep` handler mein jaata tha jo 3 attempts × ~10s = 30s waste karta tha.

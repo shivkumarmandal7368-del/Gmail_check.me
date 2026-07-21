@@ -1523,7 +1523,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 log(f"{email} — uplevelingstep: trying Gmail HTML version")
                 try:
                     driver.get("https://mail.google.com/mail/h/?zy=e")
-                    rand_sleep(2000, 3000)
+                    rand_sleep(800, 1200)
                     _html_url = driver.current_url
                     log(f"{email} — Gmail HTML URL: {_html_url[:70]}")
                     if "mail.google.com" in get_hostname(_html_url) and "uplevelingstep" not in _html_url:
@@ -1535,11 +1535,11 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                             pass
                         # Any Gmail HTML page that has inbox content = opened
                         if any(x in _html_text for x in ["inbox", "compose", "sent", "drafts"]):
-                            rand_sleep(800, 1200)
+                            rand_sleep(400, 700)
                             shot = screenshot_b64()
                             try:
                                 driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
-                                rand_sleep(1500, 2000)
+                                rand_sleep(800, 1200)
                             except Exception:
                                 pass
                             return {
@@ -1638,17 +1638,17 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 break
 
         if dismissed:
-            rand_sleep(2500, 3500)
+            rand_sleep(500, 800)
         else:
             break
 
     # Wait for Gmail to fully load
-    deadline = time.time() + 25
+    deadline = time.time() + 12
     while time.time() < deadline:
         _cu = driver.current_url
         if "mail.google.com" in get_hostname(_cu):
             break
-        # Early exit: challenge/verification URL — no need to wait 25s
+        # Early exit: challenge/verification URL — no need to wait
         if (
             ("challenge" in _cu and not any(x in _cu for x in (
                 "challenge/pwd", "challenge/dp", "challenge/totp",
@@ -1658,9 +1658,9 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             or ("verify" in _cu and "mail" not in _cu)
         ):
             break
-        time.sleep(0.8)
+        time.sleep(0.5)
 
-    rand_sleep(1500, 2500)
+    rand_sleep(300, 600)
     url, text = page_state()
     log(f"{email} — Final page after interstitials: {url[:70]}")
 
