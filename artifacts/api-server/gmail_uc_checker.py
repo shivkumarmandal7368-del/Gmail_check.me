@@ -916,24 +916,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
 
     log(f"Launching Chrome (UC)…")
 
-    # ── Step A: Pre-patch chromedriver OUTSIDE the Chrome lock ─────────────
-    # Patching (download + binary mutation) is the slowest part of uc.Chrome()
-    # — up to 15s on first call.  By running the patcher before acquiring the
-    # Chrome launch lock, ALL concurrent accounts can patch in parallel (UC uses
-    # its own internal file lock so concurrent patcher calls are safe).
-    # The Chrome lock then only covers the fast Chrome-process start (2-4s)
-    # instead of the old 10-15s, enabling real concurrent checking.
-    _patched_driver: str | None = None
-    try:
-        _uc_patcher = uc.Patcher(version_main=138)
-        _uc_patcher.auto()
-        if _uc_patcher.executable_path and os.path.exists(_uc_patcher.executable_path):
-            _patched_driver = _uc_patcher.executable_path
-            log(f"Chromedriver pre-patched: {_patched_driver}")
-    except Exception as _pe:
-        log(f"Chromedriver pre-patch skipped ({_pe}) — UC will patch at launch")
-
-    # ── Step B: Start private Xvfb display OUTSIDE the Chrome lock ─────────
+    # ── Start private Xvfb display OUTSIDE the Chrome lock ─────────────────
     # A separate short-lived display-allocation lock ensures no two accounts
     # pick the same Xvfb display number.  The 0.5s Xvfb startup wait happens
     # OUTSIDE the Chrome lock, so all accounts can initialise their displays
