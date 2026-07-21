@@ -970,7 +970,12 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     _cd_port = _find_free_port()
     log(f"ChromeDriver port: {_cd_port}")
     try:
-        _chrome_kwargs: dict = dict(
+        # NOTE: Do NOT pass driver_executable_path — UC's Patcher renames the
+        # binary internally and passing the path causes [Errno 2] No such file.
+        # Pre-patching above (uc.Patcher.auto()) already warmed the on-disk cache,
+        # so uc.Chrome() will find the cached patched binary instantly without
+        # re-downloading or re-patching — all the speed benefit, no rename conflict.
+        driver = uc.Chrome(
             options=options,
             browser_executable_path=chromium_path,
             headless=headless,
@@ -978,10 +983,6 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             use_subprocess=True,
             port=_cd_port,
         )
-        # Skip re-patching inside the lock — use the already-patched driver
-        if _patched_driver:
-            _chrome_kwargs["driver_executable_path"] = _patched_driver
-        driver = uc.Chrome(**_chrome_kwargs)
         # Reduced from 2.5s → 1.0s: Chrome process is already running, just
         # letting CDP settle.  Lock is released sooner so next account can start.
         time.sleep(1.0)
