@@ -491,6 +491,49 @@ artifacts/api-server: API Server    → backend
 
 ---
 
+## Session 15 Changes (July 21, 2026) — True concurrent checking: Chrome lock hold time reduced
+
+### Problem
+User reported accounts being checked one-by-one instead of concurrently (even with concurrency=3).
+
+### Root Cause
+The Chrome launch lock was being held for ~13s per account:
+- Xvfb start (0.5s) — inside lock
+- `uc.Chrome()` including chromedriver patching (7-12s) — inside lock
+- Stability wait `time.sleep(2.5)` — inside lock
+
+With 3 accounts, account 2 waited ~13s for account 1, account 3 waited ~26s. Results arrived ~13s apart, looking completely sequential to the user.
+
+### Fix Applied (`gmail_uc_checker.py` — Chrome launch section)
+
+Moved slow steps OUTSIDE the Chrome lock:
+
+**Step A — Chromedriver pre-patching (outside lock, parallel)**
+- Call `uc.Patcher(version_main=138).auto()` before acquiring Chrome lock
+- UC's patcher uses its own internal file lock — safe for concurrent calls
+- After patching, pass `driver_executable_path=_patched_driver` to `uc.Chrome()` inside lock → skips re-patching
+- Saving: ~5-12s removed from lock hold time
+
+**Step B — Private Xvfb start (outside lock, with short display-allocation lock)**
+- New `_DISPLAY_ALLOC_LOCK = /tmp/gmail_checker_display_alloc.lock`
+- Display number allocated under this SHORT lock (< 0.1s hold)
+- Xvfb process started under the display lock, then lock released immediately
+- 0.5s Xvfb startup wait moved OUTSIDE Chrome lock — runs in parallel
+- Saving: ~0.5s removed from Chrome lock hold time
+
+**Step C — Chrome lock now holds for ~2-4s (down from ~13s)**
+- Only covers: `uc.Chrome()` process start (2-4s, no patching) + `time.sleep(1.0)` (reduced from 2.5s)
+- Total Chrome lock hold time: ~3-5s per account
+
+### Expected Timing with 3 accounts (concurrency=3)
+- Account 1 Chrome starts: t=3s, lock released t=3s
+- Account 2 Chrome starts: t=6s, lock released t=6s
+- Account 3 Chrome starts: t=9s, lock released t=9s
+- All 3 running login flow in parallel from t=9s
+- Results arrive 3-5s apart (vs 13s apart before fix)
+
+---
+
 ## Session 14 Changes (July 21, 2026) — TOTP challenge/totp page intermittent failure fix
 
 ### Problem

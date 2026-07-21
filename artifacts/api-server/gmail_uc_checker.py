@@ -915,31 +915,62 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         options.add_argument("--disable-gpu")
 
     log(f"Launching Chrome (UC)…")
-    # Acquire cross-process lock so only ONE Chrome starts at a time.
-    # Concurrent Chrome launches exhaust shared memory and cause crashes.
-    _xvfb_proc = None  # private Xvfb for this account — killed in _cleanup()
+
+    # ── Step A: Pre-patch chromedriver OUTSIDE the Chrome lock ─────────────
+    # Patching (download + binary mutation) is the slowest part of uc.Chrome()
+    # — up to 15s on first call.  By running the patcher before acquiring the
+    # Chrome launch lock, ALL concurrent accounts can patch in parallel (UC uses
+    # its own internal file lock so concurrent patcher calls are safe).
+    # The Chrome lock then only covers the fast Chrome-process start (2-4s)
+    # instead of the old 10-15s, enabling real concurrent checking.
+    _patched_driver: str | None = None
+    try:
+        _uc_patcher = uc.Patcher(version_main=138)
+        _uc_patcher.auto()
+        if _uc_patcher.executable_path and os.path.exists(_uc_patcher.executable_path):
+            _patched_driver = _uc_patcher.executable_path
+            log(f"Chromedriver pre-patched: {_patched_driver}")
+    except Exception as _pe:
+        log(f"Chromedriver pre-patch skipped ({_pe}) — UC will patch at launch")
+
+    # ── Step B: Start private Xvfb display OUTSIDE the Chrome lock ─────────
+    # A separate short-lived display-allocation lock ensures no two accounts
+    # pick the same Xvfb display number.  The 0.5s Xvfb startup wait happens
+    # OUTSIDE the Chrome lock, so all accounts can initialise their displays
+    # in parallel rather than one at a time.
+    _DISPLAY_ALLOC_LOCK = "/tmp/gmail_checker_display_alloc.lock"
+    _xvfb_proc = None
+    _disp_num = 99
+    _disp_lock_fd = open(_DISPLAY_ALLOC_LOCK, "w")
+    try:
+        fcntl.flock(_disp_lock_fd, fcntl.LOCK_EX)
+        _disp_num = _find_free_display()
+        try:
+            _xvfb_proc = subprocess.Popen(
+                ["Xvfb", f":{_disp_num}", "-screen", "0", "1366x768x24", "-ac"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            os.environ["DISPLAY"] = f":{_disp_num}"
+            log(f"Private Xvfb on :{_disp_num} (pid={_xvfb_proc.pid})")
+        except Exception as _xvfb_err:
+            log(f"Private Xvfb failed (:{_disp_num}): {_xvfb_err} — using shared display")
+            _xvfb_proc = None
+    finally:
+        fcntl.flock(_disp_lock_fd, fcntl.LOCK_UN)
+        _disp_lock_fd.close()
+    time.sleep(0.5)  # Xvfb startup wait — runs in parallel while other accounts wait for Chrome lock
+
+    # ── Step C: Chrome launch lock — now only covers the fast Chrome start ──
+    # With chromedriver pre-patched and Xvfb already running, this lock holds
+    # for only ~2-4s (Chrome process start + brief CDP settle) instead of ~13s.
     _lock_fd = open(_CHROME_LAUNCH_LOCK_PATH, "w")
     log("Waiting for Chrome launch slot…")
     fcntl.flock(_lock_fd, fcntl.LOCK_EX)
     log("Chrome launch slot acquired — starting Chrome")
     _cd_port = _find_free_port()
     log(f"ChromeDriver port: {_cd_port}")
-    # Each account gets its OWN private Xvfb display so xdotool keystrokes
-    # never cross-contaminate between concurrent Chrome windows.
-    _disp_num = _find_free_display()
     try:
-        _xvfb_proc = subprocess.Popen(
-            ["Xvfb", f":{_disp_num}", "-screen", "0", "1366x768x24", "-ac"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        time.sleep(0.5)  # wait for Xvfb to be ready
-        os.environ["DISPLAY"] = f":{_disp_num}"
-        log(f"Private Xvfb on :{_disp_num} (pid={_xvfb_proc.pid})")
-    except Exception as _xvfb_err:
-        log(f"Private Xvfb failed (:{_disp_num}): {_xvfb_err} — using shared display")
-        _xvfb_proc = None
-    try:
-        driver = uc.Chrome(
+        _chrome_kwargs: dict = dict(
             options=options,
             browser_executable_path=chromium_path,
             headless=headless,
@@ -947,8 +978,13 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             use_subprocess=True,
             port=_cd_port,
         )
-        # Hold lock briefly while Chrome stabilises, then release for next account
-        time.sleep(2.5)
+        # Skip re-patching inside the lock — use the already-patched driver
+        if _patched_driver:
+            _chrome_kwargs["driver_executable_path"] = _patched_driver
+        driver = uc.Chrome(**_chrome_kwargs)
+        # Reduced from 2.5s → 1.0s: Chrome process is already running, just
+        # letting CDP settle.  Lock is released sooner so next account can start.
+        time.sleep(1.0)
     except Exception as e:
         fcntl.flock(_lock_fd, fcntl.LOCK_UN)
         _lock_fd.close()
