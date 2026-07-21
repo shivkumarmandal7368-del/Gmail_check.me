@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 21, 2026 — Session 13_
+_Last updated: July 21, 2026 — Session 16_
 
 ---
 
@@ -488,6 +488,45 @@ artifacts/api-server: API Server    → backend
 8. **Timeout = 180 seconds per account** in `browserLoginChecker.ts` (`TIMEOUT_MS = 180_000`). If Python hangs beyond that, it's SIGKILL'd.
 
 9. **Auto-retry doubles time** — if first attempt is blocked by Google, auto-retry runs a full second check. Total time can be 200–240s for a blocked account before giving up.
+
+---
+
+## Session 16 Changes (July 21, 2026) — v3/signin Google Authenticator page fix
+
+### Problem
+"Verify that it's you — Get a verification code from the Google Authenticator app" page appeared at URL `https://accounts.google.com/v3/signin/TL=...` and was returning `unknown` / "Unexpected page" instead of being handled as a TOTP challenge.
+
+### Root Cause
+`_on_totp_url` only checked for `challenge/totp` and `challenge/ipp` URLs. The `v3/signin/TL=...` URL format is Google's alternate TOTP page URL — same page, different URL scheme. Since `_on_totp_url = False`:
+- TOTP field was detected with bare `find_element` (no wait) → could miss it if page still rendering
+- `is_2fa_select = True` (text had "verify that it's you") but `_on_totp_url = False` → code tried to click "Google Authenticator" as method option (wrong — page IS the input, not selection)
+- Result: TOTP not entered properly → fell through to "Unexpected page" / `unknown`
+
+### Fix Applied (`gmail_uc_checker.py` — 2 changes)
+
+**Fix 1 — `_on_totp_url` extended (line ~1601):**
+```python
+_on_totp_url = (
+    "challenge/totp" in url
+    or "challenge/ipp" in url
+    or ("v3/signin" in url and "v3/signin/identifier" not in url)  # ← NEW
+)
+```
+Now `v3/signin/TL=...` URLs use `wait_for_any(timeout=8)` for field detection AND take the correct "already on TOTP input page" branch (wait 15s for field, skip Authenticator click).
+
+**Fix 2 — `classify()` safety net:**
+Added after the Gmail `opened` block: if URL is `v3/signin/TL=...` AND page text contains "google authenticator" / "verification code from" / "verify that it's you" → return `opened` immediately. Per user confirmation: these accounts are confirmed accessible (password accepted, Google is just asking TOTP). Captures a screenshot.
+
+### Expected Behavior After Fix
+- `v3/signin/TL=...` page → `_on_totp_url = True` → wait for TOTP field → enter fresh TOTP → login → `opened` ✅
+- If TOTP entry somehow fails and falls through → `classify()` catches it → `opened` ✅
+- No more `unknown` / "Unexpected page" for this scenario
+
+### Also Fixed This Session
+- Ran `pnpm install` (node_modules were missing after new import)
+- Restarted both workflows:
+  - `artifacts/api-server: API Server` (port 8080)
+  - `artifacts/gmail-checker: web` (port 5173)
 
 ---
 

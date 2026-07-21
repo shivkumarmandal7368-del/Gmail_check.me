@@ -1122,6 +1122,31 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 "debugScreenshot": shot,
             }
 
+        # ── "Verify that it's you — Google Authenticator" fallback ───────────
+        # URL: accounts.google.com/v3/signin/TL=... (not standard challenge/ format)
+        # Google showed this page AFTER accepting the password → password is correct.
+        # The TOTP entry path (Step 4 / _on_totp_url) should have handled this already,
+        # but if it falls through here, mark as opened per user confirmation.
+        _low = text.lower()
+        if (
+            "v3/signin" in url
+            and "v3/signin/identifier" not in url
+            and any(x in _low for x in [
+                "google authenticator",
+                "verification code from",
+                "authenticator app",
+                "verify that it's you",
+            ])
+        ):
+            log(f"{email} — v3/signin Google Authenticator page in classify() → opened (account confirmed accessible)")
+            shot = screenshot_b64()
+            return {
+                "status": "opened",
+                "reason": "Mailbox opened successfully ✅",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
+
         # ── "This browser or app may not be secure" ──────────────────────────
         # Google blocks when it detects automation signals (UA-CH mismatch, etc.)
         # Clear the persistent profile so next attempt gets a fresh device identity.
@@ -1597,8 +1622,12 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
     # True when Google has already landed on the TOTP input page directly
     # (e.g. "Verify that it's you — Get a verification code from Google Authenticator")
-    # URL: challenge/totp or challenge/ipp — the input field is already rendered.
-    _on_totp_url = "challenge/totp" in url or "challenge/ipp" in url
+    # URL: challenge/totp, challenge/ipp, OR v3/signin/TL=... (same page, different URL format)
+    _on_totp_url = (
+        "challenge/totp" in url
+        or "challenge/ipp" in url
+        or ("v3/signin" in url and "v3/signin/identifier" not in url)
+    )
 
     # Detect direct TOTP-input page (input already visible).
     # If we know we're on a TOTP URL, wait briefly for the field — single
