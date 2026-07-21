@@ -693,37 +693,8 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     except Exception as e:
         log(f"Network UA override warning: {e}")
 
-    # Exit IP: fetch via Chrome (uses same proxy extension Chrome uses — works with auth proxies)
-    exit_ip = "no_proxy"
-    if proxy:
-        try:
-            _ip_check_urls = [
-                ("https://api.ipify.org?format=json", "json", "ip"),
-                ("https://api4.my-ip.io/v2/ip.json",  "json", "ip"),
-                ("https://ifconfig.me/ip",             "text", None),
-            ]
-            exit_ip = None
-            for _ip_url, _fmt, _key in _ip_check_urls:
-                try:
-                    driver.get(_ip_url)
-                    time.sleep(1.5)
-                    _body = driver.execute_script("return document.body ? document.body.innerText : '';").strip()
-                    if _fmt == "json":
-                        import json as _json
-                        _candidate = _json.loads(_body).get(_key, "").strip()
-                    else:
-                        _candidate = _body.strip()
-                    if _candidate and len(_candidate) < 50 and "." in _candidate:
-                        exit_ip = _candidate
-                        break
-                except Exception:
-                    continue
-            if not exit_ip:
-                exit_ip = "unknown"
-            log(f"Exit IP: {exit_ip}")
-        except Exception as _ie:
-            exit_ip = f"proxy:{proxy.split('@')[-1]}"
-            log(f"Exit IP check failed ({type(_ie).__name__}): {_ie} — using {exit_ip}")
+    # Exit IP fetch skipped — each account uses a unique sticky session ID for IP isolation
+    exit_ip = None
 
     _login_result: dict = {}
     try:
