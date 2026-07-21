@@ -40,7 +40,8 @@ def rand_sleep(min_ms: int, max_ms: int):
 
 
 def human_type(element, text: str):
-    """Type text character by character with realistic random delays.
+    """Type text quickly like a fast human doing copy-paste — 15-40ms per char.
+    Simulates ~150-200 WPM typist. Very rare micro-pause (0.5%) to avoid robotic rhythm.
     Re-finds the element if a stale reference is hit."""
     from selenium.common.exceptions import StaleElementReferenceException
     for char in text:
@@ -49,10 +50,10 @@ def human_type(element, text: str):
                 element.send_keys(char)
                 break
             except StaleElementReferenceException:
-                time.sleep(0.3)  # brief wait then retry
-        delay = random.uniform(0.06, 0.16)
-        if random.random() < 0.05:
-            delay += random.uniform(0.2, 0.5)
+                time.sleep(0.15)
+        delay = random.uniform(0.015, 0.040)
+        if random.random() < 0.005:          # 0.5% chance — very rare thinking pause
+            delay += random.uniform(0.06, 0.12)
         time.sleep(delay)
 
 
@@ -336,6 +337,21 @@ def get_or_create_fingerprint(profile_dir: str) -> dict:
     fp = random.choice(PHONE_PROFILES).copy()
     fp["canvasSeed"]  = random.randint(1, 254)        # unique canvas XOR per account
     fp["audioNoise"]  = round(random.uniform(0.00001, 0.00009), 7)  # unique audio shift
+    # Per-account timezone — each account looks like a different person in a different city
+    fp["timezone"] = random.choice([
+        "America/New_York", "America/Chicago", "America/Los_Angeles",
+        "America/Denver", "America/Toronto", "America/Vancouver",
+        "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Madrid",
+        "Europe/Rome", "Europe/Amsterdam", "Europe/Warsaw",
+        "Asia/Calcutta", "Asia/Tokyo", "Asia/Seoul", "Asia/Singapore",
+        "Asia/Dubai", "Asia/Bangkok", "Asia/Jakarta", "Asia/Hong_Kong",
+        "Australia/Sydney", "Australia/Melbourne",
+    ])
+    # Per-account language — varies the Accept-Language header and navigator.languages
+    fp["language"] = random.choice([
+        "en-US", "en-US", "en-US", "en-US",  # weighted — most users are en-US
+        "en-GB", "en-CA", "en-AU", "en-IN",
+    ])
     try:
         with open(fp_path, "w") as f:
             json.dump(fp, f, indent=2)
@@ -353,10 +369,12 @@ def make_stealth_js(fp: dict) -> str:
     cv  = fp["chromeVersion"]
     av  = fp["androidVersion"]
     mdl = fp["model"].replace("'", "\\'")
+    tz  = fp.get("timezone", "America/New_York").replace("'", "\\'")
+    lg  = fp.get("language", "en-US").replace("'", "\\'")
     return f"""
 Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
 Object.defineProperty(navigator,'plugins',{{get:()=>{{var p=[];p.length=0;return p;}}}});
-Object.defineProperty(navigator,'languages',{{get:()=>['en-US','en']}});
+Object.defineProperty(navigator,'languages',{{get:()=>['{lg}','en']}});
 Object.defineProperty(navigator,'hardwareConcurrency',{{get:()=>{fp['hwConcurrency']}}});
 Object.defineProperty(navigator,'deviceMemory',{{get:()=>{fp['deviceMemory']}}});
 Object.defineProperty(screen,'width',      {{get:()=>{fp['screenW']}}});
@@ -429,6 +447,7 @@ try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e
   var orig=AudioBuffer&&AudioBuffer.prototype.getChannelData;
   if(orig)AudioBuffer.prototype.getChannelData=function(){{var d=orig.apply(this,arguments);if(d&&d.length>0)d[0]=d[0]+noise;return d;}};
 }})();
+try{{var _tz='{tz}';var _dto=Intl.DateTimeFormat;function _dtow(l,o){{o=o||{{}};if(!o.timeZone)o.timeZone=_tz;return new _dto(l,o);}}try{{Object.keys(_dto).forEach(function(k){{_dtow[k]=_dto[k];}});}}catch(e2){{}}try{{_dtow.prototype=_dto.prototype;}}catch(e3){{}}Intl.DateTimeFormat=_dtow;}}catch(e){{}}
 """
 
 
@@ -738,7 +757,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         driver.execute_cdp_cmd("Network.enable", {})
         driver.execute_cdp_cmd("Network.setUserAgentOverride", {
             "userAgent": MOBILE_UA,
-            "acceptLanguage": "en-US,en;q=0.9",
+            "acceptLanguage": f"{fp.get('language', 'en-US')},en;q=0.9",
             "platform": fp["platform"],
             "userAgentMetadata": {
                 "brands": [
@@ -838,13 +857,13 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             )
 
         if at_mailbox and (has_compose or has_inbox_text or "mail/u/" in url or "mail/mu/" in url or "/mail/mp/" in url):
-            rand_sleep(1500, 2000)
+            rand_sleep(500, 800)
             shot = screenshot_b64()
             # ── Logout immediately so Google doesn't flag a suspicious active session ──
             try:
                 log("Mailbox opened — logging out to avoid suspicious-session flag")
                 driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
-                rand_sleep(1500, 2500)
+                rand_sleep(700, 1200)
                 log("Logout complete")
             except Exception as _le:
                 log(f"Logout warning (non-fatal): {_le}")
@@ -941,7 +960,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                         return el
                 except Exception:
                     pass
-            time.sleep(0.3)
+            time.sleep(0.15)
         return None
 
     # ── Step 0: Warmup — visit Google homepage first ─────────────────────────
@@ -970,12 +989,12 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         # Simulate minimal human interaction: scroll down, pause, scroll back up
         try:
             driver.execute_script("window.scrollTo({top: 250, behavior: 'smooth'});")
-            rand_sleep(500, 900)
+            rand_sleep(300, 500)
             driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
         except Exception:
             pass
         # Let JS fingerprint hooks execute fully before leaving the page
-        rand_sleep(1500, 2200)
+        rand_sleep(1000, 1500)
         log(f"{email} — Step 0: warmup complete")
     except Exception:
         pass  # warmup failure is non-fatal — continue anyway
@@ -988,7 +1007,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             "?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F"
             "&service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
         )
-        rand_sleep(1000, 1800)
+        rand_sleep(600, 1000)
     except Exception as e:
         return {"status": "unknown", "reason": f"Navigation failed: {str(e)[:200]}", "totpCode": totp_code}
 
@@ -1137,28 +1156,42 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     for _attempt in range(3):
         try:
             move_to_element(driver, email_field)
-            rand_sleep(200, 400)
+            rand_sleep(80, 180)
             email_field.click()
             break
         except Exception:
-            rand_sleep(400, 700)
+            rand_sleep(300, 600)
             email_field = wait_for_any(EMAIL_SELECTORS, timeout=6) or email_field
 
-    rand_sleep(300, 600)
+    rand_sleep(100, 200)
     human_type(email_field, email)
-    rand_sleep(500, 900)
+    rand_sleep(150, 300)
     # send_keys(ENTER) with stale retry
     for _attempt in range(3):
         try:
             email_field.send_keys(Keys.ENTER)
             break
         except Exception:
-            rand_sleep(300, 500)
+            rand_sleep(200, 400)
             email_field = wait_for_any(EMAIL_SELECTORS, timeout=5) or email_field
-    rand_sleep(1500, 2000)
+    rand_sleep(700, 1000)
 
     url, text = page_state()
     log(f"{email} — After email submit: {url[:70]}")
+
+    # ── Identifier-page stall fix (Session 8) ────────────────────────────────
+    # If Google never navigated past the email page, the proxy IP was detected
+    # at the email step (silent CAPTCHA or block). Falls to unknown otherwise.
+    # Classify as verification_required so auto-retry fires with a fresh proxy IP.
+    if ("signin/identifier" in url) and "challenge" not in url and "mail.google.com" not in url:
+        shot = screenshot_b64()
+        log(f"{email} — Identifier stall: page did not advance past email field (automation detected at email step)")
+        return {
+            "status": "verification_required",
+            "reason": "automation detected at email step — page did not advance past email field. Auto-retrying with fresh proxy IP.",
+            "totpCode": totp_code,
+            "debugScreenshot": shot,
+        }
 
     if "signin/rejected" in url:
         shot = screenshot_b64()
@@ -1185,7 +1218,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 """)
             except Exception:
                 pass
-            rand_sleep(1500, 2500)
+            rand_sleep(700, 1200)
             url, text = page_state()
             if "uplevelingstep" not in url:
                 break
@@ -1219,13 +1252,20 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         }
 
     move_to_element(driver, pw_field)
-    rand_sleep(200, 400)
+    rand_sleep(80, 180)
     pw_field.click()
-    rand_sleep(300, 500)
+    rand_sleep(100, 200)
     human_type(pw_field, password)
-    rand_sleep(500, 900)
-    pw_field.send_keys(Keys.ENTER)
-    rand_sleep(1500, 2000)
+    rand_sleep(150, 300)
+    # send_keys(ENTER) with stale retry — pw_field can go stale after typing
+    for _attempt in range(3):
+        try:
+            pw_field.send_keys(Keys.ENTER)
+            break
+        except Exception:
+            rand_sleep(200, 400)
+            pw_field = wait_for_any(PW_SELECTORS, timeout=5) or pw_field
+    rand_sleep(700, 1000)
 
     url, text = page_state()
     log(f"{email} — After password submit: {url[:70]}")
@@ -1319,7 +1359,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 log(f"Authenticator click error: {e}")
 
         _click_authenticator()
-        rand_sleep(1800, 2800)
+        rand_sleep(700, 1100)
 
         TOTP_SELECTORS = [
             'input[name="totpPin"]', 'input[name="Pin"]', 'input[id="totpPin"]',
@@ -1344,9 +1384,9 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                     });
                     if (found) found.click();
                 """)
-                rand_sleep(1500, 2500)
+                rand_sleep(700, 1200)
                 _click_authenticator()
-                rand_sleep(1500, 2500)
+                rand_sleep(700, 1200)
                 totp_field = wait_for_any(TOTP_SELECTORS, timeout=15)
             except Exception as e:
                 log(f"Try another way error: {e}")
@@ -1379,16 +1419,16 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         log(f"{email} — Entering TOTP code: {totp_code}")
         try:
             move_to_element(driver, totp_field)
-            rand_sleep(150, 300)
+            rand_sleep(80, 150)
             totp_field.clear()
-            rand_sleep(100, 200)
+            rand_sleep(50, 100)
             human_type(totp_field, totp_code)
-            rand_sleep(400, 600)
+            rand_sleep(150, 300)
             totp_field.send_keys(Keys.ENTER)
         except Exception as e:
             log(f"TOTP entry error: {e}")
 
-        rand_sleep(1500, 2500)
+        rand_sleep(700, 1200)
 
         # Wait for Gmail to fully load (signin/continue is an auto-redirect page)
         log(f"{email} — Waiting for Gmail redirect after TOTP…")
@@ -1428,11 +1468,11 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                     """)
                 except Exception:
                     pass
-            time.sleep(1.0)
+            time.sleep(0.5)
         if _totp_redirect_early:
             return _totp_redirect_early
 
-        rand_sleep(1500, 2500)
+        rand_sleep(700, 1200)
         url, text = page_state()
         log(f"{email} — After TOTP submit (final): {url[:70]}")
 
@@ -1655,7 +1695,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                             });
                             if (found) found.click();
                         """)
-                        rand_sleep(1500, 2500)
+                        rand_sleep(700, 1200)
                     tf = wait_for_any([
                         'input[name="totpPin"]', 'input[name="Pin"]',
                         'input[autocomplete="one-time-code"]', 'input[type="tel"]',
@@ -1663,11 +1703,11 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                     ], timeout=8)
                     if tf:
                         tf.clear()
-                        rand_sleep(100, 200)
+                        rand_sleep(50, 100)
                         human_type(tf, fresh_code)
-                        rand_sleep(400, 600)
+                        rand_sleep(150, 300)
                         tf.send_keys(Keys.ENTER)
-                        rand_sleep(2000, 3000)
+                        rand_sleep(800, 1500)
                         dismissed = True
                 except Exception as e:
                     log(f"Re-TOTP error: {e}")
@@ -1703,7 +1743,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                     });
                     if (broader) broader.click();
                 """)
-                rand_sleep(1500, 2500)
+                rand_sleep(700, 1200)
                 # Check if TOTP field appeared — if yes, enter code and submit
                 if totp_secret or totp_code:
                     fresh_code = generate_totp(totp_secret) if totp_secret else totp_code
@@ -1720,11 +1760,11 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                     if tf and fresh_code:
                         log(f"{email} — Entering TOTP in interstitial: {fresh_code}")
                         tf.clear()
-                        rand_sleep(100, 200)
+                        rand_sleep(50, 100)
                         human_type(tf, fresh_code)
-                        rand_sleep(400, 600)
+                        rand_sleep(150, 300)
                         tf.send_keys(Keys.ENTER)
-                        rand_sleep(2000, 3000)
+                        rand_sleep(800, 1500)
             except Exception as e:
                 log(f"2FA interstitial click error: {e}")
             dismissed = True
