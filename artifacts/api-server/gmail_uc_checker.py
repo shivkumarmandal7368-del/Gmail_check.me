@@ -1565,33 +1565,58 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
     # ── Step 4: 2FA — check BEFORE classify so we handle it ourselves ─────────
 
+    # Broad TOTP input selectors — used in multiple places below.
+    # Covers all known Google Authenticator input variants across UI versions.
+    TOTP_SELECTORS = [
+        'input[name="totpPin"]', 'input[name="Pin"]', 'input[id="totpPin"]',
+        'input[autocomplete="one-time-code"]', 'input[type="tel"]',
+        'input[aria-label*="code"]', 'input[aria-label*="Code"]',
+        'input[placeholder*="code"]', 'input[placeholder*="Code"]',
+        'input[type="number"]',
+    ]
+
+    # True when Google has already landed on the TOTP input page directly
+    # (e.g. "Verify that it's you — Get a verification code from Google Authenticator")
+    # URL: challenge/totp or challenge/ipp — the input field is already rendered.
+    _on_totp_url = "challenge/totp" in url or "challenge/ipp" in url
+
+    # Detect direct TOTP-input page (input already visible).
+    # If we know we're on a TOTP URL, wait briefly for the field — single
+    # find_element with no wait misses the field when the page is still rendering.
+    totp_field = None
+    if _on_totp_url:
+        totp_field = wait_for_any(TOTP_SELECTORS, timeout=8)
+        log(f"{email} — TOTP URL detected ({url[:60]}), field={'found' if totp_field else 'not yet visible'}")
+    else:
+        try:
+            totp_field = driver.find_element(By.CSS_SELECTOR,
+                'input[name="totpPin"],input[name="Pin"],input[id="totpPin"],'
+                'input[autocomplete="one-time-code"],input[aria-label*="code"],'
+                'input[placeholder*="code"],input[placeholder*="Code"]')
+        except Exception:
+            pass
+
     # Detect method-selection page ("2-Step Verification — choose how you want")
     # Also trigger on URL: challenge/dp = device-protection 2FA selection,
     # challenge/selection = explicit 2FA method picker.
-    # URL check catches cases where Google renders the page without the exact
-    # text strings we look for (different UI versions / A/B tests).
+    # challenge/totp / challenge/ipp = already on TOTP input page (handle separately below).
+    # Text: "verify that it's you" is the page heading for the Google Authenticator
+    # challenge page — distinct from "verify it's you" (method-selection heading).
     is_2fa_select = (
         any(x in text for x in [
             "2-step verification",
             "choose how you want to sign in",
             "how do you want to sign in",
             "verify it's you",
+            "verify that it's you",  # Google Authenticator challenge heading
         ])
         or "challenge/dp" in url
         or "challenge/selection" in url
+        or _on_totp_url  # already on TOTP input page — treat as 2FA page
     )
 
-    # Detect direct TOTP-input page (input already visible)
-    totp_field = None
-    try:
-        totp_field = driver.find_element(By.CSS_SELECTOR,
-            'input[name="totpPin"],input[name="Pin"],input[id="totpPin"],'
-            'input[autocomplete="one-time-code"],input[aria-label*="code"]')
-    except Exception:
-        pass
-
     if is_2fa_select and totp_field is None:
-        log(f"{email} — 2FA method-selection page detected")
+        log(f"{email} — 2FA page detected (url={url[:60]})")
         if not totp_code:
             shot = screenshot_b64()
             return {
@@ -1601,68 +1626,69 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 "debugScreenshot": shot,
             }
 
-        # Click the Google Authenticator option
-        log(f"{email} — Clicking 'Google Authenticator' option")
+        if _on_totp_url:
+            # Already on the TOTP input page (challenge/totp or challenge/ipp).
+            # Do NOT click Authenticator — just wait longer for the input field.
+            log(f"{email} — Already on TOTP input page, waiting for field to render…")
+            totp_field = wait_for_any(TOTP_SELECTORS, timeout=15)
+            if totp_field is None:
+                log(f"{email} — TOTP field still not found on challenge/totp page after 15s wait")
+        else:
+            # Method-selection page — click the Google Authenticator option.
+            log(f"{email} — Clicking 'Google Authenticator' option")
 
-        def _click_authenticator():
-            try:
-                driver.execute_script("""
-                    // Try by data-challengetype (totp = 6)
-                    var byType = document.querySelector('[data-challengetype="6"]');
-                    if (byType) { byType.click(); return; }
-                    // Try by visible text containing "authenticator"
-                    var allEls = Array.from(document.querySelectorAll(
-                        'li, div[role="listitem"], [data-challengetype]'));
-                    var found = allEls.find(function(el) {
-                        return el.innerText && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
-                    });
-                    if (found) { found.click(); return; }
-                    // Broader fallback — any clickable element with the word
-                    var broader = Array.from(document.querySelectorAll('*')).find(function(el) {
-                        return el.children.length === 0
-                            && el.innerText
-                            && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
-                    });
-                    if (broader) broader.click();
-                """)
-            except Exception as e:
-                log(f"Authenticator click error: {e}")
+            def _click_authenticator():
+                try:
+                    driver.execute_script("""
+                        // Try by data-challengetype (totp = 6)
+                        var byType = document.querySelector('[data-challengetype="6"]');
+                        if (byType) { byType.click(); return; }
+                        // Try by visible text containing "authenticator"
+                        var allEls = Array.from(document.querySelectorAll(
+                            'li, div[role="listitem"], [data-challengetype]'));
+                        var found = allEls.find(function(el) {
+                            return el.innerText && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
+                        });
+                        if (found) { found.click(); return; }
+                        // Broader fallback — any clickable element with the word
+                        var broader = Array.from(document.querySelectorAll('*')).find(function(el) {
+                            return el.children.length === 0
+                                && el.innerText
+                                && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
+                        });
+                        if (broader) broader.click();
+                    """)
+                except Exception as e:
+                    log(f"Authenticator click error: {e}")
 
-        _click_authenticator()
-        rand_sleep(700, 1100)
+            _click_authenticator()
+            rand_sleep(700, 1100)
 
-        TOTP_SELECTORS = [
-            'input[name="totpPin"]', 'input[name="Pin"]', 'input[id="totpPin"]',
-            'input[autocomplete="one-time-code"]', 'input[type="tel"]',
-            'input[aria-label*="code"]', 'input[aria-label*="Code"]',
-            'input[type="number"]',
-        ]
+            # Wait for the TOTP input to appear (longer timeout — SPA navigation on dp page)
+            totp_field = wait_for_any(TOTP_SELECTORS, timeout=18)
 
-        # Wait for the TOTP input to appear (longer timeout — SPA navigation on dp page)
-        totp_field = wait_for_any(TOTP_SELECTORS, timeout=18)
-
-        # Fallback: try "Try another way" → then click authenticator again
-        if totp_field is None:
-            log(f"{email} — TOTP not found after first click, trying 'Try another way'")
-            try:
-                driver.execute_script("""
-                    var links = Array.from(document.querySelectorAll('a, button, [role="button"]'));
-                    var found = links.find(function(el) {
-                        var t = (el.innerText || '').toLowerCase();
-                        return t.indexOf('another way') !== -1 || t.indexOf('different') !== -1
-                            || t.indexOf('more options') !== -1 || t.indexOf('try again') !== -1;
-                    });
-                    if (found) found.click();
-                """)
-                rand_sleep(700, 1200)
-                _click_authenticator()
-                rand_sleep(700, 1200)
-                totp_field = wait_for_any(TOTP_SELECTORS, timeout=15)
-            except Exception as e:
-                log(f"Try another way error: {e}")
+            # Fallback: try "Try another way" → then click authenticator again
+            if totp_field is None:
+                log(f"{email} — TOTP not found after first click, trying 'Try another way'")
+                try:
+                    driver.execute_script("""
+                        var links = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+                        var found = links.find(function(el) {
+                            var t = (el.innerText || '').toLowerCase();
+                            return t.indexOf('another way') !== -1 || t.indexOf('different') !== -1
+                                || t.indexOf('more options') !== -1 || t.indexOf('try again') !== -1;
+                        });
+                        if (found) found.click();
+                    """)
+                    rand_sleep(700, 1200)
+                    _click_authenticator()
+                    rand_sleep(700, 1200)
+                    totp_field = wait_for_any(TOTP_SELECTORS, timeout=15)
+                except Exception as e:
+                    log(f"Try another way error: {e}")
 
         url, text = page_state()
-        log(f"{email} — After authenticator click: {url[:70]}, totp_field={'found' if totp_field else 'NOT found'}")
+        log(f"{email} — After 2FA handling: {url[:70]}, totp_field={'found' if totp_field else 'NOT found'}")
 
     # ── Enter TOTP code (whether we just navigated here or were already here) ─
     if totp_field is not None:

@@ -491,6 +491,46 @@ artifacts/api-server: API Server    → backend
 
 ---
 
+## Session 14 Changes (July 21, 2026) — TOTP challenge/totp page intermittent failure fix
+
+### Problem
+"Verify that it's you — Get a verification code from the Google Authenticator app" page
+(screenshot 2) was being handled correctly **sometimes** but silently falling through to
+the interstitial loop (→ `unknown` / timeout) other times.
+
+### Root Causes (3)
+
+**1. `is_2fa_select` text check missed this page heading**
+- Check: `"verify it's you"` — page says `"Verify that it's you"` → NOT a substring match
+- Result: `is_2fa_select = False` when URL was not `challenge/dp` or `challenge/selection`
+
+**2. `challenge/totp` URL not included in `is_2fa_select` URL check**
+- `challenge/dp` and `challenge/selection` were checked — `challenge/totp` was not
+- When Google lands directly on the Authenticator input page (`challenge/totp`), neither text nor URL triggered `is_2fa_select`
+
+**3. Initial `totp_field` detection used bare `find_element` with no wait**
+- If page still rendering → element not found → `totp_field = None`
+- When both `is_2fa_select=False` AND `totp_field=None` → code fell through to interstitial loop with nothing handling the TOTP page
+
+### Fix Applied (`gmail_uc_checker.py` — Step 4 block)
+
+1. **`TOTP_SELECTORS`** moved to top of Step 4, shared across all sub-blocks; added `placeholder*="code"` / `placeholder*="Code"` selectors
+2. **`_on_totp_url` flag** — True when URL contains `challenge/totp` or `challenge/ipp`
+3. **Smarter initial `totp_field` detection** — if `_on_totp_url`, uses `wait_for_any(TOTP_SELECTORS, timeout=8)` instead of bare `find_element`
+4. **`is_2fa_select` text** — added `"verify that it's you"` alongside `"verify it's you"`
+5. **`is_2fa_select` URL** — added `_on_totp_url` so `challenge/totp` and `challenge/ipp` trigger the 2FA block
+6. **Inside `is_2fa_select and totp_field is None` block** — new branch for `_on_totp_url`:
+   - Does NOT try to click Authenticator (already on input page)
+   - Just waits 15s for input field to appear
+   - Existing method-selection flow (`challenge/dp` etc.) unchanged
+
+### Result
+- `challenge/totp` page: `wait_for_any` detects input → TOTP entered → `opened` ✅
+- `challenge/dp` / `challenge/selection` page: existing Authenticator-click flow unchanged ✅
+- No more intermittent fall-through to interstitial loop
+
+---
+
 ## Session 13 Changes (July 21, 2026) — Concurrent fix: private Xvfb per account
 
 ### ✅ Fix 1: CDP port race — `port=_cd_port` in `uc.Chrome()`
