@@ -765,8 +765,8 @@ function BrowserChecker() {
                     <TableHead className="font-mono text-xs">EMAIL</TableHead>
                     <TableHead className="font-mono text-xs w-[130px]">STATUS</TableHead>
                     <TableHead className="font-mono text-xs min-w-[160px]">REASON</TableHead>
-                    {displayed.some(r => (r as any).exitIp) && (
-                      <TableHead className="font-mono text-xs w-[120px]">EXIT IP</TableHead>
+                    {displayed.some(r => (r as any).proxySession) && (
+                      <TableHead className="font-mono text-xs w-[130px]">PROXY SESSION</TableHead>
                     )}
                     {displayed.some(r => (r as any).fingerprint) && (
                       <TableHead className="font-mono text-xs min-w-[200px]">FINGERPRINT</TableHead>
@@ -796,9 +796,9 @@ function BrowserChecker() {
                           </div>
                         )}
                       </TableCell>
-                      {displayed.some(x => (x as any).exitIp) && (
-                        <TableCell className="text-xs font-mono text-cyan-400/80 tabular-nums">
-                          {(r as any).exitIp ?? "—"}
+                      {displayed.some(x => (x as any).proxySession) && (
+                        <TableCell className="text-[11px] font-mono text-cyan-400/80 tabular-nums">
+                          <span className="text-muted-foreground/50 text-[9px]">session-</span>{(r as any).proxySession ?? "—"}
                         </TableCell>
                       )}
                       {displayed.some(x => (x as any).fingerprint) && (

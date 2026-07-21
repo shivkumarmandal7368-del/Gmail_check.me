@@ -26,6 +26,7 @@ export interface BrowserLoginResult {
   debugScreenshot?: string;
   exitIp?: string;
   fingerprint?: string;
+  proxySession?: string;   // unique sticky-session ID → proof of different IP per account
 }
 
 function getPython3(): string {
@@ -214,8 +215,10 @@ export async function browserLoginCheck(
           totpCode: null,
         }),
       );
-      onAccountComplete?.(result);
-      return result;
+      // Attach session ID so UI can show proof of per-account IP
+      const enriched = { ...result, proxySession: assignedProxy ? sessionId : undefined };
+      onAccountComplete?.(enriched);
+      return enriched;
     },
   );
   return runWithConcurrency(tasks, concurrency);
