@@ -18,6 +18,7 @@ import io
 import subprocess
 import tempfile
 import fcntl
+import socket
 
 # ── Cross-process Chrome launch lock ─────────────────────────────────────────
 # Multiple Python processes (one per account) can be spawned concurrently.
@@ -25,6 +26,14 @@ import fcntl
 # This file lock serializes Chrome launches so only ONE Chrome starts at a time.
 # Once Chrome is stable (CDP ready), the lock is released so the next can start.
 _CHROME_LAUNCH_LOCK_PATH = "/tmp/gmail_checker_chrome_launch.lock"
+
+
+def _find_free_port() -> int:
+    """Get a random free TCP port for ChromeDriver to bind on."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -904,6 +913,8 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     log("Waiting for Chrome launch slot…")
     fcntl.flock(_lock_fd, fcntl.LOCK_EX)
     log("Chrome launch slot acquired — starting Chrome")
+    _cd_port = _find_free_port()
+    log(f"ChromeDriver port: {_cd_port}")
     try:
         driver = uc.Chrome(
             options=options,
@@ -911,6 +922,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             headless=headless,
             version_main=138,
             use_subprocess=True,
+            port=_cd_port,
         )
         # Hold lock briefly while Chrome stabilises, then release for next account
         time.sleep(2.5)

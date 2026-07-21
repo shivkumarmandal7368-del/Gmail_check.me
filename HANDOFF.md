@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 21, 2026 — Session 12_
+_Last updated: July 21, 2026 — Session 13_
 
 ---
 
@@ -488,6 +488,31 @@ artifacts/api-server: API Server    → backend
 8. **Timeout = 180 seconds per account** in `browserLoginChecker.ts` (`TIMEOUT_MS = 180_000`). If Python hangs beyond that, it's SIGKILL'd.
 
 9. **Auto-retry doubles time** — if first attempt is blocked by Google, auto-retry runs a full second check. Total time can be 200–240s for a blocked account before giving up.
+
+---
+
+## Session 13 Changes (July 21, 2026) — Concurrent ChromeDriver port conflict fix
+
+### ✅ Fixed: Port 38001 conflict when running 2+ accounts concurrently
+**File:** `artifacts/api-server/gmail_uc_checker.py`
+
+**Root cause:** `undetected_chromedriver` defaults to port 38001 for its ChromeDriver HTTP service. When 2+ Python processes spawn concurrently, the second process tries to bind the same port → `Connection refused`.
+
+**Fix applied (3 changes):**
+1. Added `import socket` to imports
+2. Added `_find_free_port()` helper — uses `socket.bind(("127.0.0.1", 0))` to atomically grab a free OS-assigned port
+3. Inside the Chrome launch lock (`fcntl.flock LOCK_EX`), picks a free port before `uc.Chrome(...)` and passes `port=_cd_port` — guarantees each concurrent process binds a different port
+
+**Expected log output when working:**
+```
+[UC] ChromeDriver port: 45832   ← process 1
+[UC] ChromeDriver port: 51904   ← process 2 (different port)
+```
+
+**Setup performed this session:**
+- `pnpm install` — Node deps installed
+- `pip install -r artifacts/api-server/requirements.txt` — Python deps installed
+- Both workflows started: `artifacts/api-server: API Server` (8080) + `artifacts/gmail-checker: web` (5173)
 
 ---
 
