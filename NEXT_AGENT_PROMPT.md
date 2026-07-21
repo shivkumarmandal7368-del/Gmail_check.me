@@ -6,98 +6,165 @@
 
 ## Tu Kahan Se Shuru Kar Raha Hai
 
-Session 10 incomplete tha — agent mid-session limit mein tha. Yahan se continue karo.
-
-### Ab Tak Kya Hua (Session 10)
-
-**✅ Fixed kiya:**
-- `undetected-chromedriver not installed` error — `pip install -q -r requirements.txt` ab API server dev script mein add hai (auto-run on every restart)
-- xdotool: `--onlyvisible` hata diya (Xvfb mein kaam nahi karta), Chrome window ID targeting add kiya
-- Email + Password submit: `Keys.ENTER` ki jagah `#identifierNext`/`#passwordNext` button click add kiya
-- Post-submit wait: fixed `rand_sleep(700, 1000)` ki jagah URL polling loop add kiya jo actual navigation complete hone ka wait karta hai
-
-**🔴 Current Problem — UNTESTED FIX DEPLOYED:**
-
-Account `regenawallgk795@gmail.com` ke liye Browser Check har baar `verification_required` return karta hai with reason:
-> *"Google silently bounced back to password page (automation detected). Profile wiped — auto-retrying with fresh fingerprint."*
-
-Matlab password submit karne ke baad URL still `challenge/pwd` pe rehta hai.
-
-**Root cause analysis:**
-- xdotool ABHI BHI fail ho raha hai (`field value short (0/25)`) — send_keys fallback use hota hai
-- send_keys kaam karta hai (password dots screenshot mein dikh rahe the)
-- Lekin password submit ke baad Google challenge/pwd pe wapas bhejta hai
-- Possible causes (priority order):
-  1. **Post-submit wait too short** — Session 2 mein `1500-2000ms` tha, kisi session mein `700-1000ms` ho gaya. Session 10 ne URL polling fix deploy kiya — **ABHI TAK TEST NAHI KIYA**
-  2. **Wrong password** — `<REDACTED>` — Google koi error nahi dikhata, silently bounce karta hai
-  3. **Genuine bot detection** — Nix Chromium + UC combination ho sakta hai kuch automation indicators leak kare
+**Session 12** — Concurrent browser check mein port conflict bug identify hua. Fix identify ho gayi hai lekin **DEPLOY NAHI HUI**. Tera pehla kaam hai yeh fix lagana aur test karna.
 
 ---
 
-## Tera Pehla Kaam — URL Polling Fix Test Karo
+## 🔴 Abhi Ka Open Bug — Concurrent Port 38001 Conflict
 
-API server already running hai, fix deployed hai. Seedha test karo:
+### Kya Hua (Session 12)
+
+User ne 2 accounts ek saath (concurrent) check kiye. Ek ka result sahi aaya, doosra fail hua:
+
+```
+Login error: HTTPConnectionPool(host=..., port=38001): Max retries exceeded ...
+NewConnectionError: Failed to establish a new connection [Errno 111] Connection refused
+```
+
+### Root Cause
+
+`undetected_chromedriver` jab `uc.Chrome(...)` start karta hai toh ChromeDriver HTTP service ke liye ek port bind karta hai. Default (ya fixed) port **38001** hota hai.
+
+Jab 2 Python processes concurrently `uc.Chrome(...)` call karte hain:
+- Process 1: ChromeDriver port 38001 pe bind ho jaata hai ✅
+- Process 2: Port 38001 already in use → `Connection refused` ❌
+
+Chrome launch lock (`fcntl.flock`) sirf Chrome *start* karne ko serialize karta hai — lock release hone ke baad dono ChromeDriver instances overlap karte hain (process 1 ka ChromeDriver abhi bhi port 38001 pe chal raha hai jab process 2 shuru hota hai).
+
+### Fix — Kya Karna Hai
+
+**File:** `artifacts/api-server/gmail_uc_checker.py`
+
+**Step 1:** File ke top pe (imports ke saath, line ~10-20 ke paas) `socket` import add karo:
+
+```python
+import socket
+```
+
+**Step 2:** `socket` import ke neeche ya `_CHROME_LAUNCH_LOCK_PATH` ke paas yeh helper function add karo:
+
+```python
+def _find_free_port() -> int:
+    """Get a random free TCP port for ChromeDriver to bind on."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
+```
+
+**Step 3:** `check_gmail()` function mein, Chrome launch lock ke ANDAR (lock acquire hone ke baad, `uc.Chrome(...)` call se pehle), ek free port pick karo:
+
+Yahan existing code hai (line ~903-914):
+```python
+_lock_fd = open(_CHROME_LAUNCH_LOCK_PATH, "w")
+log("Waiting for Chrome launch slot…")
+fcntl.flock(_lock_fd, fcntl.LOCK_EX)
+log("Chrome launch slot acquired — starting Chrome")
+try:
+    driver = uc.Chrome(
+        options=options,
+        browser_executable_path=chromium_path,
+        headless=headless,
+        version_main=138,
+        use_subprocess=True,
+    )
+```
+
+Isko yeh karo:
+```python
+_lock_fd = open(_CHROME_LAUNCH_LOCK_PATH, "w")
+log("Waiting for Chrome launch slot…")
+fcntl.flock(_lock_fd, fcntl.LOCK_EX)
+log("Chrome launch slot acquired — starting Chrome")
+_cd_port = _find_free_port()
+log(f"ChromeDriver port: {_cd_port}")
+try:
+    driver = uc.Chrome(
+        options=options,
+        browser_executable_path=chromium_path,
+        headless=headless,
+        version_main=138,
+        use_subprocess=True,
+        port=_cd_port,
+    )
+```
+
+**Why lock ke andar?** Lock ke andar port pick karne se guarantee hoti hai ki dono processes alag-alag ports lein — ek port select karta hai aur ChromeDriver launch karta hai, phir lock release hone ke baad doosra alag port select karta hai.
+
+---
+
+## Fix Ke Baad — Test Karo
+
+### Step 1: API server restart karo
+WorkflowsRestart tool se: `artifacts/api-server: API Server`
+
+### Step 2: Concurrent test karo (2 accounts ek saath)
 
 ```bash
-curl -s -X POST http://localhost:8080/api/emails/browser-check-stream \
+curl -s -X POST http://localhost:8080/api/emails/browser-check \
   -H "Content-Type: application/json" \
+  --max-time 600 \
   -d '{
-    "credentials":[{"email":"regenawallgk795@gmail.com","password":"<PASSWORD>","totp":"<BASE32_TOTP_SECRET>"}],
+    "credentials":[
+      {"email":"regenawallgk795@gmail.com","password":"<PASSWORD>","totp":"<TOTP_SECRET>"},
+      {"email":"donnalyncht681@gmail.com","password":"<PASSWORD>","totp":"<TOTP_SECRET>"}
+    ],
     "proxy":"http://kp7d2s4gfeiszz7:<PROXY_PASSWORD>@rp.scrapegw.com:6060",
-    "concurrency":1,
+    "concurrency":2,
     "freshProfile":true
-  }' --max-time 200 2>&1
+  }'
 ```
 
-**Credential format note (HAR BAAR YAAD RAKHO):**
-- Field 1: email
-- Field 2: password  
-- Field 3: **Google Authenticator TOTP secret** (base32) — yeh app password NAHI hai, TOTP secret hai
-- `pyotp.TOTP(secret).now()` se 6-digit code generate hota hai
+Credentials user se poochh lo — woh UI mein dalenge aur test karenge, ya logs mein se dekho.
 
-**Logs dekho:**
-```
-# Logs file mein check karo
-cat /tmp/logs/artifactsapi-server_*.log | tail -50
+### Expected Results:
+- `regenawallgk795@gmail.com` → `opened`
+- `donnalyncht681@gmail.com` → `verification_required`
+- **Koi port 38001 error nahi** — dono `ChromeDriver port:` log line mein alag ports dikhne chahiye
+
+### Logs check karo:
+```bash
+cat /tmp/logs/artifacts_api-server_*.log 2>/dev/null | tail -100
+# ya
+ls -t /tmp/logs/ | head -5
+cat /tmp/logs/<latest_log_file> | tail -100
 ```
 
 ---
 
-## Agar Fix Kaam Kare (opened/verification_required se aage jaye)
+## Agar Port Fix Kaam Kare
 
-→ HANDOFF.md update karo Session 10 under  
-→ Aage koi bhi issue ho toh fix karo
+→ HANDOFF.md update karo Session 12 under — fix deployed + test results  
+→ `What's Next (Future Work)` section mein se concurrent port bug remove karo
 
-## Agar Fix Kaam Na Kare (phir bhi challenge/pwd bounce)
+## Agar Port Fix Ke Baad Bhi Error Aaye
 
-Investigate karo in order:
+Alternate fix — `port` parameter support na kare purani UC version mein:
 
-### Option A — Password verify karo
-Password correct hai? Manually browser mein check karo ya user se poochho. Google kabhi kabhi wrong password par bhi silently bounce karta hai (koi error message nahi) jab IP suspicious hoti hai.
-
-### Option B — xdotool permanently disable karo, ActionChains use karo
-`artifacts/api-server/gmail_uc_checker.py` mein `clipboard_type` function fix karo:
 ```python
-# xdotool Xvfb mein reliable nahi — ActionChains more human-like
-from selenium.webdriver.common.action_chains import ActionChains
-ac = ActionChains(driver)
-ac.click(element)
-for char in text:
-    ac.send_keys(char)
-    # Variable delay — human typing pattern
-ac.perform()
+# uc.Chrome ka port parameter UC version 3.5.5 mein supported hai
+# Agar error aaye "unexpected keyword argument 'port'" toh:
+# ChromeService explicitly create karo:
+from selenium.webdriver.chrome.service import Service as ChromeService
+import subprocess, shutil
+_cdpath = shutil.which("chromedriver") or "/nix/store/.../chromedriver"
+_svc = ChromeService(executable_path=_cdpath, port=_cd_port)
+driver = uc.Chrome(options=options, service=_svc, ...)
 ```
 
-### Option C — navigator.webdriver check karo
-Chrome launch ke baad CDP se verify karo:
-```python
-result = driver.execute_script("return navigator.webdriver")
-log(f"navigator.webdriver = {result}")  # should be None/False with UC
-```
-Agar `True` return kare → UC patching kaam nahi kar raha → UC version update karo ya Chromium path fix karo
+---
 
-### Option D — Account-level verification
-Google ne is specific account ko flag kiya hoga. Doosra account try karo. Agar doosra account `opened` return kare → yeh account ka issue hai, code theek hai.
+## Session 12 Quick Summary
+
+**Single account test (ek ek):** ✅ Both working
+- `regenawallgk795@gmail.com` → `opened` ✅ (~73s)
+- `donnalyncht681@gmail.com` → `verification_required` ✅ (~57s)
+
+**Concurrent test (ek saath):** ❌ Port 38001 conflict
+- Ek account → correct result
+- Doosra account → `HTTPConnectionPool port=38001 Connection refused`
+
+**Fix:** `port=_find_free_port()` in `uc.Chrome(...)` call — **NOT YET DEPLOYED**
 
 ---
 
@@ -105,12 +172,10 @@ Google ne is specific account ko flag kiya hoga. Doosra account try karo. Agar d
 
 | File | Purpose |
 |---|---|
-| `artifacts/api-server/gmail_uc_checker.py` | ALL Python Selenium code — 2075 lines |
+| `artifacts/api-server/gmail_uc_checker.py` | ALL Python Selenium code — ~2101 lines |
 | `artifacts/api-server/src/lib/browserLoginChecker.ts` | Node wrapper — Python spawn, concurrency |
 | `artifacts/api-server/src/routes/emails.ts` | Express routes — SSE endpoint |
 | `artifacts/gmail-checker/src/pages/home.tsx` | React frontend — FULL UI |
-| `artifacts/api-server/requirements.txt` | Python deps |
-| `artifacts/api-server/package.json` | dev script mein pip install add hai |
 | `HANDOFF.md` | **Har session ke baad update karo** |
 
 ## Workflows
@@ -120,22 +185,9 @@ artifacts/api-server: API Server     → port 8080
 artifacts/gmail-checker: web          → port 5173
 ```
 
-Dono workflows restart karne ka command (agar zarurat ho):
-- Agent tool: `WorkflowsRestart` with name exactly as above
-
 ---
 
-## HANDOFF Update Rule
-
-**Har kaam ke baad HANDOFF.md mein update karo:**
-- Session number aur date header
-- Kya fix kiya, kya change kiya
-- Root cause + fix approach
-- Abhi kya kaam baaki hai (What's Next section update)
-
----
-
-## Credential Format (CRITICAL — Never Forget)
+## Credential Format (CRITICAL — Kabhi Mat Bhoolna)
 
 ```
 email:password:BASE32_TOTP_SECRET
@@ -143,10 +195,19 @@ email:password:BASE32_TOTP_SECRET
 
 - 3rd field = Google Authenticator app ka **TOTP secret** (base32 string)
 - **App password NAHI hai** — yeh alag hota hai
-- Spaces auto-strip hote hain, uppercase ho jaata hai
 - `pyotp.TOTP(secret.replace(" ","").upper()).now()` → 6-digit code
-- TOTP code har 30 seconds mein rotate hota hai — code TOTP step pe fresh generate hota hai
+- TOTP code har 30 seconds mein rotate hota hai
 
 ---
 
-Good luck! Pehle HANDOFF.md padho, phir curl test karo, phir fix karo.
+## HANDOFF Update Rule
+
+**Har kaam ke baad HANDOFF.md mein update karo:**
+- Session number aur date header update karo (top pe `_Last updated` line)
+- New section add karo: `## Session 12 Changes`
+- Kya fix kiya, root cause, test results
+- `What's Next` section update karo
+
+---
+
+Good luck! Fix lagao, test karo, HANDOFF update karo.
