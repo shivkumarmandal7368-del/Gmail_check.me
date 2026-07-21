@@ -1328,11 +1328,32 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
         # Wait for Gmail to fully load (signin/continue is an auto-redirect page)
         log(f"{email} — Waiting for Gmail redirect after TOTP…")
+        _totp_redirect_early = None
         deadline = time.time() + 30
         while time.time() < deadline:
             url = driver.current_url
             if "mail.google.com" in get_hostname(url):
                 break
+            # ── Early exit: detect "Verify your info to continue" immediately ──
+            # Any non-TOTP challenge URL = verification_required, no need to wait
+            _is_hard_block = (
+                (
+                    "challenge" in url
+                    and not any(x in url for x in (
+                        "challenge/pwd", "challenge/dp", "challenge/totp",
+                        "challenge/ipp", "challenge/selection", "challenge/sk",
+                    ))
+                )
+                or "InterstitialConfirmation" in url
+                or ("verify" in url and "mail" not in url and "challenge/pwd" not in url)
+            )
+            if _is_hard_block:
+                _u2, _t2 = page_state()
+                _r = classify(_u2, _t2)
+                if _r:
+                    log(f"{email} — Early verification_required detected in TOTP redirect loop: {url[:60]}")
+                    _totp_redirect_early = _r
+                    break
             # signin/continue may need a button click to proceed
             if "signin/continue" in url:
                 try:
@@ -1344,6 +1365,8 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 except Exception:
                     pass
             time.sleep(1.0)
+        if _totp_redirect_early:
+            return _totp_redirect_early
 
         rand_sleep(1500, 2500)
         url, text = page_state()
@@ -1384,6 +1407,35 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         if "mail.google.com" in host:
             break
 
+        # ── Early exit: "Verify your info to continue" / phone/device check ──
+        # Detect immediately — no point looping or trying to dismiss
+        _is_verify_info_screen = any(x in text for x in [
+            "verify your info to continue",
+            "choose a way to verify",
+            "do a device check",
+            "verifying your phone number",
+        ])
+        _is_hard_challenge_url = (
+            (
+                "challenge" in url
+                and not any(x in url for x in (
+                    "challenge/pwd", "challenge/dp", "challenge/totp",
+                    "challenge/ipp", "challenge/selection", "challenge/sk",
+                ))
+                and "uplevelingstep" not in url
+            )
+            or "InterstitialConfirmation" in url
+        )
+        if _is_verify_info_screen or _is_hard_challenge_url:
+            log(f"{email} — 'Verify your info' screen detected immediately → verification_required")
+            shot = screenshot_b64()
+            return {
+                "status": "verification_required",
+                "reason": "Google requires phone or device verification (Verify your info to continue)",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
+
         dismissed = False
 
         # gds.google.com — recovery options, home address, etc.
@@ -1418,7 +1470,25 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             dismissed = True
 
         # uplevelingstep — Google account security upgrade prompt
+        # BUT: uplevelingstep/selection can also be the phone/device verification screen.
+        # Detect immediately by page text — no point trying to dismiss a hard block.
         elif "uplevelingstep" in url:
+            _uptext = text.lower()
+            _is_phone_verify = any(x in _uptext for x in [
+                "verify your info to continue",
+                "choose a way to verify",
+                "do a device check",
+                "verifying your phone number",
+            ])
+            if _is_phone_verify:
+                log(f"{email} — uplevelingstep is phone/device verification screen → immediate verification_required")
+                shot = screenshot_b64()
+                return {
+                    "status": "verification_required",
+                    "reason": "Google requires phone or device verification (cannot bypass automatically)",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
             log(f"{email} — uplevelingstep interstitial (attempt {_attempt+1}), clicking dismiss")
             if _attempt == 0:
                 # First attempt: look for "Not now" / "Skip" / etc.
@@ -1575,7 +1645,18 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     # Wait for Gmail to fully load
     deadline = time.time() + 25
     while time.time() < deadline:
-        if "mail.google.com" in get_hostname(driver.current_url):
+        _cu = driver.current_url
+        if "mail.google.com" in get_hostname(_cu):
+            break
+        # Early exit: challenge/verification URL — no need to wait 25s
+        if (
+            ("challenge" in _cu and not any(x in _cu for x in (
+                "challenge/pwd", "challenge/dp", "challenge/totp",
+                "challenge/ipp", "challenge/selection", "challenge/sk",
+            )))
+            or "InterstitialConfirmation" in _cu
+            or ("verify" in _cu and "mail" not in _cu)
+        ):
             break
         time.sleep(0.8)
 

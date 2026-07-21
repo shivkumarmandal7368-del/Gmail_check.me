@@ -487,6 +487,58 @@ artifacts/api-server: API Server    → backend
 
 ---
 
+## Session 5 Changes (July 21, 2026) — Early Verification Detection
+
+### ✅ "Verify your info to continue" screen — immediate detection (no more 55s wait)
+
+**Symptom:** `donnalyncht681@gmail.com` type accounts jo phone/device verification maangti hain unke liye `verification_required` return karne mein 102s lag raha tha. Account valid tha (TOTP bhi sahi tha), lekin Google ne phone/device verify maanga. Code 30s TOTP redirect loop + 25s final wait loop wait karta raha, phir return kiya.
+
+**Root cause:** Teen jagah `classify()` ya text check nahi tha:
+1. TOTP redirect loop (30s) — sirf `mail.google.com` check, koi classify() nahi
+2. Post-login interstitial loop — "Verify your info" page `accounts.google.com` catch-all mein gir ke CTA click try karta tha
+3. Final Gmail wait loop (25s) — challenge URL pe bhi poora 25s wait karta tha
+
+**Fix in `artifacts/api-server/gmail_uc_checker.py`:**
+
+1. **TOTP redirect loop** (line ~1331): Har iteration mein URL check — agar `challenge/az`, `InterstitialConfirmation`, ya `verify` URL pattern mile, `page_state()` + `classify()` call karo, result mile toh turant return karo. `_totp_redirect_early` variable result hold karta hai.
+
+2. **Post-login interstitial loop** (line ~1380): Har iteration ki shuruat mein text check:
+   - `"verify your info to continue"`, `"choose a way to verify"`, `"do a device check"`, `"verifying your phone number"` → turant `verification_required` return
+   - `challenge/az` ya `InterstitialConfirmation` URL → turant return
+   - **Important:** `uplevelingstep` is excluded — woh still dismiss hota hai (not a hard block)
+
+3. **Final Gmail wait loop** (line ~1576): Agar `challenge/...` (non-TOTP), `InterstitialConfirmation`, ya `verify` URL mile → loop se break, classify() chalti hai turant
+
+**Time saving:** `verification_required` accounts ke liye ~55s less (~102s → ~45-50s)
+
+**No behaviour change** for `opened` accounts — yeh changes sirf verification_required path affect karte hain.
+
+### ✅ uplevelingstep phone/device verification — immediate detection (actual root cause)
+
+**Real root cause (logs se mila):** `donnalyncht681` ka 101s `challenge/az` se nahi, balki `uplevelingstep/selection` URL se tha. Woh URL `uplevelingstep` handler mein jaata tha jo 3 attempts × ~10s = 30s waste karta tha.
+
+**Why:** `uplevelingstep` do tarah ka ho sakta hai:
+- **Dismissable:** "Add recovery phone/email" → "Not now" button hota hai → skip ho jaata hai → Gmail khulta hai
+- **Hard block:** "Verify your info to continue" / "Choose a way to verify" → koi dismiss button nahi → phone/device verification mandatory
+
+Code pehle dismissable maanke dismiss try karta tha, 3 baar fail karta tha, phir `verification_required` return karta tha — 30s waste.
+
+**Fix in `artifacts/api-server/gmail_uc_checker.py`** — `uplevelingstep` handler ki shuruat mein text check:
+```python
+_is_phone_verify = any(x in text for x in [
+    "verify your info to continue",
+    "choose a way to verify",
+    "do a device check",
+    "verifying your phone number",
+])
+if _is_phone_verify:
+    → immediate verification_required (no dismiss attempts)
+```
+
+**Time saving:** ~30s less for these accounts (~101s → ~70s)
+
+---
+
 ## Session 4 Changes (July 21, 2026) — Warmup Fix
 
 ### ✅ Google warmup visit re-added (automation detection fix)
