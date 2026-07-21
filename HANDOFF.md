@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 21, 2026 — Session 9_
+_Last updated: July 21, 2026 — Session 10_
 
 ---
 
@@ -950,6 +950,21 @@ The vite.config.ts reads `process.env.PORT` — it will now receive 5173 from th
 ### ✅ Bulk Retry Button
 - "RETRY ALL VERIFY (N)" button in Browser Check toolbar — visible when any `verification_required` results exist
 - Filters `results` for `verification_required`, finds their credentials from input, calls `runStream()` with `appendResults: true`
+
+---
+
+## Session 10 Changes (July 21, 2026)
+
+### ✅ Python Deps Auto-Install on Every Startup (Bug Fix)
+**Root cause:** After fresh GitHub import, Python packages (`undetected-chromedriver`, `selenium`, `pyotp`, `requests`) were not installed → Browser Check returned `status: unknown` with reason `"undetected-chromedriver not installed. Run: pip install -r requirements.txt"`.
+
+**Fix:** `artifacts/api-server/package.json` dev script now runs `pip install -q -r requirements.txt` before building:
+```
+"dev": "pip install -q -r requirements.txt && NODE_ENV=development pnpm run build && pnpm run start"
+```
+- `-q` (quiet) flag suppresses output noise when packages are already installed
+- Runs on EVERY workflow restart — harmless when already installed (~2s overhead), critical after fresh imports
+- Verified: Chrome launches, fingerprint/proxy injection working, `[UC]` logs streaming correctly
 
 ---
 
