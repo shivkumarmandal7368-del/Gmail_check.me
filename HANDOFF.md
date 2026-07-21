@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 21, 2026 — Session 4_
+_Last updated: July 21, 2026 — Session 6_
 
 ---
 
@@ -484,6 +484,28 @@ artifacts/api-server: API Server    → backend
 8. **Timeout = 180 seconds per account** in `browserLoginChecker.ts` (`TIMEOUT_MS = 180_000`). If Python hangs beyond that, it's SIGKILL'd.
 
 9. **Auto-retry doubles time** — if first attempt is blocked by Google, auto-retry runs a full second check. Total time can be 200–240s for a blocked account before giving up.
+
+---
+
+## Session 6 Changes (July 21, 2026) — Warmup Robustness Fix
+
+### ✅ Password-page bounce recurring — warmup made fully robust
+
+**Symptom:** Debug screenshot showing password page again — Google silently bouncing back to `challenge/pwd` after password submission. Same symptom as Session 4 fixed, but recurring.
+
+**Root cause:** Session 4 re-added the warmup but with only `rand_sleep(800, 1200)` — too short over a proxy connection. With proxy latency, `google.com` page often hadn't finished loading in 800ms, so:
+- `document.readyState` was still `loading` or `interactive` (not `complete`)
+- JavaScript fingerprint hooks (canvas, WebGL, AudioContext, etc.) hadn't fully executed
+- Google saw an "incomplete" fingerprint → detected automation → bounced back to `challenge/pwd`
+
+**Fix in `artifacts/api-server/gmail_uc_checker.py`** — Step 0 warmup now:
+1. **Waits for `document.readyState === 'complete'`** (up to 6s timeout) — ensures the page fully loaded over proxy before proceeding
+2. **Adds smooth scroll down + back up** — simulates minimal human interaction (scroll 250px, pause 500–900ms, scroll back)
+3. **Longer final sleep: `rand_sleep(1500, 2200)`** — lets JS fingerprint hooks fully execute (canvas, WebGL, AudioContext spoofs need time to settle)
+
+Total warmup time: ~3–4s (vs 0.8–1.2s before), well within the original 3–5s estimate. The extra time is worth it — bounced sessions trigger auto-retry which costs ~200s total.
+
+**Key principle:** The warmup page must be fully loaded AND have had JS execution time before navigating to sign-in. The previous 800ms floor was a race condition on slow proxy connections.
 
 ---
 

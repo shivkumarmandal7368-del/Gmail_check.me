@@ -918,14 +918,39 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             time.sleep(0.3)
         return None
 
-    # ── Step 0: Minimal warmup — visit Google homepage first ─────────────────
-    # Without this, Google detects automation at the password step and silently
-    # bounces back to challenge/pwd. A brief google.com visit warms up the
-    # fingerprint and makes the session look more organic.
+    # ── Step 0: Warmup — visit Google homepage first ─────────────────────────
+    # CRITICAL: Without this, Google detects automation at the password step
+    # and silently bounces back to challenge/pwd (no error message).
+    # Root cause: fingerprint needs a real page load to "warm up" before
+    # Google's login flow trusts the session. The warmup MUST:
+    #   1. Wait for the page to be truly interactive (not just nav start)
+    #   2. Do minimal human-like interaction (scroll)
+    #   3. Sleep long enough for JS fingerprinting to execute over proxy
+    # 800–1200ms was too short over proxy — page incomplete → Google detects
+    # automation → bounces back to challenge/pwd → wrongly tagged wrong_password.
     try:
         log(f"{email} — Step 0: warmup visit to google.com")
         driver.get("https://www.google.com")
-        rand_sleep(800, 1200)
+        # Wait for page to be fully interactive (document.readyState = complete)
+        # Proxy latency means this can take 2–4s — don't skip ahead early.
+        _w_deadline = time.time() + 6
+        while time.time() < _w_deadline:
+            try:
+                if driver.execute_script("return document.readyState") == "complete":
+                    break
+            except Exception:
+                pass
+            time.sleep(0.35)
+        # Simulate minimal human interaction: scroll down, pause, scroll back up
+        try:
+            driver.execute_script("window.scrollTo({top: 250, behavior: 'smooth'});")
+            rand_sleep(500, 900)
+            driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
+        except Exception:
+            pass
+        # Let JS fingerprint hooks execute fully before leaving the page
+        rand_sleep(1500, 2200)
+        log(f"{email} — Step 0: warmup complete")
     except Exception:
         pass  # warmup failure is non-fatal — continue anyway
 
