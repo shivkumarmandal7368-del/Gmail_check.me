@@ -517,8 +517,15 @@ _on_totp_url = (
 **Fix 2 — `classify()` safety net:**
 Added after the Gmail `opened` block: if URL is `v3/signin/TL=...` AND `"challenge" not in url` AND page text contains "google authenticator" / "verification code from" / "verify that it's you" → return `opened` immediately. Per user confirmation: these accounts are confirmed accessible (password accepted, Google is just asking TOTP). Captures a screenshot.
 
-**⚠️ Bug caught and corrected (Session 16):**
+**⚠️ Bug caught and corrected (Session 16, iteration 2):**
 Initial fix used `"v3/signin" in url` without `"challenge" not in url`. The 2-Step Verification method selection page URL is `v3/signin/challenge/dp` — this also matched, causing the method selection page to be marked as `opened` too early. Fixed by adding `"challenge" not in url` to both checks.
+
+**Fix 3 — Wrong TOTP fallback on v3/signin/TL=... → opened (not wrong_password):**
+When TOTP is entered on `v3/signin/TL=...` page and Google says "Wrong code" (both attempts), the code previously returned `wrong_password`. Now it returns `opened` per user confirmation. Two locations patched (lines ~1860 and ~1868):
+```python
+if "v3/signin" in url and "challenge" not in url:
+    return {"status": "opened", ...}  # instead of wrong_password
+```
 
 ### Expected Behavior After Fix
 - `v3/signin/TL=...` page → `_on_totp_url = True` → wait for TOTP field → enter fresh TOTP → login → `opened` ✅

@@ -1858,6 +1858,17 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                             log(f"{email} — After TOTP retry: {url[:70]}")
                             # Check again — if still wrong, give up
                             if any(x in text for x in _wrong_totp_phrases):
+                                # v3/signin/TL=... page: user confirmed these accounts
+                                # are accessible even when TOTP timing fails — mark opened.
+                                if "v3/signin" in url and "challenge" not in url:
+                                    log(f"{email} — Wrong TOTP on v3/signin/TL page (2 attempts) → opened per user rule")
+                                    shot = screenshot_b64()
+                                    return {
+                                        "status": "opened",
+                                        "reason": "Mailbox opened successfully ✅",
+                                        "totpCode": retry_code,
+                                        "debugScreenshot": shot,
+                                    }
                                 return {
                                     "status": "wrong_password",
                                     "reason": f"TOTP codes wrong on 2 attempts ({totp_code}, {retry_code}) — check secret",
@@ -1865,7 +1876,18 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                                 }
                     except Exception as _te:
                         log(f"{email} — TOTP retry error: {_te}")
+            _cur_url_for_wrong = driver.current_url if hasattr(driver, 'current_url') else url
             if any(x in driver.page_source if hasattr(driver, 'page_source') else "" for x in _wrong_totp_phrases):
+                # v3/signin/TL=... page: mark opened per user confirmation
+                if "v3/signin" in _cur_url_for_wrong and "challenge" not in _cur_url_for_wrong:
+                    log(f"{email} — Wrong TOTP on v3/signin/TL page (final check) → opened per user rule")
+                    shot = screenshot_b64()
+                    return {
+                        "status": "opened",
+                        "reason": "Mailbox opened successfully ✅",
+                        "totpCode": totp_code,
+                        "debugScreenshot": shot,
+                    }
                 return {
                     "status": "wrong_password",
                     "reason": f"TOTP code {totp_code} was wrong or expired — check your TOTP secret",
