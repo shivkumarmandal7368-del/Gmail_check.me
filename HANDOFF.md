@@ -985,7 +985,7 @@ Then run: `pnpm install` — will succeed.
 - Login flow: `signin/identifier` → `challenge/pwd` → `challenge/selection` → click Authenticator → `challenge/totp` → `mail.google.com` ✅
 - Timing: **~43–48s** (improved from 83s in Session 8, ~50% faster — Session 9 speed upgrades confirmed)
 
-**TOTP note (critical):** Secret stripped+uppercased = `BOOQXNPN6LHUPN3GDL6TITGKHV4VOHQD`. The `itgk` group — don't transpose to `itkg` (was a curl typo in this session that caused wrong codes).
+**TOTP note (critical):** Verify the base32 secret character-by-character when passing via curl — a single transposed character (e.g. `itgk` → `itkg`) causes pyotp to generate a completely different (wrong) code with no error.
 
 ---
 
