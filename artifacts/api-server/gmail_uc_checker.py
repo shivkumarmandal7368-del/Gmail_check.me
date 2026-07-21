@@ -693,21 +693,33 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     except Exception as e:
         log(f"Network UA override warning: {e}")
 
-    # Exit IP: actual IP fetch via HTTP request through proxy
+    # Exit IP: fetch via Chrome (uses same proxy extension Chrome uses — works with auth proxies)
     exit_ip = "no_proxy"
     if proxy:
-        _ip_src = proxy_for_ip_check or proxy  # prefer original URL (no sticky suffix, same auth)
         try:
-            import requests as _req
-            _pp = parse_proxy(_ip_src)
-            if _pp and _pp.get("username"):
-                _auth = f"{_pp['username']}:{_pp.get('password', '')}@{_pp['host']}:{_pp['port']}"
-                _ip_proxies = {"http": f"http://{_auth}", "https": f"http://{_auth}"}
-            else:
-                _ip_proxies = {"http": _ip_src, "https": _ip_src}
-            _resp = _req.get("https://api.ipify.org?format=json",
-                             proxies=_ip_proxies, timeout=10)
-            exit_ip = _resp.json().get("ip", "unknown")
+            _ip_check_urls = [
+                ("https://api.ipify.org?format=json", "json", "ip"),
+                ("https://api4.my-ip.io/v2/ip.json",  "json", "ip"),
+                ("https://ifconfig.me/ip",             "text", None),
+            ]
+            exit_ip = None
+            for _ip_url, _fmt, _key in _ip_check_urls:
+                try:
+                    driver.get(_ip_url)
+                    time.sleep(1.5)
+                    _body = driver.execute_script("return document.body ? document.body.innerText : '';").strip()
+                    if _fmt == "json":
+                        import json as _json
+                        _candidate = _json.loads(_body).get(_key, "").strip()
+                    else:
+                        _candidate = _body.strip()
+                    if _candidate and len(_candidate) < 50 and "." in _candidate:
+                        exit_ip = _candidate
+                        break
+                except Exception:
+                    continue
+            if not exit_ip:
+                exit_ip = "unknown"
             log(f"Exit IP: {exit_ip}")
         except Exception as _ie:
             exit_ip = f"proxy:{proxy.split('@')[-1]}"
