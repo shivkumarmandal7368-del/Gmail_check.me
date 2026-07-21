@@ -557,19 +557,45 @@ def main():
     _t0 = time.time()
     result = check_gmail(email, password, totp_secret, proxy, fresh_profile, proxy_for_ip_check)
 
-    # Auto-retry once if Google blocked automation detection ("Couldn't sign you in")
-    # Fresh profile + new fingerprint almost always clears this on the second attempt.
+    # Auto-retry up to 3 times if Google blocked automation detection.
+    # CRITICAL: each retry MUST use a NEW sticky session ID → different proxy IP.
+    # Retrying with the same IP always fails again (IP is already flagged).
+    import re as _re
+    def _new_session_proxy(proxy_url: str | None) -> str | None:
+        """Replace -session-XXXX in proxy username with a fresh random ID."""
+        if not proxy_url:
+            return proxy_url
+        new_id = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=8))
+        replaced = _re.sub(r'-session-[a-z0-9]+', f'-session-{new_id}', proxy_url)
+        if replaced == proxy_url:
+            # No existing session tag — try to inject before the colon separator
+            replaced = _re.sub(r'^(https?://[^:]+)', r'\1-session-' + new_id, proxy_url)
+        return replaced
+
     _blocked_reason = result.get("reason", "")
-    if (
+    _is_automation_block = (
         result.get("status") == "verification_required"
         and (
             "automation detected" in _blocked_reason.lower()
             or "couldn't sign you in" in _blocked_reason.lower()
             or "blocked this browser" in _blocked_reason.lower()
         )
-    ):
-        log(f"{email} — automation block detected, auto-retrying with fresh profile…")
-        result = check_gmail(email, password, totp_secret, proxy, True, proxy_for_ip_check)
+    )
+    for _retry_n in range(3):
+        if not _is_automation_block:
+            break
+        _retry_proxy = _new_session_proxy(proxy)
+        log(f"{email} — automation block detected (attempt {_retry_n+1}/3), retrying with fresh profile + new proxy IP…")
+        result = check_gmail(email, password, totp_secret, _retry_proxy, True, proxy_for_ip_check)
+        _blocked_reason = result.get("reason", "")
+        _is_automation_block = (
+            result.get("status") == "verification_required"
+            and (
+                "automation detected" in _blocked_reason.lower()
+                or "couldn't sign you in" in _blocked_reason.lower()
+                or "blocked this browser" in _blocked_reason.lower()
+            )
+        )
 
     result["durationMs"] = int((time.time() - _t0) * 1000)
     log(f"{email} — Total duration: {result['durationMs']}ms ({result['durationMs']//1000}s)")
@@ -1211,13 +1237,18 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     ]) or any(x in url for x in ["WrongPassword", "wrongpassword"]):
         return {"status": "wrong_password", "reason": "Wrong password", "totpCode": totp_code}
 
-    # If Google returned us BACK to the password page → wrong password
-    # (Google doesn't always show an error message — sometimes it just reloads the page)
+    # If Google returned us BACK to the password page WITHOUT an error message
+    # → this is automation detection, NOT a wrong password.
+    # Google silently reloads challenge/pwd when it suspects a bot.
+    # Classify as verification_required so auto-retry fires with fresh profile.
     if "challenge/pwd" in url or "ServicePasswordChallenge" in url:
         shot = screenshot_b64()
         return {
-            "status": "wrong_password",
-            "reason": "Wrong password (Google returned to password page without error message)",
+            "status": "verification_required",
+            "reason": (
+                "Google silently bounced back to password page (automation detected). "
+                "Profile wiped — auto-retrying with fresh fingerprint."
+            ),
             "totpCode": totp_code,
             "debugScreenshot": shot,
         }
@@ -1225,12 +1256,20 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     # ── Step 4: 2FA — check BEFORE classify so we handle it ourselves ─────────
 
     # Detect method-selection page ("2-Step Verification — choose how you want")
-    is_2fa_select = any(x in text for x in [
-        "2-step verification",
-        "choose how you want to sign in",
-        "how do you want to sign in",
-        "verify it's you",
-    ])
+    # Also trigger on URL: challenge/dp = device-protection 2FA selection,
+    # challenge/selection = explicit 2FA method picker.
+    # URL check catches cases where Google renders the page without the exact
+    # text strings we look for (different UI versions / A/B tests).
+    is_2fa_select = (
+        any(x in text for x in [
+            "2-step verification",
+            "choose how you want to sign in",
+            "how do you want to sign in",
+            "verify it's you",
+        ])
+        or "challenge/dp" in url
+        or "challenge/selection" in url
+    )
 
     # Detect direct TOTP-input page (input already visible)
     totp_field = None
@@ -1639,6 +1678,56 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                     dismissed = True
                 except Exception:
                     break
+
+        # challenge/dp or challenge/selection in interstitial loop
+        # = 2FA page that wasn't caught by Step 4 (safety net).
+        # Click Authenticator option instead of a generic submit button.
+        elif "accounts.google.com" in host and (
+            "challenge/dp" in url or "challenge/selection" in url
+        ):
+            log(f"{email} — 2FA page in interstitial loop ({url[:60]}), clicking Authenticator")
+            try:
+                driver.execute_script("""
+                    var byType = document.querySelector('[data-challengetype="6"]');
+                    if (byType) { byType.click(); return; }
+                    var allEls = Array.from(document.querySelectorAll(
+                        'li, div[role="listitem"], [data-challengetype]'));
+                    var found = allEls.find(function(el) {
+                        return el.innerText && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
+                    });
+                    if (found) { found.click(); return; }
+                    var broader = Array.from(document.querySelectorAll('*')).find(function(el) {
+                        return el.children.length === 0
+                            && el.innerText
+                            && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
+                    });
+                    if (broader) broader.click();
+                """)
+                rand_sleep(1500, 2500)
+                # Check if TOTP field appeared — if yes, enter code and submit
+                if totp_secret or totp_code:
+                    fresh_code = generate_totp(totp_secret) if totp_secret else totp_code
+                    if fresh_code:
+                        secs_left = 30 - (int(time.time()) % 30)
+                        if secs_left <= 4:
+                            time.sleep(secs_left + 1)
+                            fresh_code = generate_totp(totp_secret) if totp_secret else totp_code
+                    tf = wait_for_any([
+                        'input[name="totpPin"]', 'input[name="Pin"]',
+                        'input[autocomplete="one-time-code"]', 'input[type="tel"]',
+                        'input[aria-label*="code"]', 'input[type="number"]',
+                    ], timeout=12)
+                    if tf and fresh_code:
+                        log(f"{email} — Entering TOTP in interstitial: {fresh_code}")
+                        tf.clear()
+                        rand_sleep(100, 200)
+                        human_type(tf, fresh_code)
+                        rand_sleep(400, 600)
+                        tf.send_keys(Keys.ENTER)
+                        rand_sleep(2000, 3000)
+            except Exception as e:
+                log(f"2FA interstitial click error: {e}")
+            dismissed = True
 
         # Any other accounts.google.com interstitial — try clicking primary CTA
         elif "accounts.google.com" in host:
