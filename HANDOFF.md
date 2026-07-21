@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 21, 2026 — Session 10_
+_Last updated: July 21, 2026 — Session 10 (INCOMPLETE — handed off mid-session)_
 
 ---
 
@@ -953,18 +953,47 @@ The vite.config.ts reads `process.env.PORT` — it will now receive 5173 from th
 
 ---
 
-## Session 10 Changes (July 21, 2026)
+## Session 10 Changes (July 21, 2026) — INCOMPLETE, handed off mid-session
 
-### ✅ Python Deps Auto-Install on Every Startup (Bug Fix)
-**Root cause:** After fresh GitHub import, Python packages (`undetected-chromedriver`, `selenium`, `pyotp`, `requests`) were not installed → Browser Check returned `status: unknown` with reason `"undetected-chromedriver not installed. Run: pip install -r requirements.txt"`.
-
-**Fix:** `artifacts/api-server/package.json` dev script now runs `pip install -q -r requirements.txt` before building:
+### ✅ Python Deps Auto-Install on Every Startup
+**Root cause:** Fresh GitHub import → Python packages not installed → `"undetected-chromedriver not installed"` error.  
+**Fix:** `artifacts/api-server/package.json` dev script:
 ```
 "dev": "pip install -q -r requirements.txt && NODE_ENV=development pnpm run build && pnpm run start"
 ```
-- `-q` (quiet) flag suppresses output noise when packages are already installed
-- Runs on EVERY workflow restart — harmless when already installed (~2s overhead), critical after fresh imports
-- Verified: Chrome launches, fingerprint/proxy injection working, `[UC]` logs streaming correctly
+Runs silently on every restart. Verified Chrome launches correctly after fix.
+
+### 🔴 IN-PROGRESS: challenge/pwd Bounce Fix (UNTESTED — handed off here)
+
+**Problem:** Account `regenawallgk795@gmail.com` always returns `verification_required`:  
+> *"Google silently bounced back to password page (automation detected)"*
+
+After password submit, URL stays on `challenge/pwd` instead of navigating to TOTP/Gmail.
+
+**What was investigated:**
+- xdotool fails on Xvfb (`field value short (0/25)` every time) → send_keys fallback used
+- send_keys IS working (password dots visible in debug screenshot)
+- Challenge/pwd bounce = either too-short post-submit wait OR genuine bot detection
+
+**Fixes deployed (in `gmail_uc_checker.py`) — NOT TESTED YET:**
+
+1. **xdotool window targeting** (`_get_chrome_win_id()`):
+   - Removed `--onlyvisible` (doesn't work in Xvfb without window manager)
+   - Now uses `xdotool search --class chromium` (without onlyvisible)
+   - `windowfocus --sync <id>` before typing
+   - Still failing (xdotool returns 0 but field stays empty) — send_keys still used
+
+2. **Next button click instead of Keys.ENTER:**
+   - Email step: tries `#identifierNext button` → `#identifierNext` → fallback ENTER
+   - Password step: tries `#passwordNext button` → `#passwordNext` → fallback ENTER
+   - More human-like than Selenium keyboard ENTER event
+
+3. **URL polling wait (most likely fix):**
+   - After email submit: polls until URL leaves `signin/identifier` (8s timeout) instead of `rand_sleep(700, 1000)`
+   - After password submit: polls until URL leaves `challenge/pwd` (10s timeout) instead of `rand_sleep(700, 1000)`
+   - Root cause: Session 2 reduced waits to `1500-2000ms`, then further to `700-1000ms` — proxy latency means page takes 2-4s to navigate → URL checked too early → falsely classified as `verification_required`
+
+**Next agent: run curl test first (see NEXT_AGENT_PROMPT.md), then fix whatever's still failing.**
 
 ---
 

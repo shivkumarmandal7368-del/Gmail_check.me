@@ -74,9 +74,35 @@ def _get_xdotool() -> str | None:
     return _XDOTOOL_PATH
 
 
+def _get_chrome_win_id() -> str | None:
+    """Find the Chrome/Chromium window ID via xdotool for targeted typing.
+    Returns the window ID string, or None if not found.
+    Note: does NOT use --onlyvisible — Xvfb without a window manager never
+    marks windows as visible, so --onlyvisible always returns empty."""
+    xdt = _get_xdotool()
+    if not xdt:
+        return None
+    display = os.environ.get("DISPLAY", ":0")
+    # Try multiple class names — Nix Chromium may register under any of these
+    for class_name in ("chromium", "Chromium", "chromium-browser", "google-chrome", "Chrome"):
+        try:
+            out = subprocess.check_output(
+                [xdt, "search", "--class", class_name],
+                encoding="utf8", stderr=subprocess.DEVNULL,
+                env={**os.environ, "DISPLAY": display},
+                timeout=3
+            ).strip()
+            ids = [i for i in out.splitlines() if i.strip()]
+            if ids:
+                return ids[-1]  # most recently opened window
+        except Exception:
+            continue
+    return None
+
+
 def clipboard_type(driver, element, text: str):
     """Simulate clipboard paste — instant text entry like a human Ctrl+V'ing.
-    Uses xdotool for true system-level clipboard paste (authentic key events).
+    Uses xdotool with explicit Chrome window targeting for authentic key events.
     Falls back to fast send_keys (5–12ms/char ≈ 400 WPM) if xdotool fails or
     if field-value verification shows the text was not actually entered.
     This is the primary typing method — much faster than human_type per character."""
@@ -84,9 +110,10 @@ def clipboard_type(driver, element, text: str):
     from selenium.common.exceptions import StaleElementReferenceException
 
     xdt = _get_xdotool()
+    display = os.environ.get("DISPLAY", ":0")
     if xdt:
         try:
-            # Focus and clear the field first
+            # Focus and clear the field first via Selenium
             for _a in range(2):
                 try:
                     element.click()
@@ -95,16 +122,28 @@ def clipboard_type(driver, element, text: str):
                 except Exception:
                     time.sleep(0.05)
             time.sleep(random.uniform(0.03, 0.06))
-            # Type via xdotool — only trust success if returncode == 0
+
+            # Get Chrome window ID so xdotool types into the right window
+            win_id = _get_chrome_win_id()
+            xdt_cmd = [xdt, 'type', '--clearmodifiers', '--delay', '0']
+            if win_id:
+                # Focus the Chrome window explicitly before typing
+                subprocess.run(
+                    [xdt, 'windowfocus', '--sync', win_id],
+                    capture_output=True, timeout=3,
+                    env={**os.environ, "DISPLAY": display}
+                )
+                time.sleep(random.uniform(0.02, 0.04))
+                xdt_cmd += ['--window', win_id]
+            xdt_cmd += ['--', text]
+
             result = subprocess.run(
-                [xdt, 'type', '--clearmodifiers', '--delay', '0', '--', text],
-                capture_output=True, timeout=10
+                xdt_cmd, capture_output=True, timeout=10,
+                env={**os.environ, "DISPLAY": display}
             )
             if result.returncode == 0:
                 time.sleep(random.uniform(0.04, 0.08))
                 # Verify the field actually received the text before returning.
-                # xdotool can succeed (exit 0) but type into the wrong window if
-                # focus shifted. Check that the input value is not empty.
                 try:
                     val = driver.execute_script("return arguments[0].value;", element) or ""
                     if len(val) >= max(1, len(text) - 2):
@@ -1318,15 +1357,34 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     rand_sleep(80, 160)
     clipboard_type(driver, email_field, email)   # instant paste — xdotool clipboard
     rand_sleep(100, 200)
-    # send_keys(ENTER) with stale retry
-    for _attempt in range(3):
+    # Click the "Next" button — more human than Keys.ENTER (which is detectable as Selenium)
+    _email_next = wait_for_any([
+        '#identifierNext button', '#identifierNext', '[jsname="LgbsSe"]',
+        'button[type="button"]', 'div[role="button"]',
+    ], timeout=4)
+    if _email_next:
         try:
-            email_field.send_keys(Keys.ENTER)
-            break
+            natural_mouse_move(driver, _email_next)
+            rand_sleep(80, 150)
+            _email_next.click()
         except Exception:
-            rand_sleep(200, 400)
-            email_field = wait_for_any(EMAIL_SELECTORS, timeout=5) or email_field
-    rand_sleep(700, 1000)
+            email_field.send_keys(Keys.ENTER)
+    else:
+        email_field.send_keys(Keys.ENTER)
+
+    # Wait for URL to advance past the email page (proxy latency can be 2-4s).
+    # Poll until URL changes or timeout — more reliable than a fixed sleep.
+    _pre_email_url = driver.current_url
+    _nav_deadline = time.time() + 8
+    while time.time() < _nav_deadline:
+        try:
+            _cur = driver.current_url
+            if _cur != _pre_email_url and "signin/identifier" not in _cur:
+                break
+        except Exception:
+            pass
+        time.sleep(0.25)
+    rand_sleep(300, 600)  # small extra settle after URL change
 
     url, text = page_state()
     log(f"{email} — After email submit: {url[:70]}")
@@ -1409,15 +1467,34 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     rand_sleep(80, 160)
     clipboard_type(driver, pw_field, password)   # instant paste — xdotool clipboard
     rand_sleep(100, 180)
-    # send_keys(ENTER) with stale retry — pw_field can go stale after typing
-    for _attempt in range(3):
+    # Click the "Next" button — more human than Keys.ENTER (detectable as Selenium)
+    _pw_next = wait_for_any([
+        '#passwordNext button', '#passwordNext', '[jsname="LgbsSe"]',
+        'button[type="button"]', 'div[role="button"]',
+    ], timeout=4)
+    if _pw_next:
         try:
-            pw_field.send_keys(Keys.ENTER)
-            break
+            natural_mouse_move(driver, _pw_next)
+            rand_sleep(80, 160)
+            _pw_next.click()
         except Exception:
-            rand_sleep(200, 400)
-            pw_field = wait_for_any(PW_SELECTORS, timeout=5) or pw_field
-    rand_sleep(700, 1000)
+            pw_field.send_keys(Keys.ENTER)
+    else:
+        pw_field.send_keys(Keys.ENTER)
+
+    # Wait for URL to advance past the password page (proxy latency can be 2-4s).
+    # Polling is more reliable than a fixed sleep — catches fast AND slow responses.
+    _pre_pwd_url = driver.current_url
+    _nav_deadline = time.time() + 10
+    while time.time() < _nav_deadline:
+        try:
+            _cur = driver.current_url
+            if _cur != _pre_pwd_url and "challenge/pwd" not in _cur:
+                break
+        except Exception:
+            pass
+        time.sleep(0.25)
+    rand_sleep(300, 600)  # extra settle after URL change
 
     url, text = page_state()
     log(f"{email} — After password submit: {url[:70]}")
