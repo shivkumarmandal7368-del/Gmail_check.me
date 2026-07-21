@@ -375,8 +375,31 @@ Object.defineProperty(navigator,'vendor',  {{get:()=>'Google Inc.'}});
     toJSON:function(){{return{{brands:this.brands,mobile:this.mobile,platform:this.platform}};}}}};
   try{{Object.defineProperty(navigator,'userAgentData',{{get:()=>d}});}}catch(e){{}}
 }})();
-if(window.chrome&&window.chrome.app){{try{{delete window.chrome.app;}}catch(e){{}}}}
+(function(){{
+  if(!window.chrome)window.chrome={{}};
+  if(!window.chrome.runtime){{
+    window.chrome.runtime={{
+      connect:function(){{}},sendMessage:function(){{}},
+      onMessage:{{addListener:function(){{}},removeListener:function(){{}}}},
+      onConnect:{{addListener:function(){{}},removeListener:function(){{}}}},
+      PlatformOs:{{ANDROID:'android'}},id:undefined
+    }};
+  }}
+  try{{delete window.chrome.app;}}catch(e){{}}
+  if(!window.chrome.loadTimes)window.chrome.loadTimes=function(){{return{{requestTime:Date.now()/1000-0.5,startLoadTime:Date.now()/1000-0.5,commitLoadTime:Date.now()/1000-0.3,finishDocumentLoadTime:Date.now()/1000-0.1,finishLoadTime:Date.now()/1000,firstPaintTime:0,firstPaintAfterLoadTime:0,navigationType:'Other',wasFetchedViaSpdy:false,wasNpnNegotiated:false,npnNegotiatedProtocol:'',wasAlternateProtocolAvailable:false,connectionInfo:''}}}};
+  if(!window.chrome.csi)window.chrome.csi=function(){{return{{startE:Date.now()-1000,onloadT:Date.now()-500,pageT:500,tran:15}}}};
+}})();
 if(window.Notification){{Object.defineProperty(Notification,'permission',{{get:()=>'default'}});}}
+try{{
+  if(navigator.permissions&&navigator.permissions.query){{
+    var _origPQ=navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query=function(p){{
+      if(p&&p.name==='notifications')return Promise.resolve({{state:Notification.permission,onchange:null}});
+      return _origPQ(p);
+    }};
+  }}
+}}catch(e){{}}
+try{{navigator.getBattery&&navigator.getBattery().then(function(b){{Object.defineProperty(b,'charging',{{get:()=>false}});Object.defineProperty(b,'level',{{get:()=>0.72}});}});}}catch(e){{}}
 window.ontouchstart=function(){{}};
 try{{Object.defineProperty(screen,'orientation',{{get:()=>({{{{'type':'portrait-primary','angle':0}}}})}}); }}catch(e){{}}
 try{{
@@ -532,6 +555,21 @@ def main():
     fresh_profile     = bool(data.get("freshProfile", False))
 
     result = check_gmail(email, password, totp_secret, proxy, fresh_profile, proxy_for_ip_check)
+
+    # Auto-retry once if Google blocked automation detection ("Couldn't sign you in")
+    # Fresh profile + new fingerprint almost always clears this on the second attempt.
+    _blocked_reason = result.get("reason", "")
+    if (
+        result.get("status") == "verification_required"
+        and (
+            "automation detected" in _blocked_reason.lower()
+            or "couldn't sign you in" in _blocked_reason.lower()
+            or "blocked this browser" in _blocked_reason.lower()
+        )
+    ):
+        log(f"{email} — automation block detected, auto-retrying with fresh profile…")
+        result = check_gmail(email, password, totp_secret, proxy, True, proxy_for_ip_check)
+
     print(json.dumps(result), flush=True)
 
 
@@ -614,11 +652,11 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-save-password-bubble")
     options.add_argument("--disable-translate")
-    options.add_argument("--disable-infobars")
     options.add_argument("--password-store=basic")
-    options.add_argument("--metrics-recording-only")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-features=IsolateOrigins,site-per-process")
+    options.add_argument("--disable-features=ChromeWhatsNewUI,ChromeReporting,EnablePasswordsAccountStorage")
     options.add_argument(f"--user-agent={MOBILE_UA}")
     options.add_argument("--touch-events=enabled")
     if headless:
