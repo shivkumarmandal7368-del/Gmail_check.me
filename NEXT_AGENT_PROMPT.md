@@ -29,7 +29,7 @@ Matlab password submit karne ke baad URL still `challenge/pwd` pe rehta hai.
 - Lekin password submit ke baad Google challenge/pwd pe wapas bhejta hai
 - Possible causes (priority order):
   1. **Post-submit wait too short** — Session 2 mein `1500-2000ms` tha, kisi session mein `700-1000ms` ho gaya. Session 10 ne URL polling fix deploy kiya — **ABHI TAK TEST NAHI KIYA**
-  2. **Wrong password** — `gudQyEpkCKeg` — Google koi error nahi dikhata, silently bounce karta hai
+  2. **Wrong password** — `<REDACTED>` — Google koi error nahi dikhata, silently bounce karta hai
   3. **Genuine bot detection** — Nix Chromium + UC combination ho sakta hai kuch automation indicators leak kare
 
 ---
@@ -42,8 +42,8 @@ API server already running hai, fix deployed hai. Seedha test karo:
 curl -s -X POST http://localhost:8080/api/emails/browser-check-stream \
   -H "Content-Type: application/json" \
   -d '{
-    "credentials":[{"email":"regenawallgk795@gmail.com","password":"gudQyEpkCKeg","totp":"booqxnpn6lhupn3gdl6titkghv4vohqd"}],
-    "proxy":"http://kp7d2s4gfeiszz7:0pijdrztj460r0x@rp.scrapegw.com:6060",
+    "credentials":[{"email":"regenawallgk795@gmail.com","password":"<PASSWORD>","totp":"<BASE32_TOTP_SECRET>"}],
+    "proxy":"http://kp7d2s4gfeiszz7:<PROXY_PASSWORD>@rp.scrapegw.com:6060",
     "concurrency":1,
     "freshProfile":true
   }' --max-time 200 2>&1
@@ -73,7 +73,7 @@ cat /tmp/logs/artifactsapi-server_*.log | tail -50
 Investigate karo in order:
 
 ### Option A — Password verify karo
-`gudQyEpkCKeg` correct hai? Manually browser mein check karo ya user se poochho. Google kabhi kabhi wrong password par bhi silently bounce karta hai (koi error message nahi) jab IP suspicious hoti hai.
+Password correct hai? Manually browser mein check karo ya user se poochho. Google kabhi kabhi wrong password par bhi silently bounce karta hai (koi error message nahi) jab IP suspicious hoti hai.
 
 ### Option B — xdotool permanently disable karo, ActionChains use karo
 `artifacts/api-server/gmail_uc_checker.py` mein `clipboard_type` function fix karo:
