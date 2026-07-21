@@ -967,18 +967,13 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                     except Exception:
                         pass
                 else:
-                    # signin/continue session was active → account IS authenticated
-                    # uplevelingstep = mandatory Google security prompt, not a credential failure
-                    log(f"{email} — shortcut: uplevelingstep persists on active session → opened")
+                    # uplevelingstep persists after multiple dismiss attempts →
+                    # mandatory phone/QR verification that cannot be bypassed automatically
+                    log(f"{email} — shortcut: uplevelingstep persists → verification_required")
                     shot = screenshot_b64()
-                    try:
-                        driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
-                        rand_sleep(1200, 1800)
-                    except Exception:
-                        pass
                     return {
-                        "status": "opened",
-                        "reason": "Mailbox opened ✅ (active session confirmed — Google security upgrade prompt)",
+                        "status": "verification_required",
+                        "reason": "Google requires phone or device verification to continue (cannot bypass automatically)",
                         "totpCode": totp_code,
                         "debugScreenshot": shot,
                     }
@@ -1434,30 +1429,16 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                     log(f"Gmail HTML error: {e}")
                 dismissed = True
             else:
-                # 3+ attempts: if TOTP was successfully completed, credentials are confirmed
-                # valid — uplevelingstep is a mandatory Google security prompt, not a block
-                if totp_completed:
-                    log(f"{email} — uplevelingstep persists after TOTP-verified login — returning opened (credentials confirmed)")
-                    shot = screenshot_b64()
-                    try:
-                        driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
-                        rand_sleep(1500, 2000)
-                        log(f"{email} — Logout complete")
-                    except Exception:
-                        pass
-                    return {
-                        "status": "opened",
-                        "reason": "Mailbox opened ✅ (Google account security upgrade prompt dismissed — credentials fully verified)",
-                        "totpCode": totp_code,
-                        "debugScreenshot": shot,
-                    }
-                # No TOTP — just force-navigate
-                log(f"{email} — uplevelingstep loop, force-navigating to Gmail")
-                try:
-                    driver.get("https://mail.google.com/mail/u/0/#inbox")
-                except Exception:
-                    pass
-                dismissed = True
+                # 3+ attempts: uplevelingstep persists — mandatory phone/QR verification
+                # Cannot bypass automatically regardless of whether TOTP was completed
+                log(f"{email} — uplevelingstep persists after multiple attempts → verification_required")
+                shot = screenshot_b64()
+                return {
+                    "status": "verification_required",
+                    "reason": "Google requires phone or device verification to continue (cannot bypass automatically)",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
 
         # signin/continue redirect page
         elif "signin/continue" in url:
