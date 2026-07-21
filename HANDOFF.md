@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 21, 2026 — Session 2_
+_Last updated: July 21, 2026 — Session 3_
 
 ---
 
@@ -13,7 +13,7 @@ _Last updated: July 21, 2026 — Session 2_
 **Preview URL:** `https://q2.pike.replit.dev` (Replit dev domain — user accesses app here)
 
 **Running workflows (always restart both before testing):**
-- `artifacts/gmail-checker: web` → React/Vite on port 18726
+- `artifacts/gmail-checker: web` → React/Vite on port **5173** (changed from 18726 in Session 3 — see below)
 - `artifacts/api-server: API Server` → Express on port 8080
 
 ---
@@ -484,6 +484,26 @@ artifacts/api-server: API Server    → backend
 8. **Timeout = 180 seconds per account** in `browserLoginChecker.ts` (`TIMEOUT_MS = 180_000`). If Python hangs beyond that, it's SIGKILL'd.
 
 9. **Auto-retry doubles time** — if first attempt is blocked by Google, auto-retry runs a full second check. Total time can be 200–240s for a blocked account before giving up.
+
+---
+
+## Session 3 Changes (July 21, 2026) — Replit Import Setup
+
+### ✅ Project imported from GitHub and restored to running state
+- Ran `pnpm install` — all Node.js dependencies installed (526 packages)
+- Ran `pip install -r artifacts/api-server/requirements.txt` — all Python deps installed (undetected-chromedriver 3.5.5, pyotp 2.10.0, selenium 4.46.0, requests 2.34.2)
+- **Port change:** `artifacts/gmail-checker` artifact.toml updated — `localPort` changed from **18726 → 5173** (18726 is not in Replit's supported proxy port list; 5173 is standard Vite and is supported)
+- Both artifacts registered with Replit runtime (were not registered after import)
+- Both workflows confirmed running:
+  - `artifacts/gmail-checker: web` — Vite on port 5173, serving React UI
+  - `artifacts/api-server: API Server` — Express on port 8080, built and listening
+
+### ⚠️ Port Change Note
+The only file changed in this session was `artifacts/gmail-checker/.replit-artifact/artifact.toml`:
+- `localPort`: 18726 → 5173
+- `[services.env] PORT`: "18726" → "5173"
+
+The vite.config.ts reads `process.env.PORT` — it will now receive 5173 from the artifact environment injection. No code changes were needed.
 
 ---
 
