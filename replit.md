@@ -8,8 +8,10 @@ Two workflows run in parallel (start via the **▶ Project** button):
 
 | Workflow | Command | Port |
 |---|---|---|
-| `Gmail Checker (frontend)` | `pnpm --filter @workspace/gmail-checker run dev` | 18726 |
-| `API Server` | `pnpm --filter @workspace/api-server run dev` | 8080 |
+| `artifacts/gmail-checker: web` | `PORT=5173 BASE_PATH=/ pnpm --filter @workspace/gmail-checker run dev` | 5173 |
+| `artifacts/api-server: API Server` | `PORT=8080 pnpm --filter @workspace/api-server run dev` | 8080 |
+
+> **Note:** PORT and BASE_PATH must be passed inline in the command — artifact.toml env injection does not apply after a GitHub import.
 
 ## Architecture
 
