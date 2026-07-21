@@ -27,6 +27,7 @@ export interface BrowserLoginResult {
   exitIp?: string;
   fingerprint?: string;
   proxySession?: string;   // unique sticky-session ID → proof of different IP per account
+  durationMs?: number;     // how long this account took end-to-end (ms)
 }
 
 function getPython3(): string {
@@ -140,6 +141,7 @@ async function checkOneAccount(
           debugScreenshot: parsed.debugScreenshot ?? undefined,
           exitIp: parsed.exitIp ?? undefined,
           fingerprint: parsed.fingerprint ?? undefined,
+          durationMs: typeof parsed.durationMs === "number" ? parsed.durationMs : undefined,
         });
       } catch {
         const snippet = (stderr || stdout).slice(-400);
@@ -189,8 +191,9 @@ export async function browserLoginCheck(
   proxy?: string,
   concurrency = 3,
   onAccountComplete?: (result: BrowserLoginResult) => void,
-  proxies?: string[],     // rotation list — one proxy per account (round-robin)
-  freshProfile = false,   // wipe Chrome profile + fingerprint before each check
+  proxies?: string[],          // rotation list — one proxy per account (round-robin)
+  freshProfile = false,        // wipe Chrome profile + fingerprint before each check
+  onAccountStart?: (email: string) => void,  // fires just before Python spawns (for SSE "checking" badge)
 ): Promise<BrowserLoginResult[]> {
   // Proxy selection: rotation list takes priority over single proxy
   const getProxy = (idx: number): string | undefined => {
@@ -207,6 +210,8 @@ export async function browserLoginCheck(
       const sessionId = randomSessionId();
       const assignedProxy = baseProxy ? injectStickySession(baseProxy, sessionId) : undefined;
       console.log(`[BROWSER] ${cred.email} → proxy slot ${proxies && proxies.length > 0 ? (idx % proxies.length) + 1 : "single"} | session=${sessionId} | fresh=${freshProfile}`);
+      // Notify frontend that this account is now actively being checked
+      onAccountStart?.(cred.email);
       const result = await checkOneAccount(cred.email, cred.password, cred.totp, assignedProxy, freshProfile, baseProxy).catch(
         (err: unknown) => ({
           email: cred.email,

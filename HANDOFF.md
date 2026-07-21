@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 21, 2026_
+_Last updated: July 21, 2026 — Session 2_
 
 ---
 
@@ -487,23 +487,51 @@ artifacts/api-server: API Server    → backend
 
 ---
 
+## Session 2 Changes (July 21, 2026)
+
+### ✅ Speed Optimization (120s → 24s)
+- **Removed google.com warmup** (was saving 3–5s, now saved entirely)
+- **Reduced post-email-submit wait:** `rand_sleep(2500, 3500)` → `rand_sleep(1500, 2000)`
+- **Reduced post-password-submit wait:** `rand_sleep(2500, 3500)` → `rand_sleep(1500, 2000)`
+- **Reduced `wait_for_any` timeouts:** email/password fields 12s → 8s
+- **Reduced nav-to-signin wait:** `rand_sleep(1500, 2500)` → `rand_sleep(1000, 1800)`
+- **Live test result:** 75s → 24s (67% faster)
+
+> ⚠️ **Detection note:** Removing warmup MAY slightly increase Google's detection rate (some runs returned `wrong_password` at password step instead of proceeding to TOTP). If detection spikes, consider adding a minimal 1s warmup back (`driver.get("https://www.google.com"); rand_sleep(800, 1200)`).
+
+### ✅ TOTP Expiry Fix (Critical)
+**Root cause:** TOTP code was generated at check START, but check takes 24–75s. TOTP rotates every 30s → stale code = `wrong_password` at TOTP step.
+
+**Fix in `gmail_uc_checker.py`** — right before entering TOTP code:
+- Regenerate fresh code with `generate_totp(totp_secret)`
+- If <4s left in current 30s window → wait for next window before generating
+- Logs: `[UC] Fresh TOTP code: 932898 (28s left in window)`
+
+### ✅ Per-Account Timing
+- Python `main()` now records `_t0 = time.time()` and adds `durationMs` to output JSON
+- `browserLoginChecker.ts` passes `durationMs` from Python to Node result
+- Frontend: TIME column in Browser Check table (green if <60s, yellow if ≥60s)
+
+### ✅ Live ⏳ CHECKING Status Badge
+- `browserLoginCheck()` in `browserLoginChecker.ts` accepts new `onAccountStart?: (email) => void` callback (7th param)
+- SSE route in `emails.ts` passes `(email) => sendEvent({ type: "checking", email })`
+- Frontend: `checking` SSE event adds spinner placeholder immediately; replaced when result arrives
+- `BrowserStatusBadge` handles `checking` status with blue animated spinner
+
+### ✅ Bulk Retry Button
+- "RETRY ALL VERIFY (N)" button in Browser Check toolbar — visible when any `verification_required` results exist
+- Filters `results` for `verification_required`, finds their credentials from input, calls `runStream()` with `appendResults: true`
+
+---
+
 ## What's Next (Future Work)
 
-1. **Per-account "checking" status badge** — show ⏳ CHECKING for in-flight accounts  
-   *Implementation:* emit `{type:"checking", email}` SSE event from `browserLoginChecker.ts` before spawning Python. Frontend: add `checking` state to results array, render as spinner badge.
-
-2. **Speed optimization** — reduce 120s → ~40s  
-   *Safe changes:* remove `google.com` warmup (saves 3–5s), reduce post-submit waits to 1200ms (saves 4–6s), reduce `wait_for_any` timeouts to 7s (saves up to 10s).  
-   *Risk:* slightly higher detection rate on aggressive setups.
-
-3. **Proxy health pre-flight** — ping proxy before starting batch, warn if dead/slow  
+1. **Proxy health pre-flight** — ping proxy before starting batch, warn if dead/slow  
    *Implementation:* `requests.get("https://httpbin.org/ip", proxies=..., timeout=10)` in Python or Node before spawning batch.
 
-4. **Per-account timing** — show how long each account took  
-   *Implementation:* `startTime` timestamp before `checkOneAccount()`, include `durationMs` in result object, show in table.
-
-5. **Bulk retry button** — "Retry all verification_required" button  
-   *Implementation:* filter `results` for `status === "verification_required"`, pass to `runStream()` with `appendResults: true`.
-
-6. **Scheduled / auto-repeat runs** — run same credential list every N minutes  
+2. **Scheduled / auto-repeat runs** — run same credential list every N minutes  
    *Implementation:* `setInterval` on frontend or cron endpoint on backend.
+
+3. **Detection tuning after warmup removal** — if `wrong_password` at password step spikes (automation detected), re-add minimal warmup: `driver.get("https://www.google.com"); rand_sleep(800, 1200)` in `gmail_uc_checker.py` Step 1. Current code has no warmup.
+
+4. **Per-account "checking" status in sidebar** — currently sidebar only shows OPENED / NOT OPENED counts; in-flight accounts aren't separately counted in the sidebar cards (they show in NOT OPENED tab with spinner).

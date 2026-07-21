@@ -151,6 +151,7 @@ router.post("/emails/browser-check-stream", async (req, res) => {
       (result) => sendEvent({ type: "result", ...result }),
       proxies.length > 0 ? proxies : undefined,
       freshProfile,
+      (email) => sendEvent({ type: "checking", email }),
     );
   } catch (err) {
     sendEvent({ type: "error", message: String(err) });

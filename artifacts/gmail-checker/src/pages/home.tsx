@@ -1,6 +1,12 @@
 import React, { useState } from "react"
 import { useCheckEmails, useGetEmailStats, useLoginCheckEmails, useBrowserCheckEmails } from "@workspace/api-client-react"
 import type { EmailResult, EmailStats, LoginResult, BrowserLoginResult } from "@workspace/api-client-react"
+
+// Extended result type: adds "checking" in-flight status + per-account timing
+type ExtBrowserResult = Omit<BrowserLoginResult, "status"> & {
+  status: BrowserLoginResult["status"] | "checking";
+  durationMs?: number;
+};
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
@@ -88,7 +94,7 @@ function SmtpChecker() {
     checkEmailsMutation.mutate(
       { data: { emails: rawEmails } },
       {
-        onSuccess: (data) => {
+        onSuccess: (data: any) => {
           clearInterval(iv); setProgress(100); setResults(data.results);
           getStatsMutation.mutate({ data: { results: data.results } }, { onSuccess: setStats });
         },
@@ -237,7 +243,7 @@ function LoginChecker() {
     loginMutation.mutate(
       { data: { credentials } },
       {
-        onSuccess: (data) => { clearInterval(iv); setProgress(100); setResults(data.results); },
+        onSuccess: (data: any) => { clearInterval(iv); setProgress(100); setResults(data.results); },
         onError: () => { clearInterval(iv); setProgress(0); }
       }
     );
@@ -404,7 +410,7 @@ function BrowserChecker() {
 
   const parseProxies = (text: string) =>
     text.split(/\n+/).map(l => l.trim()).filter(Boolean);
-  const [results, setResults] = useState<BrowserLoginResult[]>([]);
+  const [results, setResults] = useState<ExtBrowserResult[]>([]);
   const [activeList, setActiveList] = useState<"opened" | "not_opened">("opened");
   const [isChecking, setIsChecking] = useState(false);
   const [total, setTotal] = useState(0);
@@ -472,18 +478,24 @@ function BrowserChecker() {
           try {
             const evt = JSON.parse(dataLine.slice(6));
             if (evt.type === "started") {
-              setTotal(appendResults ? (t => t + evt.total) as any : evt.total);
+              setTotal(appendResults ? ((t: number) => t + evt.total) : evt.total);
+            } else if (evt.type === "checking") {
+              // Account just started — show spinner placeholder in table
+              setResults(prev => {
+                if (prev.some(r => r.email === evt.email)) return prev;
+                return [...prev, { email: evt.email, status: "checking" as const, reason: "Browser running…", totpCode: null }];
+              });
             } else if (evt.type === "result") {
               const { type: _t, ...result } = evt;
               setResults(prev => {
-                // Replace existing entry for this email (retry), or append
+                // Replace existing entry for this email (checking placeholder / retry), or append
                 const idx = prev.findIndex(r => r.email === result.email);
                 if (idx !== -1) {
                   const next = [...prev];
-                  next[idx] = result as BrowserLoginResult;
+                  next[idx] = result as ExtBrowserResult;
                   return next;
                 }
-                return [...prev, result as BrowserLoginResult];
+                return [...prev, result as ExtBrowserResult];
               });
             }
           } catch {}
@@ -515,20 +527,34 @@ function BrowserChecker() {
     runStream(cred, true);
   };
 
-  const opened = results.filter(r => r.status === "opened");
-  const notOpened = results.filter(r => r.status !== "opened");
-  const displayed = activeList === "opened" ? opened : notOpened;
-  const progress = total > 0 ? Math.round((results.length / total) * 100) : 0;
+  const handleBulkRetry = () => {
+    const verifyEmails = results
+      .filter(r => r.status === "verification_required")
+      .map(r => r.email);
+    if (verifyEmails.length === 0) return;
+    const lines = inputText.split(/\n+/).filter(l => verifyEmails.some(e => l.trim().startsWith(e + ":")));
+    const creds = parseCredentials(lines.join("\n"));
+    if (creds.length === 0) return;
+    runStream(creds, true);
+  };
 
-  const downloadCSV = (rows: BrowserLoginResult[], name: string) => {
-    const header = "email,status,reason,totpCode";
+  const inFlight = results.filter(r => r.status === "checking");
+  const opened = results.filter(r => r.status === "opened");
+  const notOpened = results.filter(r => r.status !== "opened" && r.status !== "checking");
+  const verifyCount = results.filter(r => r.status === "verification_required").length;
+  const completedCount = results.filter(r => r.status !== "checking").length;
+  const displayed = activeList === "opened" ? opened : [...inFlight, ...notOpened];
+  const progress = total > 0 ? Math.round((completedCount / total) * 100) : 0;
+
+  const downloadCSV = (rows: ExtBrowserResult[], name: string) => {
+    const header = "email,status,reason,totpCode,durationMs";
     const body = rows.map(r =>
-      [r.email, r.status, `"${(r.reason ?? "").replace(/"/g, '""')}"`, r.totpCode ?? ""].join(",")
+      [r.email, r.status, `"${(r.reason ?? "").replace(/"/g, '""')}"`, r.totpCode ?? "", r.durationMs ?? ""].join(",")
     ).join("\n");
     download(header + "\n" + body, name + ".csv", "text/csv");
   };
 
-  const downloadJSON = (rows: BrowserLoginResult[], name: string) => {
+  const downloadJSON = (rows: ExtBrowserResult[], name: string) => {
     download(JSON.stringify(rows, null, 2), name + ".json", "application/json");
   };
 
@@ -700,7 +726,7 @@ function BrowserChecker() {
             <div className="flex justify-between text-xs font-mono text-muted-foreground uppercase tracking-wider">
               <span className="flex items-center gap-2">
                 {isChecking && <Loader2 className="w-3 h-3 animate-spin" />}
-                {isChecking ? `Checking ${results.length} / ${total} accounts...` : "Done"}
+                {isChecking ? `Checking ${completedCount} / ${total} accounts… (${inFlight.length} running)` : "Done"}
               </span>
               <span>{progress}%</span>
             </div>
@@ -724,24 +750,30 @@ function BrowserChecker() {
               <button onClick={() => setActiveList("not_opened")}
                 className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
                   activeList === "not_opened" ? "bg-red-500/10 text-red-400 border-red-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
-                <MailX className="w-3.5 h-3.5" />NOT OPENED ({notOpened.length})
+                <MailX className="w-3.5 h-3.5" />NOT OPENED ({notOpened.length + inFlight.length})
               </button>
             </div>
-            {/* Export buttons */}
-            <div className="flex gap-1.5">
+            {/* Bulk retry + Export buttons */}
+            <div className="flex gap-1.5 flex-wrap">
+              {verifyCount > 0 && !isChecking && (
+                <Button variant="outline" size="sm" onClick={handleBulkRetry}
+                  className="font-mono text-xs h-8 px-2 border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/10">
+                  <RefreshCw className="w-3 h-3 mr-1" />RETRY ALL VERIFY ({verifyCount})
+                </Button>
+              )}
               <Button variant="outline" size="sm"
-                onClick={() => download(displayed.map(r => r.email).join("\n"), `gmail_${activeList}.txt`, "text/plain")}
-                disabled={displayed.length === 0} className="font-mono text-xs h-8 px-2">
+                onClick={() => download(displayed.filter(r => r.status !== "checking").map(r => r.email).join("\n"), `gmail_${activeList}.txt`, "text/plain")}
+                disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
                 <Download className="w-3 h-3 mr-1" />.TXT
               </Button>
               <Button variant="outline" size="sm"
-                onClick={() => downloadCSV(displayed, `gmail_${activeList}`)}
-                disabled={displayed.length === 0} className="font-mono text-xs h-8 px-2">
+                onClick={() => downloadCSV(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
+                disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
                 <Download className="w-3 h-3 mr-1" />.CSV
               </Button>
               <Button variant="outline" size="sm"
-                onClick={() => downloadJSON(displayed, `gmail_${activeList}`)}
-                disabled={displayed.length === 0} className="font-mono text-xs h-8 px-2">
+                onClick={() => downloadJSON(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
+                disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
                 <Download className="w-3 h-3 mr-1" />.JSON
               </Button>
             </div>
@@ -765,6 +797,9 @@ function BrowserChecker() {
                     <TableHead className="font-mono text-xs">EMAIL</TableHead>
                     <TableHead className="font-mono text-xs w-[130px]">STATUS</TableHead>
                     <TableHead className="font-mono text-xs min-w-[160px]">REASON</TableHead>
+                    {displayed.some(r => r.durationMs != null) && (
+                      <TableHead className="font-mono text-xs w-[65px]">TIME</TableHead>
+                    )}
                     {displayed.some(r => (r as any).proxySession) && (
                       <TableHead className="font-mono text-xs w-[130px]">PROXY SESSION</TableHead>
                     )}
@@ -784,7 +819,9 @@ function BrowserChecker() {
                       <TableCell className="font-medium text-foreground/90">{r.email}</TableCell>
                       <TableCell><BrowserStatusBadge status={r.status} /></TableCell>
                       <TableCell className="text-muted-foreground break-words">
-                        {r.reason}
+                        {r.status === "checking"
+                          ? <span className="text-blue-400/70 text-[11px] flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />Chrome launching…</span>
+                          : r.reason}
                         {(r as any).debugScreenshot && (
                           <div className="mt-2">
                             <p className={`text-[10px] font-mono mb-1 ${r.status === "opened" ? "text-green-400/70" : "text-yellow-400/70"}`}>
@@ -796,6 +833,13 @@ function BrowserChecker() {
                           </div>
                         )}
                       </TableCell>
+                      {displayed.some(x => x.durationMs != null) && (
+                        <TableCell className="text-[11px] font-mono tabular-nums text-muted-foreground">
+                          {r.durationMs != null
+                            ? <span className={r.durationMs < 60000 ? "text-green-400/80" : "text-yellow-400/80"}>{Math.round(r.durationMs / 1000)}s</span>
+                            : r.status === "checking" ? <Loader2 className="w-3 h-3 animate-spin text-blue-400/60" /> : "—"}
+                        </TableCell>
+                      )}
                       {displayed.some(x => (x as any).proxySession) && (
                         <TableCell className="text-[11px] font-mono text-cyan-400/80 tabular-nums">
                           <span className="text-muted-foreground/50 text-[9px]">session-</span>{(r as any).proxySession ?? "—"}
@@ -902,8 +946,9 @@ function StatusBadge({ status }: { status: EmailResult["status"] | "disabled" })
   return <Badge variant={props.variant as any} className="uppercase font-mono tracking-wider text-[10px] py-0">{props.label}</Badge>;
 }
 
-function BrowserStatusBadge({ status }: { status: BrowserLoginResult["status"] }) {
+function BrowserStatusBadge({ status }: { status: BrowserLoginResult["status"] | "checking" }) {
   const map: Record<string, { label: string; className: string; icon: React.ReactNode }> = {
+    checking:              { label: "CHECKING",  className: "border-blue-500/40 text-blue-400 bg-blue-400/10",      icon: <Loader2 className="w-3 h-3 animate-spin" /> },
     opened:                { label: "OPENED",    className: "border-green-500/50 text-green-400 bg-green-400/10",   icon: <MailCheck className="w-3 h-3" /> },
     verification_required: { label: "VERIFY",    className: "border-yellow-500/50 text-yellow-400 bg-yellow-400/10", icon: <Smartphone className="w-3 h-3" /> },
     wrong_password:        { label: "BAD PASS",  className: "border-red-500/50 text-red-400 bg-red-400/10",         icon: <XCircle className="w-3 h-3" /> },

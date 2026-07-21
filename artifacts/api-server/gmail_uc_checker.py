@@ -554,6 +554,7 @@ def main():
     proxy_for_ip_check = data.get("proxyForIpCheck") or proxy  # original URL without sticky suffix
     fresh_profile     = bool(data.get("freshProfile", False))
 
+    _t0 = time.time()
     result = check_gmail(email, password, totp_secret, proxy, fresh_profile, proxy_for_ip_check)
 
     # Auto-retry once if Google blocked automation detection ("Couldn't sign you in")
@@ -570,6 +571,8 @@ def main():
         log(f"{email} — automation block detected, auto-retrying with fresh profile…")
         result = check_gmail(email, password, totp_secret, proxy, True, proxy_for_ip_check)
 
+    result["durationMs"] = int((time.time() - _t0) * 1000)
+    log(f"{email} — Total duration: {result['durationMs']}ms ({result['durationMs']//1000}s)")
     print(json.dumps(result), flush=True)
 
 
@@ -915,30 +918,15 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             time.sleep(0.3)
         return None
 
-    # ── Step 1: Warm up on google.com ────────────────────────────────────────
-    log(f"{email} — Step 1: warming up google.com")
-    try:
-        driver.get("https://www.google.com")
-        rand_sleep(1200, 2200)
-        # Simulate reading the page — scroll down slowly
-        driver.execute_script("window.scrollBy(0, 150)")
-        rand_sleep(300, 600)
-        driver.execute_script("window.scrollBy(0, 100)")
-        rand_sleep(400, 900)
-        driver.execute_script("window.scrollBy(0, -80)")
-        rand_sleep(500, 1000)
-    except Exception as e:
-        log(f"Warmup warning: {e}")
-
-    # ── Step 1b: Navigate to Gmail sign-in ───────────────────────────────────
-    log(f"{email} — Step 1b: navigating to sign-in page")
+    # ── Step 1: Navigate to Gmail sign-in ────────────────────────────────────
+    log(f"{email} — Step 1: navigating to sign-in page")
     try:
         driver.get(
             "https://accounts.google.com/v3/signin/identifier"
             "?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F"
             "&service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
         )
-        rand_sleep(1500, 2500)
+        rand_sleep(1000, 1800)
     except Exception as e:
         return {"status": "unknown", "reason": f"Navigation failed: {str(e)[:200]}", "totpCode": totp_code}
 
@@ -1068,7 +1056,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
     # ── Step 2: Enter email ───────────────────────────────────────────────────
     log(f"{email} — Step 2: typing email")
-    email_field = wait_for_any(EMAIL_SELECTORS, timeout=12)
+    email_field = wait_for_any(EMAIL_SELECTORS, timeout=8)
 
     if not email_field:
         url, text = page_state()
@@ -1105,7 +1093,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         except Exception:
             rand_sleep(300, 500)
             email_field = wait_for_any(EMAIL_SELECTORS, timeout=5) or email_field
-    rand_sleep(2500, 3500)
+    rand_sleep(1500, 2000)
 
     url, text = page_state()
     log(f"{email} — After email submit: {url[:70]}")
@@ -1153,7 +1141,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
     # ── Step 3: Enter password ────────────────────────────────────────────────
     log(f"{email} — Step 3: typing password")
-    pw_field = wait_for_any(PW_SELECTORS, timeout=12)
+    pw_field = wait_for_any(PW_SELECTORS, timeout=8)
 
     if not pw_field:
         url, text = page_state()
@@ -1175,7 +1163,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     human_type(pw_field, password)
     rand_sleep(500, 900)
     pw_field.send_keys(Keys.ENTER)
-    rand_sleep(2500, 3500)
+    rand_sleep(1500, 2000)
 
     url, text = page_state()
     log(f"{email} — After password submit: {url[:70]}")
@@ -1293,9 +1281,25 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
     # ── Enter TOTP code (whether we just navigated here or were already here) ─
     if totp_field is not None:
-        if not totp_code:
+        if not totp_code and not totp_secret:
             shot = screenshot_b64()
             return {"status": "2fa_required", "reason": "2FA required — provide TOTP secret", "totpCode": None, "debugScreenshot": shot}
+
+        # CRITICAL: regenerate TOTP right before entry.
+        # The original code was generated at check start (~60s ago) and may have expired.
+        # TOTP codes rotate every 30 seconds — stale code = "wrong code" from Google.
+        if totp_secret:
+            fresh_code = generate_totp(totp_secret)
+            if fresh_code:
+                secs_left = 30 - (int(time.time()) % 30)
+                if secs_left <= 4:
+                    # Window ends in <4s — wait for next fresh window to avoid race
+                    log(f"{email} — TOTP window ending in {secs_left}s, waiting for next window…")
+                    time.sleep(secs_left + 1)
+                    fresh_code = generate_totp(totp_secret)
+                totp_code = fresh_code
+                secs_remaining = 30 - (int(time.time()) % 30)
+                log(f"{email} — Fresh TOTP code: {totp_code} ({secs_remaining}s left in window)")
 
         log(f"{email} — Entering TOTP code: {totp_code}")
         try:
