@@ -57,16 +57,109 @@ def human_type(element, text: str):
         time.sleep(delay)
 
 
-def move_to_element(driver, element):
-    """Move mouse naturally to element before interacting."""
+# ── xdotool availability check (cached at module level) ──────────────────────
+_XDOTOOL_PATH: str | None = None
+_XDOTOOL_CHECKED = False
+
+def _get_xdotool() -> str | None:
+    global _XDOTOOL_PATH, _XDOTOOL_CHECKED
+    if not _XDOTOOL_CHECKED:
+        try:
+            p = subprocess.check_output(["which", "xdotool"], encoding="utf8",
+                                         stderr=subprocess.DEVNULL).strip()
+            _XDOTOOL_PATH = p if p else None
+        except Exception:
+            _XDOTOOL_PATH = None
+        _XDOTOOL_CHECKED = True
+    return _XDOTOOL_PATH
+
+
+def clipboard_type(driver, element, text: str):
+    """Simulate clipboard paste — instant text entry like a human Ctrl+V'ing.
+    Uses xdotool for true system-level clipboard paste (authentic key events).
+    Falls back to fast send_keys (5–12ms/char ≈ 400 WPM) if xdotool fails or
+    if field-value verification shows the text was not actually entered.
+    This is the primary typing method — much faster than human_type per character."""
+    from selenium.webdriver.common.keys import Keys as _K
+    from selenium.common.exceptions import StaleElementReferenceException
+
+    xdt = _get_xdotool()
+    if xdt:
+        try:
+            # Focus and clear the field first
+            for _a in range(2):
+                try:
+                    element.click()
+                    element.send_keys(_K.CONTROL + 'a')
+                    break
+                except Exception:
+                    time.sleep(0.05)
+            time.sleep(random.uniform(0.03, 0.06))
+            # Type via xdotool — only trust success if returncode == 0
+            result = subprocess.run(
+                [xdt, 'type', '--clearmodifiers', '--delay', '0', '--', text],
+                capture_output=True, timeout=10
+            )
+            if result.returncode == 0:
+                time.sleep(random.uniform(0.04, 0.08))
+                # Verify the field actually received the text before returning.
+                # xdotool can succeed (exit 0) but type into the wrong window if
+                # focus shifted. Check that the input value is not empty.
+                try:
+                    val = driver.execute_script("return arguments[0].value;", element) or ""
+                    if len(val) >= max(1, len(text) - 2):
+                        # Field has the text — xdotool worked
+                        return
+                    # Field is empty or too short — fall through to send_keys
+                    log(f"[clipboard_type] xdotool exit 0 but field value short ({len(val)}/{len(text)}) — using send_keys fallback")
+                except Exception:
+                    # Can't read value (e.g. password field may block it) — trust xdotool
+                    return
+            # Non-zero exit or value check failed — fall through to send_keys
+        except Exception:
+            pass  # fall through to fast send_keys
+
+    # Fallback: fast character-by-character (5–12ms/char ≈ 400+ WPM)
+    for char in text:
+        for _attempt in range(2):
+            try:
+                element.send_keys(char)
+                break
+            except StaleElementReferenceException:
+                time.sleep(0.05)
+        time.sleep(random.uniform(0.005, 0.012))
+
+
+def natural_mouse_move(driver, element):
+    """Move mouse in a natural curved path to element — overshoot + correction.
+    More realistic than straight-line move_to_element. Uses ActionChains offset
+    to simulate human hand movement with slight overshoot and course correction."""
     try:
         from selenium.webdriver.common.action_chains import ActionChains
+        # Overshoot slightly past the element, pause, then correct to center
+        overshoot_x = random.randint(-20, 20)
+        overshoot_y = random.randint(-12, 12)
         ac = ActionChains(driver)
+        ac.move_to_element_with_offset(element, overshoot_x, overshoot_y)
+        ac.pause(random.uniform(0.03, 0.08))
+        # Correct to element center
         ac.move_to_element(element)
-        ac.pause(random.uniform(0.1, 0.3))
+        ac.pause(random.uniform(0.05, 0.14))
         ac.perform()
     except Exception:
-        pass
+        # Fallback to simple move
+        try:
+            from selenium.webdriver.common.action_chains import ActionChains
+            ActionChains(driver).move_to_element(element).pause(
+                random.uniform(0.06, 0.15)).perform()
+        except Exception:
+            pass
+
+
+def move_to_element(driver, element):
+    """Move mouse naturally to element before interacting (kept for compatibility).
+    Delegates to natural_mouse_move for realistic curved path."""
+    natural_mouse_move(driver, element)
 
 
 # ── Phone device profiles — each account gets one assigned randomly ───────────
@@ -352,6 +445,19 @@ def get_or_create_fingerprint(profile_dir: str) -> dict:
         "en-US", "en-US", "en-US", "en-US",  # weighted — most users are en-US
         "en-GB", "en-CA", "en-AU", "en-IN",
     ])
+    # ── App-cloner style: every account has its own unique device identity ────
+    # Battery — real phones vary; always discharging (mobile check, plugged-in is rare)
+    fp["batteryLevel"]    = round(random.uniform(0.15, 0.94), 2)
+    fp["batteryCharging"] = False  # mobile users rarely plugged in while browsing
+    # Do Not Track — vary per account (most users leave it off)
+    fp["doNotTrack"] = random.choice([None, None, None, "1", "unspecified"])
+    # Network connection — stable values per account (not randomised per page)
+    fp["connectionRtt"]      = random.randint(35, 95)
+    fp["connectionDownlink"] = round(random.uniform(7.5, 15.0), 1)
+    # Browser history depth — simulates an account that has been used before
+    fp["historyLength"] = random.randint(3, 14)
+    # Unique WebGL noise per account (shifts float precision slightly)
+    fp["webglNoise"] = round(random.uniform(0.000001, 0.000009), 8)
     try:
         with open(fp_path, "w") as f:
             json.dump(fp, f, indent=2)
@@ -361,32 +467,49 @@ def get_or_create_fingerprint(profile_dir: str) -> dict:
 
 
 def make_stealth_js(fp: dict) -> str:
-    """Build the CDP stealth script with values from this account's fingerprint."""
-    cs  = fp["canvasSeed"]
-    an  = fp["audioNoise"]
-    wv  = fp["webglVendor"].replace("'", "\\'")
-    wr  = fp["webglRenderer"].replace("'", "\\'")
-    cv  = fp["chromeVersion"]
-    av  = fp["androidVersion"]
-    mdl = fp["model"].replace("'", "\\'")
-    tz  = fp.get("timezone", "America/New_York").replace("'", "\\'")
-    lg  = fp.get("language", "en-US").replace("'", "\\'")
+    """Build the CDP stealth script with values from this account's fingerprint.
+    Covers every modern fingerprinting surface: canvas, audio, WebGL, navigator,
+    screen, connection, battery, timezone, UA-CH — all unique per account (app-cloner style)."""
+    cs   = fp["canvasSeed"]
+    an   = fp["audioNoise"]
+    wv   = fp["webglVendor"].replace("'", "\\'")
+    wr   = fp["webglRenderer"].replace("'", "\\'")
+    cv   = fp["chromeVersion"]
+    av   = fp["androidVersion"]
+    mdl  = fp["model"].replace("'", "\\'")
+    tz   = fp.get("timezone", "America/New_York").replace("'", "\\'")
+    lg   = fp.get("language", "en-US").replace("'", "\\'")
+    bat  = fp.get("batteryLevel", 0.72)
+    bchg = "true" if fp.get("batteryCharging", False) else "false"
+    dnt  = fp.get("doNotTrack")
+    dnt_val = f"'{dnt}'" if dnt else "null"
+    rtt  = fp.get("connectionRtt", 65)
+    dl   = fp.get("connectionDownlink", 10.5)
+    hist = fp.get("historyLength", 5)
+    wn   = fp.get("webglNoise", 0.000002)
     return f"""
 Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
 Object.defineProperty(navigator,'plugins',{{get:()=>{{var p=[];p.length=0;return p;}}}});
 Object.defineProperty(navigator,'languages',{{get:()=>['{lg}','en']}});
 Object.defineProperty(navigator,'hardwareConcurrency',{{get:()=>{fp['hwConcurrency']}}});
 Object.defineProperty(navigator,'deviceMemory',{{get:()=>{fp['deviceMemory']}}});
+Object.defineProperty(navigator,'cookieEnabled',{{get:()=>true}});
+Object.defineProperty(navigator,'doNotTrack',{{get:()=>{dnt_val}}});
+try{{Object.defineProperty(navigator,'globalPrivacyControl',{{get:()=>undefined}});}}catch(e){{}}
 Object.defineProperty(screen,'width',      {{get:()=>{fp['screenW']}}});
 Object.defineProperty(screen,'height',     {{get:()=>{fp['screenH']}}});
 Object.defineProperty(screen,'availWidth', {{get:()=>{fp['screenW']}}});
 Object.defineProperty(screen,'availHeight',{{get:()=>{fp['availH']}}});
 Object.defineProperty(screen,'colorDepth', {{get:()=>24}});
 Object.defineProperty(screen,'pixelDepth', {{get:()=>24}});
+try{{Object.defineProperty(screen,'isExtended',{{get:()=>false}});}}catch(e){{}}
 Object.defineProperty(window,'devicePixelRatio',{{get:()=>{fp['dpr']}}});
+Object.defineProperty(window,'innerWidth',  {{get:()=>{fp['screenW']}}});
+Object.defineProperty(window,'innerHeight', {{get:()=>{fp['availH']}}});
 Object.defineProperty(navigator,'maxTouchPoints',{{get:()=>{fp['maxTouchPoints']}}});
 Object.defineProperty(navigator,'platform',{{get:()=>'{fp['platform']}'}});
 Object.defineProperty(navigator,'vendor',  {{get:()=>'Google Inc.'}});
+try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable:true}});}}catch(e){{}}
 (function(){{
   var d={{brands:[{{brand:'Not=A?Brand',version:'24'}},{{brand:'Chromium',version:'138'}},{{brand:'Google Chrome',version:'138'}}],mobile:true,platform:'Android',
     getHighEntropyValues:function(h){{return Promise.resolve({{brands:this.brands,mobile:this.mobile,platform:this.platform,platformVersion:'{av}',architecture:'',bitness:'',model:'{mdl}',uaFullVersion:'{cv}',fullVersionList:[{{brand:'Not=A?Brand',version:'24.0.0.0'}},{{brand:'Chromium',version:'{cv}'}},{{brand:'Google Chrome',version:'{cv}'}}]}});}},
@@ -417,20 +540,34 @@ try{{
     }};
   }}
 }}catch(e){{}}
-try{{navigator.getBattery&&navigator.getBattery().then(function(b){{Object.defineProperty(b,'charging',{{get:()=>false}});Object.defineProperty(b,'level',{{get:()=>0.72}});}});}}catch(e){{}}
+try{{
+  navigator.getBattery&&navigator.getBattery().then(function(b){{
+    try{{Object.defineProperty(b,'charging',{{get:()=>{bchg}}});}}catch(e){{}}
+    try{{Object.defineProperty(b,'level',{{get:()=>{bat}}});}}catch(e){{}}
+    try{{Object.defineProperty(b,'chargingTime',{{get:()=>{bchg}?0:Infinity}});}}catch(e){{}}
+    try{{Object.defineProperty(b,'dischargingTime',{{get:()=>Math.floor(3600+Math.random()*7200)}});}}catch(e){{}}
+  }});
+}}catch(e){{}}
 window.ontouchstart=function(){{}};
 try{{Object.defineProperty(screen,'orientation',{{get:()=>({{{{'type':'portrait-primary','angle':0}}}})}}); }}catch(e){{}}
 try{{
-  var conn={{'effectiveType':'4g','rtt':Math.floor(40+Math.random()*60),'downlink':parseFloat((8+Math.random()*6).toFixed(1)),'saveData':false,'type':'cellular','onchange':null}};
+  var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'saveData':false,'type':'cellular','onchange':null}};
   Object.defineProperty(navigator,'connection',{{get:()=>conn}});
   Object.defineProperty(navigator,'mozConnection',{{get:()=>undefined}});
   Object.defineProperty(navigator,'webkitConnection',{{get:()=>undefined}});
 }}catch(e){{}}
 try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e){{}}
 (function(){{
+  var _wn={wn};
   function patch(ctx){{
     var gp=ctx.prototype.getParameter;
-    ctx.prototype.getParameter=function(p){{if(p===37445)return'{wv}';if(p===37446)return'{wr}';return gp.call(this,p);}};
+    ctx.prototype.getParameter=function(p){{
+      if(p===37445)return'{wv}';
+      if(p===37446)return'{wr}';
+      var v=gp.call(this,p);
+      if(typeof v==='number')return v+_wn*Math.sign(v||1);
+      return v;
+    }};
   }}
   patch(WebGLRenderingContext);
   if(window.WebGL2RenderingContext)patch(WebGL2RenderingContext);
@@ -445,7 +582,11 @@ try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e
 (function(){{
   var noise={an};
   var orig=AudioBuffer&&AudioBuffer.prototype.getChannelData;
-  if(orig)AudioBuffer.prototype.getChannelData=function(){{var d=orig.apply(this,arguments);if(d&&d.length>0)d[0]=d[0]+noise;return d;}};
+  if(orig)AudioBuffer.prototype.getChannelData=function(){{
+    var d=orig.apply(this,arguments);
+    if(d&&d.length>0){{try{{d[0]=d[0]+noise;}}catch(e){{}}}}
+    return d;
+  }};
 }})();
 try{{var _tz='{tz}';var _dto=Intl.DateTimeFormat;function _dtow(l,o){{o=o||{{}};if(!o.timeZone)o.timeZone=_tz;return new _dto(l,o);}}try{{Object.keys(_dto).forEach(function(k){{_dtow[k]=_dto[k];}});}}catch(e2){{}}try{{_dtow.prototype=_dto.prototype;}}catch(e3){{}}Intl.DateTimeFormat=_dtow;}}catch(e){{}}
 """
@@ -592,29 +733,32 @@ def main():
         return replaced
 
     _blocked_reason = result.get("reason", "")
-    _is_automation_block = (
-        result.get("status") == "verification_required"
-        and (
-            "automation detected" in _blocked_reason.lower()
-            or "couldn't sign you in" in _blocked_reason.lower()
-            or "blocked this browser" in _blocked_reason.lower()
-        )
-    )
+
+    def _is_retriable(res: dict) -> bool:
+        """Return True if the result is something we should auto-retry with a fresh proxy IP."""
+        st  = res.get("status", "")
+        rsn = res.get("reason", "").lower()
+        # Automation blocks
+        if st == "verification_required" and any(x in rsn for x in [
+            "automation detected", "couldn't sign you in", "blocked this browser",
+            "not be secure", "blocked", "rejected",
+        ]):
+            return True
+        # Chrome crash / OOM / spawn failure — retry may succeed with fresh launch slot
+        if st == "unknown" and any(x in rsn for x in [
+            "chrome launch failed", "oom", "signal", "killed",
+            "failed to spawn", "exit code", "timed out",
+        ]):
+            return True
+        return False
+
     for _retry_n in range(3):
-        if not _is_automation_block:
+        if not _is_retriable(result):
             break
         _retry_proxy = _new_session_proxy(proxy)
-        log(f"{email} — automation block detected (attempt {_retry_n+1}/3), retrying with fresh profile + new proxy IP…")
+        log(f"{email} — retriable result ({result.get('status')}) on attempt {_retry_n+1}/3, retrying with fresh profile + new proxy IP…")
         result = check_gmail(email, password, totp_secret, _retry_proxy, True, proxy_for_ip_check)
         _blocked_reason = result.get("reason", "")
-        _is_automation_block = (
-            result.get("status") == "verification_required"
-            and (
-                "automation detected" in _blocked_reason.lower()
-                or "couldn't sign you in" in _blocked_reason.lower()
-                or "blocked this browser" in _blocked_reason.lower()
-            )
-        )
 
     result["durationMs"] = int((time.time() - _t0) * 1000)
     log(f"{email} — Total duration: {result['durationMs']}ms ({result['durationMs']//1000}s)")
@@ -707,6 +851,10 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--disable-features=ChromeWhatsNewUI,ChromeReporting,EnablePasswordsAccountStorage")
     options.add_argument(f"--user-agent={MOBILE_UA}")
     options.add_argument("--touch-events=enabled")
+    # Match the fingerprint DPR so window.devicePixelRatio equals screen.dpr
+    options.add_argument(f"--force-device-scale-factor={fp['dpr']}")
+    # Use fingerprint language for Accept-Language Chrome header
+    options.add_argument(f"--lang={fp.get('language', 'en-US')}")
     if headless:
         options.add_argument("--disable-gpu")
 
@@ -908,13 +1056,17 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
         if any(x in text for x in [
             "couldn't find your google account", "no account found",
-            "find your google account"
+            "find your google account", "no google account found",
+            "couldn't find an account", "email or phone number",
         ]):
             return {"status": "wrong_password", "reason": "Google account not found", "totpCode": totp_code}
 
         if any(x in text for x in [
             "wrong password", "didn't recognize", "password you entered",
-            "incorrect password", "that password is incorrect"
+            "incorrect password", "that password is incorrect",
+            "the password you entered is incorrect",
+            "the email or password you entered is incorrect",
+            "password is wrong", "access was denied",
         ]) or any(x in url for x in ["WrongPassword", "wrongpassword"]):
             return {"status": "wrong_password", "reason": "Wrong password", "totpCode": totp_code}
 
@@ -1155,17 +1307,17 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     # click with stale-element retry (proxy extension can cause brief page reload)
     for _attempt in range(3):
         try:
-            move_to_element(driver, email_field)
-            rand_sleep(80, 180)
+            natural_mouse_move(driver, email_field)
+            rand_sleep(60, 130)
             email_field.click()
             break
         except Exception:
-            rand_sleep(300, 600)
+            rand_sleep(200, 400)
             email_field = wait_for_any(EMAIL_SELECTORS, timeout=6) or email_field
 
+    rand_sleep(80, 160)
+    clipboard_type(driver, email_field, email)   # instant paste — xdotool clipboard
     rand_sleep(100, 200)
-    human_type(email_field, email)
-    rand_sleep(150, 300)
     # send_keys(ENTER) with stale retry
     for _attempt in range(3):
         try:
@@ -1251,12 +1403,12 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             "debugScreenshot": shot,
         }
 
-    move_to_element(driver, pw_field)
-    rand_sleep(80, 180)
+    natural_mouse_move(driver, pw_field)
+    rand_sleep(60, 130)
     pw_field.click()
-    rand_sleep(100, 200)
-    human_type(pw_field, password)
-    rand_sleep(150, 300)
+    rand_sleep(80, 160)
+    clipboard_type(driver, pw_field, password)   # instant paste — xdotool clipboard
+    rand_sleep(100, 180)
     # send_keys(ENTER) with stale retry — pw_field can go stale after typing
     for _attempt in range(3):
         try:
@@ -1418,12 +1570,12 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
         log(f"{email} — Entering TOTP code: {totp_code}")
         try:
-            move_to_element(driver, totp_field)
-            rand_sleep(80, 150)
+            natural_mouse_move(driver, totp_field)
+            rand_sleep(60, 120)
             totp_field.clear()
-            rand_sleep(50, 100)
-            human_type(totp_field, totp_code)
-            rand_sleep(150, 300)
+            rand_sleep(40, 80)
+            clipboard_type(driver, totp_field, totp_code)  # paste TOTP code instantly
+            rand_sleep(100, 200)
             totp_field.send_keys(Keys.ENTER)
         except Exception as e:
             log(f"TOTP entry error: {e}")
@@ -1476,16 +1628,52 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         url, text = page_state()
         log(f"{email} — After TOTP submit (final): {url[:70]}")
 
-        # Wrong TOTP
-        if any(x in text for x in [
+        # Wrong TOTP — auto-retry once with the next fresh 30s window
+        _wrong_totp_phrases = [
             "wrong code", "that code didn't work", "code is incorrect",
-            "enter the code again", "code expired"
-        ]):
-            return {
-                "status": "wrong_password",
-                "reason": f"TOTP code {totp_code} was wrong or expired",
-                "totpCode": totp_code,
-            }
+            "enter the code again", "code expired", "try again",
+            "didn't recognize that code",
+        ]
+        if any(x in text for x in _wrong_totp_phrases):
+            if totp_secret:
+                # Wait for next TOTP window and try once more
+                secs_until_next = 30 - (int(time.time()) % 30)
+                log(f"{email} — Wrong TOTP, waiting {secs_until_next}s for next window…")
+                time.sleep(secs_until_next + 0.5)
+                retry_code = generate_totp(totp_secret)
+                if retry_code:
+                    log(f"{email} — TOTP retry with fresh code: {retry_code}")
+                    try:
+                        totp_field_retry = wait_for_any([
+                            'input[name="totpPin"]', 'input[name="Pin"]', 'input[id="totpPin"]',
+                            'input[autocomplete="one-time-code"]', 'input[type="tel"]',
+                            'input[aria-label*="code"]', 'input[type="number"]',
+                        ], timeout=8)
+                        if totp_field_retry:
+                            totp_field_retry.clear()
+                            rand_sleep(40, 80)
+                            clipboard_type(driver, totp_field_retry, retry_code)
+                            rand_sleep(100, 200)
+                            totp_field_retry.send_keys(Keys.ENTER)
+                            rand_sleep(700, 1200)
+                            totp_code = retry_code
+                            url, text = page_state()
+                            log(f"{email} — After TOTP retry: {url[:70]}")
+                            # Check again — if still wrong, give up
+                            if any(x in text for x in _wrong_totp_phrases):
+                                return {
+                                    "status": "wrong_password",
+                                    "reason": f"TOTP codes wrong on 2 attempts ({totp_code}, {retry_code}) — check secret",
+                                    "totpCode": retry_code,
+                                }
+                    except Exception as _te:
+                        log(f"{email} — TOTP retry error: {_te}")
+            if any(x in driver.page_source if hasattr(driver, 'page_source') else "" for x in _wrong_totp_phrases):
+                return {
+                    "status": "wrong_password",
+                    "reason": f"TOTP code {totp_code} was wrong or expired — check your TOTP secret",
+                    "totpCode": totp_code,
+                }
 
         result = classify(url, text)
         if result:
