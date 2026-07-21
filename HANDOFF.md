@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 21, 2026 — Session 3_
+_Last updated: July 21, 2026 — Session 4_
 
 ---
 
@@ -484,6 +484,28 @@ artifacts/api-server: API Server    → backend
 8. **Timeout = 180 seconds per account** in `browserLoginChecker.ts` (`TIMEOUT_MS = 180_000`). If Python hangs beyond that, it's SIGKILL'd.
 
 9. **Auto-retry doubles time** — if first attempt is blocked by Google, auto-retry runs a full second check. Total time can be 200–240s for a blocked account before giving up.
+
+---
+
+## Session 4 Changes (July 21, 2026) — Warmup Fix
+
+### ✅ Google warmup visit re-added (automation detection fix)
+
+**Symptom:** Browser check was returning `wrong_password` debug screenshot showing password page — meaning after entering password, Google silently bounced back to `challenge/pwd` URL without an error message. This is automation detection, not an actual wrong password.
+
+**Root cause:** Session 2 removed the `google.com` warmup visit to save 3–5s. The HANDOFF from Session 2 explicitly warned this might increase detection. Confirmed: it does.
+
+**Fix in `artifacts/api-server/gmail_uc_checker.py`** — added "Step 0" before Step 1 (navigate to sign-in):
+```python
+# Step 0: Minimal warmup — visit Google homepage first
+driver.get("https://www.google.com")
+rand_sleep(800, 1200)
+```
+- Failure is non-fatal (`try/except pass`) — if warmup fails, login attempt continues anyway
+- Adds ~1s to per-account time (much less than the 3–5s removed in Session 2)
+- Warm fingerprint → Google doesn't flag the session at password step
+
+**Also clarified:** `booq xnpn 6lhu pn3g dl6t itgk hv4v ohqd` is a valid 32-char TOTP secret (NOT an App Password). pyotp strips spaces + uppercases automatically → works fine as-is.
 
 ---
 
