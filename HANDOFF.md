@@ -491,28 +491,39 @@ artifacts/api-server: API Server    → backend
 
 ---
 
-## Session 13 Changes (July 21, 2026) — Concurrent ChromeDriver port conflict fix
+## Session 13 Changes (July 21, 2026) — Concurrent fix: private Xvfb per account
 
-### ✅ Fixed: Port 38001 conflict when running 2+ accounts concurrently
-**File:** `artifacts/api-server/gmail_uc_checker.py`
+### ✅ Fix 1: CDP port race — `port=_cd_port` in `uc.Chrome()`
+Added `import socket` + `_find_free_port()`. Inside Chrome launch lock, picks a free CDP debug port before `uc.Chrome()` and passes `port=_cd_port`. Prevents two processes fighting over the same `--remote-debugging-port`.
 
-**Root cause:** `undetected_chromedriver` defaults to port 38001 for its ChromeDriver HTTP service. When 2+ Python processes spawn concurrently, the second process tries to bind the same port → `Connection refused`.
+### ✅ Fix 2 (THIS SESSION): Private Xvfb display per account — xdotool isolation
+**Root cause (found in logs):**
+Both concurrent Chrome instances share `DISPLAY=:0` (Replit's X display). `xdotool type` sends keystrokes to the **currently focused window** on that display — when two Chrome windows are open, xdotool types into the WRONG one. The Chrome that gets unexpected input crashes or its ChromeDriver dies, showing:
+```
+[UC] [clipboard_type] xdotool exit 0 but field value short (0/25) — fallback
+[UC] Login exception: HTTPConnectionPool(port=59051) Connection refused
+```
 
-**Fix applied (3 changes):**
-1. Added `import socket` to imports
-2. Added `_find_free_port()` helper — uses `socket.bind(("127.0.0.1", 0))` to atomically grab a free OS-assigned port
-3. Inside the Chrome launch lock (`fcntl.flock LOCK_EX`), picks a free port before `uc.Chrome(...)` and passes `port=_cd_port` — guarantees each concurrent process binds a different port
+**Fix applied (4 changes to `gmail_uc_checker.py`):**
+1. Added `_find_free_display()` — scans `/tmp/.XN-lock` files to find a free display number (`:100`–`:299`)
+2. Inside Chrome launch lock, after picking `_cd_port`: start a private `Xvfb :{_disp_num}` subprocess, set `os.environ["DISPLAY"]` to it
+3. Updated `_cleanup(path, xvfb_proc=None)` — now terminates the Xvfb process on cleanup
+4. Updated both `_cleanup()` call sites to pass `_xvfb_proc`
 
 **Expected log output when working:**
 ```
-[UC] ChromeDriver port: 45832   ← process 1
-[UC] ChromeDriver port: 51904   ← process 2 (different port)
+[UC] Private Xvfb on :100 (pid=1234)   ← account 1 gets display :100
+[UC] Private Xvfb on :101 (pid=1235)   ← account 2 gets display :101
+[UC] ChromeDriver port: 45832           ← different ports too
+[UC] ChromeDriver port: 51904
 ```
+
+Each Chrome runs in total isolation — xdotool on `:100` can only type into Chrome on `:100`.
 
 **Setup performed this session:**
 - `pnpm install` — Node deps installed
 - `pip install -r artifacts/api-server/requirements.txt` — Python deps installed
-- Both workflows started: `artifacts/api-server: API Server` (8080) + `artifacts/gmail-checker: web` (5173)
+- Both workflows running: `artifacts/api-server: API Server` (8080) + `artifacts/gmail-checker: web` (5173)
 
 ---
 

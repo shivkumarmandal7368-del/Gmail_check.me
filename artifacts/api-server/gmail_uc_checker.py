@@ -36,6 +36,14 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _find_free_display() -> int:
+    """Find a free X display number by checking Xvfb lock files (/tmp/.XN-lock)."""
+    for n in range(100, 300):
+        if not os.path.exists(f"/tmp/.X{n}-lock"):
+            return n
+    return random.randint(300, 399)
+
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 def log(msg: str):
@@ -909,12 +917,27 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     log(f"Launching Chrome (UC)…")
     # Acquire cross-process lock so only ONE Chrome starts at a time.
     # Concurrent Chrome launches exhaust shared memory and cause crashes.
+    _xvfb_proc = None  # private Xvfb for this account — killed in _cleanup()
     _lock_fd = open(_CHROME_LAUNCH_LOCK_PATH, "w")
     log("Waiting for Chrome launch slot…")
     fcntl.flock(_lock_fd, fcntl.LOCK_EX)
     log("Chrome launch slot acquired — starting Chrome")
     _cd_port = _find_free_port()
     log(f"ChromeDriver port: {_cd_port}")
+    # Each account gets its OWN private Xvfb display so xdotool keystrokes
+    # never cross-contaminate between concurrent Chrome windows.
+    _disp_num = _find_free_display()
+    try:
+        _xvfb_proc = subprocess.Popen(
+            ["Xvfb", f":{_disp_num}", "-screen", "0", "1366x768x24", "-ac"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(0.5)  # wait for Xvfb to be ready
+        os.environ["DISPLAY"] = f":{_disp_num}"
+        log(f"Private Xvfb on :{_disp_num} (pid={_xvfb_proc.pid})")
+    except Exception as _xvfb_err:
+        log(f"Private Xvfb failed (:{_disp_num}): {_xvfb_err} — using shared display")
+        _xvfb_proc = None
     try:
         driver = uc.Chrome(
             options=options,
@@ -929,7 +952,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     except Exception as e:
         fcntl.flock(_lock_fd, fcntl.LOCK_UN)
         _lock_fd.close()
-        _cleanup(proxy_ext_path)
+        _cleanup(proxy_ext_path, _xvfb_proc)
         return {
             "status": "unknown",
             "reason": f"Chrome launch failed: {str(e)[:300]}",
@@ -992,16 +1015,22 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             driver.quit()
         except Exception:
             pass
-        _cleanup(proxy_ext_path)
+        _cleanup(proxy_ext_path, _xvfb_proc)
     _login_result["exitIp"] = exit_ip
     _login_result["fingerprint"] = fp_summary
     return _login_result
 
 
-def _cleanup(path: str | None):
+def _cleanup(path: str | None, xvfb_proc=None):
     if path and os.path.exists(path):
         try:
             os.unlink(path)
+        except Exception:
+            pass
+    if xvfb_proc is not None:
+        try:
+            xvfb_proc.terminate()
+            xvfb_proc.wait(timeout=3)
         except Exception:
             pass
 
