@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 21, 2026 — Session 7_
+_Last updated: July 21, 2026 — Session 8_
 
 ---
 
@@ -15,6 +15,10 @@ _Last updated: July 21, 2026 — Session 7_
 **Running workflows (always restart both before testing):**
 - `artifacts/gmail-checker: web` → React/Vite on port **5173** (changed from 18726 in Session 3 — see below)
 - `artifacts/api-server: API Server` → Express on port 8080
+
+**⚠️ Fresh import workflow fix (Session 8):** After any GitHub import, workflows must be configured with PORT + BASE_PATH inline — artifact.toml env injection does NOT apply when workflows are created via `configureWorkflow`. Use:
+- API: `PORT=8080 pnpm --filter @workspace/api-server run dev`
+- Frontend: `PORT=5173 BASE_PATH=/ pnpm --filter @workspace/gmail-checker run dev`
 
 ---
 
@@ -484,6 +488,47 @@ artifacts/api-server: API Server    → backend
 8. **Timeout = 180 seconds per account** in `browserLoginChecker.ts` (`TIMEOUT_MS = 180_000`). If Python hangs beyond that, it's SIGKILL'd.
 
 9. **Auto-retry doubles time** — if first attempt is blocked by Google, auto-retry runs a full second check. Total time can be 200–240s for a blocked account before giving up.
+
+---
+
+## Session 8 Changes (July 21, 2026) — Fresh import setup + live test
+
+### ✅ Project re-imported from GitHub — restored to running state
+
+**Setup steps performed:**
+1. `pnpm install` — all Node.js dependencies installed (526 packages)
+2. `pip install -r artifacts/api-server/requirements.txt` — Python deps installed (undetected-chromedriver 3.5.5, pyotp 2.10.0, selenium 4.46.0, requests 2.34.2)
+3. Both workflows configured and running:
+   - `artifacts/api-server: API Server` — Express on port 8080
+   - `artifacts/gmail-checker: web` — Vite on port 5173
+
+**Workflow fix discovered:** After fresh GitHub import, `configureWorkflow` does NOT inject `PORT` or `BASE_PATH` from artifact.toml `[services.env]`. Must be passed inline in the command string. See updated workflow commands in Project Overview section above.
+
+---
+
+### 📋 Live test results — Session 8 (July 21, 2026)
+
+**Test conditions:** concurrency=1, freshProfile=true, proxy: `rp.scrapegw.com:6060` (ProxyScrape residential)
+
+| Account | Expected | Actual | Time |
+|---|---|---|---|
+| `regenawallgk795@gmail.com` | `opened` | **`opened` ✅** | **83,342ms (~83s)** |
+| `donnalyncht681@gmail.com` | `verification_required` | **`verification_required` ✅** | **96,024ms (~96s)** |
+
+**Reason strings:**
+- `regenawallgk795` → `"Mailbox opened successfully ✅"`
+- `donnalyncht681` → `"Google requires phone or device verification (Verify your info to continue)"`
+
+**Key findings:**
+- All Session 7 fixes (challenge/dp URL detection, auto-retry with new proxy IP, interstitial speed-up) are working correctly
+- `regenawallgk795` successfully opens the mailbox end-to-end — credentials + TOTP confirmed working
+- `donnalyncht681` correctly detected as phone-verification-required without wasting extra time
+- Both accounts run sequentially (concurrency=1) to avoid OOM — Chrome launch lock working
+
+**What next agent should do:**
+- Both test accounts confirmed working. System is stable and ready for bulk production runs.
+- If user brings new accounts: run with concurrency=1 first to verify proxy health, then scale up to 2–3.
+- See "What's Next (Future Work)" section at bottom for planned features.
 
 ---
 
