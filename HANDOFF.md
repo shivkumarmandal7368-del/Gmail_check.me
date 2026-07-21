@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 21, 2026 — Session 16_
+_Last updated: July 21, 2026 — Session 17_
 
 ---
 
@@ -488,6 +488,79 @@ artifacts/api-server: API Server    → backend
 8. **Timeout = 180 seconds per account** in `browserLoginChecker.ts` (`TIMEOUT_MS = 180_000`). If Python hangs beyond that, it's SIGKILL'd.
 
 9. **Auto-retry doubles time** — if first attempt is blocked by Google, auto-retry runs a full second check. Total time can be 200–240s for a blocked account before giving up.
+
+---
+
+## Session 17 Changes (July 21, 2026) — Concurrent Chrome crash bug (UNRESOLVED — next agent must fix)
+
+### Problem
+When **2 Gmail accounts** are checked simultaneously, **one check fails** with:
+```
+Login error: HTTPConnectionPool(host='localhost', port=56445): Max retries exceeded with url: /session/... 
+(Caused by NewConnectionError: Failed to establish a new connection: [Errno 111] Connection refused)
+```
+When checked **one at a time** (concurrency=1), both accounts succeed with correct results.
+
+### Root Cause (Diagnosed — Fix NOT Applied)
+The Chrome launch lock (`_CHROME_LAUNCH_LOCK_PATH`) is released **1 second after Chrome starts** (line ~983 in `gmail_uc_checker.py`). This means 2 Chrome instances can and do run **simultaneously** for the rest of the login flow (60–120 seconds each).
+
+The Replit container has limited RAM. Two simultaneous Chrome+Xvfb+ChromeDriver instances exhaust memory → **Linux OOM killer kills one Chrome process mid-session** → that process's ChromeDriver loses its backing browser → Selenium throws `Connection refused` on the next command → `unknown` result.
+
+This is confirmed by: the error only happens when concurrency ≥ 2, never when concurrency = 1.
+
+### Fix Required (next agent must implement)
+**File:** `artifacts/api-server/gmail_uc_checker.py`
+
+Add a second lock — **`_CHROME_SESSION_LOCK_PATH`** — that is held for the **ENTIRE Chrome session** (from launch through `driver.quit()`). This limits simultaneous Chrome instances to 1, making them sequential but crash-free.
+
+#### Exact implementation:
+
+**Step 1 — Add constant near top of file (after `_CHROME_LAUNCH_LOCK_PATH`):**
+```python
+# Held for ENTIRE Chrome session — limits simultaneous Chrome instances to 1
+# Prevents OOM kill when multiple accounts checked concurrently.
+_CHROME_SESSION_LOCK_PATH = "/tmp/gmail_checker_chrome_session.lock"
+```
+
+**Step 2 — Acquire session lock BEFORE Chrome launch (before line ~949 where `_lock_fd` is opened):**
+```python
+# ── Chrome session slot — held for entire session (prevents OOM with concurrent checks) ──
+_session_lock_fd = open(_CHROME_SESSION_LOCK_PATH, "w")
+log("Waiting for Chrome session slot (limits concurrent Chrome instances)…")
+fcntl.flock(_session_lock_fd, fcntl.LOCK_EX)
+log("Chrome session slot acquired")
+```
+
+**Step 3 — Release session lock in `_cleanup()` function OR in the `finally` block at end of `check_gmail()`.**
+Find the main `try/finally` in `check_gmail()` and add:
+```python
+finally:
+    try:
+        fcntl.flock(_session_lock_fd, fcntl.LOCK_UN)
+        _session_lock_fd.close()
+    except Exception:
+        pass
+```
+
+**Step 4 — Keep the existing `_CHROME_LAUNCH_LOCK_PATH` logic unchanged** (it still serializes the fast Chrome startup to prevent Xvfb/port conflicts). The new session lock wraps the ENTIRE check at a higher level.
+
+#### Why not just keep existing launch lock held?
+The existing launch lock (`_lock_fd`) is opened fresh each time and handles display allocation + Chrome startup specifically. It's cleaner to use a separate session lock rather than restructuring the existing lock logic. The session lock wraps the whole thing.
+
+#### Expected behavior after fix:
+- 2 accounts submitted → Account 1 Chrome starts, runs full login (60–120s), closes → Account 2 Chrome starts
+- Total time ≈ 2× single account (was: random crash on one)
+- 10 accounts with concurrency=3 → max 1 Chrome at a time, 10 sequential runs
+- **This is correct** — the container cannot support more than 1 Chrome simultaneously
+
+#### Optional future improvement (NOT required now):
+Make max concurrent Chromes configurable (e.g. `MAX_CONCURRENT_CHROME = 1`) and test if 2 simultaneous Chromes are stable once memory is profiled. For now, 1 is safe.
+
+### Files That Need Changing
+- `artifacts/api-server/gmail_uc_checker.py` — add `_CHROME_SESSION_LOCK_PATH`, acquire before Chrome launch, release in finally block
+
+### Files NOT Changed This Session (only diagnosis done)
+- `browserLoginChecker.ts` — concurrency logic unchanged (still allows N parallel Python processes; they will now just queue at the session lock inside Python)
 
 ---
 
