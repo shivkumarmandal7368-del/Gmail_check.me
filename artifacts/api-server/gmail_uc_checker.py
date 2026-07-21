@@ -918,6 +918,17 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             time.sleep(0.3)
         return None
 
+    # ── Step 0: Minimal warmup — visit Google homepage first ─────────────────
+    # Without this, Google detects automation at the password step and silently
+    # bounces back to challenge/pwd. A brief google.com visit warms up the
+    # fingerprint and makes the session look more organic.
+    try:
+        log(f"{email} — Step 0: warmup visit to google.com")
+        driver.get("https://www.google.com")
+        rand_sleep(800, 1200)
+    except Exception:
+        pass  # warmup failure is non-fatal — continue anyway
+
     # ── Step 1: Navigate to Gmail sign-in ────────────────────────────────────
     log(f"{email} — Step 1: navigating to sign-in page")
     try:
