@@ -218,7 +218,7 @@ function LoginChecker() {
         const parts = line.split(":");
         if (parts.length < 2) return null;
         const email = parts[0].trim();
-        const password = parts.slice(1, parts.length > 3 ? -1 : undefined).join(":").trim();
+        const password = (parts.length > 3 ? parts.slice(1, -1).join(":") : parts[1] ?? "").trim();
         const totpRaw = parts.length > 3 ? parts[parts.length - 1].trim() : (
           // handle email:password:totp (exactly 3 segments after splitting on first colon)
           parts.length === 3 ? parts[2].trim() : undefined
@@ -415,7 +415,7 @@ function BrowserChecker() {
       const parts = line.split(":");
       if (parts.length < 2) return null;
       const email = parts[0].trim();
-      const password = parts.slice(1, parts.length > 3 ? -1 : undefined).join(":").trim();
+      const password = (parts.length > 3 ? parts.slice(1, -1).join(":") : parts[1] ?? "").trim();
       const totpRaw = parts.length === 3 ? parts[2].trim() : parts.length > 3 ? parts[parts.length - 1].trim() : undefined;
       const totp = totpRaw ? totpRaw.replace(/\s+/g, "") : undefined;
       if (!email || !password) return null;
