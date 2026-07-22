@@ -2,10 +2,14 @@ import React, { useState, useEffect, useRef } from "react"
 import { useCheckEmails, useGetEmailStats, useLoginCheckEmails } from "@workspace/api-client-react"
 import type { EmailResult, EmailStats, LoginResult, BrowserLoginResult } from "@workspace/api-client-react"
 
-// Extended result type: adds "checking" in-flight status + per-account timing
+// Extended result type: adds "checking" in-flight status + per-account timing + original credentials
 type ExtBrowserResult = Omit<BrowserLoginResult, "status"> & {
   status: BrowserLoginResult["status"] | "checking";
   durationMs?: number;
+  /** Original password from input — preserved for export */
+  password?: string;
+  /** Original 2FA secret from input — preserved for export */
+  totpSecret?: string;
 };
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -408,6 +412,7 @@ function BrowserChecker() {
     input: "vbc_input", proxy: "vbc_proxy", concurrency: "vbc_conc",
     fresh: "vbc_fresh", results: "vbc_results", total: "vbc_total",
     active: "vbc_active", savedAt: "vbc_saved_at", jobId: "vbc_job_id",
+    creds: "vbc_creds",
   } as const;
   const lsGet = <T,>(key: string, fb: T): T => {
     try { const v = localStorage.getItem(key); return v != null ? JSON.parse(v) : fb; } catch { return fb; }
@@ -441,6 +446,10 @@ function BrowserChecker() {
   const reconnectTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeJobIdRef   = useRef<string | null>(jobId);
   const appendModeRef    = useRef(false);
+  // Credential map: email → {password, totpSecret?} — persisted so exports survive page refresh
+  const credsMapRef = useRef<Record<string, { password: string; totpSecret?: string }>>(
+    (() => { try { const v = localStorage.getItem(LS.creds); return v ? JSON.parse(v) : {}; } catch { return {}; } })()
+  );
 
   // ── Auto-save ─────────────────────────────────────────────────────────────
   useEffect(() => { try { localStorage.setItem(LS.input,       JSON.stringify(inputText));    } catch {} }, [inputText]);
@@ -489,8 +498,14 @@ function BrowserChecker() {
     setResults(prev => {
       const merged = [...prev];
       for (const r of (job.results ?? [])) {
+        const cred = credsMapRef.current[r.email];
+        const withCreds: ExtBrowserResult = {
+          ...r,
+          password:    cred?.password,
+          totpSecret:  cred?.totpSecret,
+        };
         const idx = merged.findIndex(x => x.email === r.email);
-        if (idx !== -1) merged[idx] = r; else merged.push(r);
+        if (idx !== -1) merged[idx] = withCreds; else merged.push(withCreds);
       }
       for (const email of (job.checkingEmails ?? [])) {
         if (!merged.some(x => x.email === email))
@@ -573,10 +588,16 @@ function BrowserChecker() {
         [...prev, { email: evt.email, status: "checking" as const, reason: "Browser running…", totpCode: null }]);
     } else if (evt.type === "result") {
       const { type: _t, ...result } = evt;
+      const cred = credsMapRef.current[result.email];
+      const withCreds: ExtBrowserResult = {
+        ...result,
+        password:   cred?.password,
+        totpSecret: cred?.totpSecret,
+      };
       setResults(prev => {
         const idx = prev.findIndex(r => r.email === result.email);
-        if (idx !== -1) { const n = [...prev]; n[idx] = result as ExtBrowserResult; return n; }
-        return [...prev, result as ExtBrowserResult];
+        if (idx !== -1) { const n = [...prev]; n[idx] = withCreds; return n; }
+        return [...prev, withCreds];
       });
     } else if (evt.type === "done" || evt.type === "cancelled") {
       setIsRunning(false); setConnStatus("idle");
@@ -595,6 +616,11 @@ function BrowserChecker() {
   const handleCheck = async () => {
     const credentials = parseCredentials(inputText);
     if (credentials.length === 0) return;
+    // Build and persist credential map so exports survive page refresh
+    const newCredsMap: Record<string, { password: string; totpSecret?: string }> = {};
+    for (const c of credentials) newCredsMap[c.email] = { password: c.password, totpSecret: c.totp };
+    credsMapRef.current = newCredsMap;
+    try { localStorage.setItem(LS.creds, JSON.stringify(newCredsMap)); } catch {}
     sseAbortRef.current?.abort();
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     appendModeRef.current = false;
@@ -643,17 +669,18 @@ function BrowserChecker() {
   };
 
   const handleRetry = (email: string) => {
-    const line = inputText.split(/\n+/).find(l => l.trim().startsWith(email + ":"));
-    if (!line) return;
-    const cred = parseCredentials(line);
-    if (cred.length > 0) startRetryJob(cred);
+    const cred = credsMapRef.current[email];
+    if (!cred) return;
+    startRetryJob([{ email, password: cred.password, totp: cred.totpSecret }]);
   };
 
   const handleBulkRetry = () => {
     const verifyEmails = results.filter(r => r.status === "verification_required").map(r => r.email);
     if (verifyEmails.length === 0) return;
-    const lines = inputText.split(/\n+/).filter(l => verifyEmails.some(e => l.trim().startsWith(e + ":")));
-    const creds = parseCredentials(lines.join("\n"));
+    const creds = verifyEmails.flatMap(email => {
+      const c = credsMapRef.current[email];
+      return c ? [{ email, password: c.password, totp: c.totpSecret }] : [];
+    });
     if (creds.length > 0) startRetryJob(creds);
   };
 
@@ -668,16 +695,32 @@ function BrowserChecker() {
   const displayed = activeList === "opened" ? opened : [...inFlight, ...notOpened];
   const progress = total > 0 ? Math.round((completedCount / total) * 100) : 0;
 
+  const statusLabel = (status: ExtBrowserResult["status"]): string => {
+    const map: Record<string, string> = {
+      opened: "Opened", verification_required: "Verify Required",
+      wrong_password: "Wrong Password", "2fa_required": "2FA Required",
+      unknown: "Unknown", checking: "Checking",
+    };
+    return map[status] ?? status;
+  };
+
   const downloadCSV = (rows: ExtBrowserResult[], name: string) => {
-    const header = "email,status,reason,totpCode,durationMs";
+    const csv = (s: string) => `"${String(s ?? "").replace(/"/g, '""')}"`;
+    const header = "Email,Password,2FA Secret,Result";
     const body = rows.map(r =>
-      [r.email, r.status, `"${(r.reason ?? "").replace(/"/g, '""')}"`, r.totpCode ?? "", r.durationMs ?? ""].join(",")
+      [csv(r.email), csv(r.password ?? ""), csv(r.totpSecret ?? ""), csv(statusLabel(r.status))].join(",")
     ).join("\n");
     download(header + "\n" + body, name + ".csv", "text/csv");
   };
 
   const downloadJSON = (rows: ExtBrowserResult[], name: string) => {
-    download(JSON.stringify(rows, null, 2), name + ".json", "application/json");
+    const shaped = rows.map(r => ({
+      email:           r.email,
+      password:        r.password        ?? "",
+      twoFactorSecret: r.totpSecret      ?? "",
+      result:          statusLabel(r.status),
+    }));
+    download(JSON.stringify(shaped, null, 2), name + ".json", "application/json");
   };
 
   // Connection status indicator text/colour
@@ -899,7 +942,14 @@ function BrowserChecker() {
                 </Button>
               )}
               <Button variant="outline" size="sm"
-                onClick={() => download(displayed.filter(r => r.status !== "checking").map(r => r.email).join("\n"), `gmail_${activeList}.txt`, "text/plain")}
+                onClick={() => download(
+                  displayed.filter(r => r.status !== "checking").map(r => {
+                    const parts = [r.email, r.password ?? ""];
+                    if (r.totpSecret) parts.push(r.totpSecret);
+                    parts.push(statusLabel(r.status));
+                    return parts.join(":");
+                  }).join("\n"),
+                  `gmail_${activeList}.txt`, "text/plain")}
                 disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
                 <Download className="w-3 h-3 mr-1" />.TXT
               </Button>
@@ -932,6 +982,12 @@ function BrowserChecker() {
                   <TableRow className="hover:bg-transparent">
                     <TableHead className="font-mono text-xs w-[48px] text-center sticky left-0 bg-card/80 backdrop-blur-sm z-20">#</TableHead>
                     <TableHead className="font-mono text-xs">EMAIL</TableHead>
+                    {displayed.some(r => r.password) && (
+                      <TableHead className="font-mono text-xs min-w-[110px]">PASSWORD</TableHead>
+                    )}
+                    {displayed.some(r => r.totpSecret) && (
+                      <TableHead className="font-mono text-xs min-w-[140px]">2FA SECRET</TableHead>
+                    )}
                     <TableHead className="font-mono text-xs w-[130px]">STATUS</TableHead>
                     <TableHead className="font-mono text-xs min-w-[160px]">REASON</TableHead>
                     {displayed.some(r => r.durationMs != null) && (
@@ -954,6 +1010,16 @@ function BrowserChecker() {
                     <TableRow key={r.email} className="font-mono text-sm">
                       <TableCell className="text-center text-muted-foreground/50 text-xs tabular-nums sticky left-0 bg-card/80 backdrop-blur-sm">{idx + 1}</TableCell>
                       <TableCell className="font-medium text-foreground/90">{r.email}</TableCell>
+                      {displayed.some(x => x.password) && (
+                        <TableCell className="font-mono text-xs text-muted-foreground max-w-[150px] truncate" title={r.password ?? ""}>
+                          {r.password ?? <span className="opacity-30">—</span>}
+                        </TableCell>
+                      )}
+                      {displayed.some(x => x.totpSecret) && (
+                        <TableCell className="font-mono text-xs text-cyan-400/80 max-w-[160px] truncate" title={r.totpSecret ?? ""}>
+                          {r.totpSecret ?? <span className="text-muted-foreground opacity-30">—</span>}
+                        </TableCell>
+                      )}
                       <TableCell><BrowserStatusBadge status={r.status} /></TableCell>
                       <TableCell className="text-muted-foreground break-words">
                         {r.status === "checking"
