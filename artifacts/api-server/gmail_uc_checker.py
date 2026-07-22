@@ -26,6 +26,10 @@ import socket
 # This file lock serializes Chrome launches so only ONE Chrome starts at a time.
 # Once Chrome is stable (CDP ready), the lock is released so the next can start.
 _CHROME_LAUNCH_LOCK_PATH = "/tmp/gmail_checker_chrome_launch.lock"
+# Held for the ENTIRE Chrome session — limits simultaneous running Chrome instances to 1.
+# Prevents OOM kill when multiple accounts are checked concurrently.
+# The launch lock above only covers startup (~3s); this one wraps the full login flow.
+_CHROME_SESSION_LOCK_PATH = "/tmp/gmail_checker_chrome_session.lock"
 
 
 def _find_free_port() -> int:
@@ -943,6 +947,14 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         _disp_lock_fd.close()
     time.sleep(0.5)  # Xvfb startup wait — runs in parallel while other accounts wait for Chrome lock
 
+    # ── Step B.5: Chrome session slot — held for ENTIRE login session ────────
+    # Prevents OOM kill: only ONE full Chrome instance runs at a time.
+    # Other concurrent accounts queue here and start after current one finishes.
+    _session_lock_fd = open(_CHROME_SESSION_LOCK_PATH, "w")
+    log("Waiting for Chrome session slot (OOM guard)…")
+    fcntl.flock(_session_lock_fd, fcntl.LOCK_EX)
+    log("Chrome session slot acquired")
+
     # ── Step C: Chrome launch lock — now only covers the fast Chrome start ──
     # With chromedriver pre-patched and Xvfb already running, this lock holds
     # for only ~2-4s (Chrome process start + brief CDP settle) instead of ~13s.
@@ -972,6 +984,11 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     except Exception as e:
         fcntl.flock(_lock_fd, fcntl.LOCK_UN)
         _lock_fd.close()
+        try:
+            fcntl.flock(_session_lock_fd, fcntl.LOCK_UN)
+            _session_lock_fd.close()
+        except Exception:
+            pass
         _cleanup(proxy_ext_path, _xvfb_proc)
         return {
             "status": "unknown",
@@ -1036,6 +1053,13 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         except Exception:
             pass
         _cleanup(proxy_ext_path, _xvfb_proc)
+        # Release Chrome session slot — next queued account can now start its Chrome
+        try:
+            fcntl.flock(_session_lock_fd, fcntl.LOCK_UN)
+            _session_lock_fd.close()
+            log("Chrome session slot released")
+        except Exception:
+            pass
     _login_result["exitIp"] = exit_ip
     _login_result["fingerprint"] = fp_summary
     return _login_result
@@ -1672,6 +1696,10 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         log(f"{email} — 2FA page detected (url={url[:60]})")
         if not totp_code:
             shot = screenshot_b64()
+            # v3/signin/TL=... page: password was accepted — mark opened per user rule
+            if "v3/signin" in url and "challenge" not in url:
+                log(f"{email} — v3/signin TOTP page, no secret, field not yet visible → opened per user rule")
+                return {"status": "opened", "reason": "Mailbox opened successfully ✅", "totpCode": None, "debugScreenshot": shot}
             return {
                 "status": "2fa_required",
                 "reason": "2FA required — add TOTP secret as 3rd field: email:password:totp_secret",
@@ -1747,6 +1775,12 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     if totp_field is not None:
         if not totp_code and not totp_secret:
             shot = screenshot_b64()
+            # v3/signin/TL=... page: Google already accepted the password.
+            # Mark as opened per user rule — no TOTP secret needed to confirm accessibility.
+            _cur_url = driver.current_url
+            if "v3/signin" in _cur_url and "challenge" not in _cur_url:
+                log(f"{email} — v3/signin TOTP page, no secret → opened per user rule (password accepted)")
+                return {"status": "opened", "reason": "Mailbox opened successfully ✅", "totpCode": None, "debugScreenshot": shot}
             return {"status": "2fa_required", "reason": "2FA required — provide TOTP secret", "totpCode": None, "debugScreenshot": shot}
 
         # CRITICAL: regenerate TOTP right before entry.

@@ -564,6 +564,52 @@ Make max concurrent Chromes configurable (e.g. `MAX_CONCURRENT_CHROME = 1`) and 
 
 ---
 
+## Session 17 — Part 2 (July 22, 2026) — v3/signin TOTP page → opened for ALL cases
+
+### Problem
+"Verify that it's you — Google Authenticator" page (v3/signin/TL=...) was going to "not open" section in TWO additional scenarios that were missed:
+
+**Case A:** TOTP field visible, but no TOTP secret provided in credentials (`email:password` without 3rd field):
+- `totp_field` found → enters `if totp_field is not None:` block
+- `not totp_code and not totp_secret` = True → returned `2fa_required`
+- Screenshot showed empty "Enter code" field
+
+**Case B:** TOTP field NOT yet rendered (8s wait timed out), no TOTP secret:
+- `is_2fa_select = True`, `totp_field = None`
+- `not totp_code` = True → returned `2fa_required`
+
+### Fix Applied (`gmail_uc_checker.py` — 2 locations)
+
+**Fix A — line ~1772 (totp_field found, no code):**
+```python
+if not totp_code and not totp_secret:
+    shot = screenshot_b64()
+    _cur_url = driver.current_url
+    if "v3/signin" in _cur_url and "challenge" not in _cur_url:
+        return {"status": "opened", ...}   # ← was: 2fa_required
+    return {"status": "2fa_required", ...}
+```
+
+**Fix B — line ~1697 (field not found, no code):**
+```python
+if not totp_code:
+    shot = screenshot_b64()
+    if "v3/signin" in url and "challenge" not in url:
+        return {"status": "opened", ...}   # ← was: 2fa_required
+    return {"status": "2fa_required", ...}
+```
+
+### Complete v3/signin/TL=... Coverage (all cases now → opened)
+| Scenario | Before | After |
+|---|---|---|
+| TOTP secret provided, code correct | `opened` | `opened` ✅ |
+| TOTP secret provided, code wrong (both attempts) | `wrong_password` → `opened` | `opened` ✅ |
+| No TOTP secret, field visible | `2fa_required` | `opened` ✅ |
+| No TOTP secret, field not yet visible | `2fa_required` | `opened` ✅ |
+| Falls through to classify() | `unknown` → `opened` | `opened` ✅ |
+
+---
+
 ## Session 16 Changes (July 21, 2026) — v3/signin Google Authenticator page fix
 
 ### Problem
