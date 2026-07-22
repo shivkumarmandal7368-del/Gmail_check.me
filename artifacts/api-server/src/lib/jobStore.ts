@@ -18,6 +18,7 @@ import { randomBytes } from "node:crypto";
 
 export type JobStatus =
   | "running"
+  | "paused"
   | "completed"
   | "cancelled"
   | "failed"
@@ -211,6 +212,12 @@ export function emitJobEvent(jobId: string, event: JobEvent): void {
       job.completedAt = Date.now();
       job.checkingEmails = [];
       break;
+    case "paused":
+      job.status = "paused";
+      break;
+    case "resumed":
+      job.status = "running";
+      break;
     case "error":
       job.status = "failed";
       job.errorMessage = event.message as string;
@@ -263,6 +270,35 @@ export function cancelJob(id: string): boolean {
     type: "cancelled",
     timestamp: Date.now(),
     message: "Cancelled by user",
+  });
+  return true;
+}
+
+/** Pause a running job while preserving all completed and in-flight results. */
+export function pauseJob(id: string): boolean {
+  const job = jobs.get(id);
+  if (!job || job.status !== "running") return false;
+  emitJobEvent(id, {
+    type: "paused",
+    timestamp: Date.now(),
+    message: "Paused by user",
+  });
+  return true;
+}
+
+/** Re-open a paused/interrupted job so the runner can continue pending accounts. */
+export function resumeJob(id: string): boolean {
+  const job = jobs.get(id);
+  if (!job || !["paused", "interrupted", "cancelled"].includes(job.status)) return false;
+  if (job.checkingEmails.length > 0) return false;
+  job.status = "running";
+  job.completedAt = undefined;
+  job.errorMessage = undefined;
+  job.checkingEmails = [];
+  emitJobEvent(id, {
+    type: "resumed",
+    timestamp: Date.now(),
+    message: "Resumed — continuing pending accounts",
   });
   return true;
 }

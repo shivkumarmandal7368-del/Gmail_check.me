@@ -24,7 +24,7 @@ import { Progress } from "@/components/ui/progress"
 import {
   Download, Terminal, CheckCircle2, XCircle, AlertTriangle,
   HelpCircle, Activity, ShieldAlert, KeyRound, Smartphone,
-  Lock, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2
+  Lock, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle
 } from "lucide-react"
 
 type SmtpFilter = "all" | "valid" | "invalid" | "disabled" | "catch_all" | "unknown";
@@ -429,6 +429,9 @@ function BrowserChecker() {
   const [total,        setTotal]        = useState<number>(() => lsGet(LS.total, 0));
   const [jobId,        setJobId]        = useState<string | null>(() => localStorage.getItem(LS.jobId));
   const [isRunning,    setIsRunning]    = useState(false);
+  const [jobStatus,    setJobStatus]    = useState<string>("idle");
+  const [pauseRequested, setPauseRequested] = useState(false);
+  const [resumeReady,   setResumeReady] = useState(false);
   const [connStatus,   setConnStatus]   = useState<"idle"|"connecting"|"connected"|"reconnecting"|"disconnected">("idle");
   const [reconnectedAt, setReconnectedAt] = useState<string | null>(null);
 
@@ -447,6 +450,7 @@ function BrowserChecker() {
   // refs
   const sseAbortRef      = useRef<AbortController | null>(null);
   const reconnectTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pausePollTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeJobIdRef   = useRef<string | null>(jobId);
   const appendModeRef    = useRef(false);
   // Credential map: email → {password, totpSecret?} — persisted so exports survive page refresh
@@ -479,6 +483,7 @@ function BrowserChecker() {
     return () => {
       sseAbortRef.current?.abort();
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (pausePollTimer.current) clearTimeout(pausePollTimer.current);
     };
   }, []);
 
@@ -517,7 +522,13 @@ function BrowserChecker() {
       return merged;
     });
     setTotal(t => Math.max(t, job.total ?? 0));
+    setJobStatus(job.status ?? "idle");
     setIsRunning(job.status === "running");
+    setResumeReady(
+      ["paused", "interrupted", "cancelled"].includes(job.status) &&
+      (job.checkingEmails ?? []).length === 0 &&
+      (job.results ?? []).length < (job.total ?? 0),
+    );
   };
 
   const restoreJobFromServer = async (id: string) => {
@@ -531,8 +542,28 @@ function BrowserChecker() {
       if (job.status === "running") {
         setReconnectedAt(new Date().toLocaleTimeString());
         connectToJobStream(id, job.eventsCount ?? 0);
+      } else if (job.status === "paused" && (job.checkingEmails ?? []).length > 0) {
+        schedulePausedJobPoll(id);
       }
     } catch (e) { console.error("[BrowserChecker] restore:", e); }
+  };
+
+  const schedulePausedJobPoll = (id: string) => {
+    if (pausePollTimer.current) clearTimeout(pausePollTimer.current);
+    pausePollTimer.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/jobs/${id}`);
+        if (!res.ok) return;
+        const { job } = await res.json();
+        if (!job) return;
+        applyJobState(job);
+        if (job.status === "paused" && (job.checkingEmails ?? []).length > 0) {
+          schedulePausedJobPoll(id);
+        }
+      } catch {
+        schedulePausedJobPoll(id);
+      }
+    }, 2000);
   };
 
   const connectToJobStream = (id: string, since = 0) => {
@@ -580,7 +611,15 @@ function BrowserChecker() {
         if (!res.ok) { setConnStatus("disconnected"); return; }
         const { job } = await res.json();
         if (!job) { setConnStatus("disconnected"); return; }
-        if (job.status !== "running") { applyJobState(job); setConnStatus("idle"); setIsRunning(false); return; }
+        if (job.status !== "running") {
+          applyJobState(job);
+          setConnStatus("idle");
+          setIsRunning(false);
+          if (job.status === "paused" && (job.checkingEmails ?? []).length > 0) {
+            schedulePausedJobPoll(id);
+          }
+          return;
+        }
         setReconnectedAt(new Date().toLocaleTimeString());
         connectToJobStream(id, job.eventsCount ?? 0);
       } catch { setConnStatus("disconnected"); }
@@ -604,7 +643,24 @@ function BrowserChecker() {
         if (idx !== -1) { const n = [...prev]; n[idx] = withCreds; return n; }
         return [...prev, withCreds];
       });
-    } else if (evt.type === "done" || evt.type === "cancelled") {
+    } else if (evt.type === "paused") {
+      setJobStatus("paused");
+      setPauseRequested(true);
+    } else if (evt.type === "paused_done") {
+      setJobStatus("paused");
+      setPauseRequested(false);
+      setResumeReady(true);
+      setIsRunning(false);
+      setConnStatus("idle");
+    } else if (evt.type === "resumed") {
+      setJobStatus("running");
+      setPauseRequested(false);
+      setResumeReady(false);
+      setIsRunning(true);
+    } else if (evt.type === "done" || evt.type === "cancelled" || evt.type === "interrupted") {
+      setJobStatus(evt.type);
+      setPauseRequested(false);
+      setResumeReady(false);
       setIsRunning(false); setConnStatus("idle");
     }
   };
@@ -630,6 +686,7 @@ function BrowserChecker() {
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     appendModeRef.current = false;
     setResults([]); setTotal(credentials.length); setReconnectedAt(null); setRestoredAt(null); setSelectedUnknown(new Set());
+    setJobStatus("running"); setPauseRequested(false); setResumeReady(false);
     try {
       const res = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: buildBody(credentials) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -639,9 +696,36 @@ function BrowserChecker() {
     } catch (e) { console.error("[BrowserChecker] handleCheck:", e); }
   };
 
-  const handleStop = async () => {
+  const handlePause = async () => {
     if (!jobId) return;
-    try { await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" }); } catch {}
+    setPauseRequested(true);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/pause`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (e) {
+      console.error("[BrowserChecker] pause:", e);
+      setPauseRequested(false);
+    }
+  };
+
+  const handleResume = async () => {
+    if (!jobId || !resumeReady) return;
+    setResumeReady(false);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/resume`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setJobStatus("running");
+      setIsRunning(true);
+      // The previous paused stream has closed. Reconnect from the current
+      // server event count so only new resume events are consumed.
+      const stateRes = await fetch(`/api/jobs/${jobId}`);
+      const { job } = await stateRes.json();
+      connectToJobStream(jobId, job?.eventsCount ?? 0);
+    } catch (e) {
+      console.error("[BrowserChecker] resume:", e);
+      setResumeReady(true);
+      setIsRunning(false);
+    }
   };
 
   // Hard Refresh — immediately cancels the running job on the server (stops all Chrome
@@ -695,7 +779,8 @@ function BrowserChecker() {
       const res = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: buildBody(creds) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const { jobId: id } = await res.json();
-      setJobId(id); activeJobIdRef.current = id; setIsRunning(true);
+      setJobId(id); activeJobIdRef.current = id; setJobStatus("running"); setIsRunning(true);
+      setPauseRequested(false); setResumeReady(false);
       connectToJobStream(id, 0);
     } catch (e) { console.error("[BrowserChecker] retry:", e); setTotal(t => t - creds.length); }
   };
@@ -900,8 +985,12 @@ function BrowserChecker() {
             </div>
 
             {isChecking ? (
-              <Button variant="destructive" className="w-full font-mono font-medium tracking-wide" size="lg" onClick={handleStop}>
-                <XCircle className="w-4 h-4 mr-2" />STOP CHECK
+              <Button variant="destructive" className="w-full font-mono font-medium tracking-wide" size="lg" onClick={handlePause} disabled={pauseRequested}>
+                <PauseCircle className="w-4 h-4 mr-2" />{pauseRequested ? "PAUSING…" : "PAUSE CHECK"}
+              </Button>
+            ) : resumeReady ? (
+              <Button className="w-full font-mono font-medium tracking-wide" size="lg" onClick={handleResume}>
+                <PlayCircle className="w-4 h-4 mr-2" />RESUME FROM WHERE STOPPED
               </Button>
             ) : (
               <Button className="w-full font-mono font-medium tracking-wide" size="lg"
@@ -971,6 +1060,12 @@ function BrowserChecker() {
           <div className="flex items-center justify-between rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-[11px] font-mono text-blue-400/80">
             <span>💾 Session restored from <span className="text-blue-300">{restoredAt}</span> — {results.length} results loaded</span>
             <button onClick={() => setRestoredAt(null)} className="ml-3 text-blue-400/50 hover:text-blue-400 transition-colors text-xs">✕</button>
+          </div>
+        )}
+        {jobStatus === "paused" && !isRunning && (
+          <div className="flex items-center justify-between rounded-lg border border-yellow-500/30 bg-yellow-500/5 px-3 py-2 text-[11px] font-mono text-yellow-400/80">
+            <span>⏸ Check paused — {completedCount}/{total} results saved. Pending accounts will continue from here.</span>
+            {resumeReady && <button onClick={handleResume} className="ml-3 text-yellow-300 hover:text-yellow-200 transition-colors">RESUME</button>}
           </div>
         )}
 

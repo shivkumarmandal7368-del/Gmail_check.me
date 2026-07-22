@@ -7,6 +7,8 @@
  * GET    /api/jobs/:id             Get full job state (results, progress, etc.)
  * GET    /api/jobs/:id/stream      SSE stream — replays past events then sends live ones
  *                                  Supports ?since=N to skip already-seen events
+ * POST   /api/jobs/:id/pause       Pause a running job (resumable)
+ * POST   /api/jobs/:id/resume      Resume a paused/interrupted job
  * POST   /api/jobs/:id/cancel      Cancel a running job
  *
  * IMPORTANT: /api/jobs/active MUST be registered before /api/jobs/:id so
@@ -22,7 +24,7 @@ import {
   subscribeToJob,
   type Job,
 } from "../lib/jobStore.js";
-import { startJob, abortJob } from "../lib/jobRunner.js";
+import { startJob, abortJob, pauseJob, resumeJob } from "../lib/jobRunner.js";
 
 const router: IRouter = Router();
 
@@ -135,8 +137,11 @@ router.get("/jobs/:id/stream", (req: Request, res: Response) => {
     sendEvent(event);
   }
 
+  // A paused job may still have in-flight browser tabs. Keep the stream open
+  // until the runner persists those final results and emits paused_done.
+  const pausedWithInFlight = job.status === "paused" && job.checkingEmails.length > 0;
   // If job is already finished, send a final marker and close.
-  if (job.status !== "running") {
+  if (job.status !== "running" && !pausedWithInFlight) {
     sendEvent({ type: job.status, timestamp: Date.now(), message: job.errorMessage });
     res.end();
     return;
@@ -150,6 +155,7 @@ router.get("/jobs/:id/stream", (req: Request, res: Response) => {
       event.type === "done" ||
       event.type === "error" ||
       event.type === "cancelled" ||
+      event.type === "paused_done" ||
       event.type === "interrupted"
     ) {
       setTimeout(() => { try { res.end(); } catch {} }, 150);
@@ -177,6 +183,28 @@ router.post("/jobs/:id/cancel", (req: Request, res: Response) => {
   const ok = abortJob(String(req.params.id));
   if (!ok) {
     res.status(400).json({ error: "Job is not running or not found" });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+// ── POST /jobs/:id/pause — pause without losing the resume point ──────────────
+
+router.post("/jobs/:id/pause", (req: Request, res: Response) => {
+  const ok = pauseJob(String(req.params.id));
+  if (!ok) {
+    res.status(400).json({ error: "Job is not running or not found" });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+// ── POST /jobs/:id/resume — continue accounts without saved results ──────────
+
+router.post("/jobs/:id/resume", (req: Request, res: Response) => {
+  const ok = resumeJob(String(req.params.id));
+  if (!ok) {
+    res.status(400).json({ error: "Job is not ready to resume yet" });
     return;
   }
   res.json({ ok: true });
