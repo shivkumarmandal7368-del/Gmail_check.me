@@ -993,10 +993,16 @@ function BrowserChecker() {
                 <PlayCircle className="w-4 h-4 mr-2" />RESUME FROM WHERE STOPPED
               </Button>
             ) : (
-              <Button className="w-full font-mono font-medium tracking-wide" size="lg"
-                onClick={handleCheck} disabled={!inputText.trim()}>
-                <Globe className="w-4 h-4 mr-2" />OPEN BROWSER & CHECK
-              </Button>
+              <div className="space-y-2">
+                <Button className="w-full font-mono font-medium tracking-wide" size="lg"
+                  onClick={handleCheck} disabled={!inputText.trim()}>
+                  <Globe className="w-4 h-4 mr-2" />OPEN BROWSER & CHECK
+                </Button>
+                <Button variant="outline" className="w-full font-mono text-xs tracking-wide border-yellow-500/25 text-yellow-400/50"
+                  size="sm" disabled>
+                  <PauseCircle className="w-3.5 h-3.5 mr-2" />PAUSE CHECK — START A CHECK FIRST
+                </Button>
+              </div>
             )}
             {/* Hard Refresh — always enabled; cancels running job & resets to fresh page load */}
             <Button variant="outline" size="sm" onClick={handleHardRefresh}
