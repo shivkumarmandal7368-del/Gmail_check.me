@@ -22,12 +22,12 @@ import { Progress } from "@/components/ui/progress"
 import {
   Download, Terminal, CheckCircle2, XCircle, AlertTriangle,
   HelpCircle, Activity, ShieldAlert, KeyRound, Smartphone,
-  Lock, MailCheck, MailX, RefreshCw, Globe, Loader2
+  Lock, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2
 } from "lucide-react"
 
 type SmtpFilter = "all" | "valid" | "invalid" | "disabled" | "catch_all" | "unknown";
 type Mode = "smtp" | "login" | "browser";
-type LoginList = "opened" | "not_opened" | "unknown";
+type LoginList = "opened" | "not_opened" | "delete" | "unknown";
 
 export default function Home() {
   const [mode, setMode] = useState<Mode>("smtp");
