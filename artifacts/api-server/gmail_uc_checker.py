@@ -573,6 +573,91 @@ PHONE_PROFILES = [
         "platform": "Linux aarch64",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 750",
     },
+    # ── Samsung Galaxy S-series (additional) ──────────────────────────────────
+    {
+        "model": "SM-S936B",      "androidVersion": "15",   # Samsung Galaxy S25+
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 360, "screenH": 780, "availH": 756, "dpr": 3.0,
+        "hwConcurrency": 8,  "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 830",
+    },
+    {
+        "model": "SM-S938B",      "androidVersion": "15",   # Samsung Galaxy S25 Ultra
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 384, "screenH": 854, "availH": 830, "dpr": 3.0,
+        "hwConcurrency": 8,  "deviceMemory": 16, "maxTouchPoints": 5,
+        "platform": "Linux aarch64",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 830",
+    },
+    # ── Google Pixel (additional) ─────────────────────────────────────────────
+    {
+        "model": "Pixel 8a",      "androidVersion": "14",   # Tensor G3
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
+        "hwConcurrency": 8,  "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
+    },
+    # ── OnePlus (additional) ──────────────────────────────────────────────────
+    {
+        "model": "CPH2609",       "androidVersion": "14",   # OnePlus Nord 4
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 919, "availH": 895, "dpr": 2.625,
+        "hwConcurrency": 8,  "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 735",
+    },
+    # ── Xiaomi (additional) ───────────────────────────────────────────────────
+    {
+        "model": "24129PN74G",    "androidVersion": "15",   # Xiaomi 15
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
+        "hwConcurrency": 8,  "deviceMemory": 16, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 830",
+    },
+    {
+        "model": "24117RA73G",    "androidVersion": "14",   # Redmi Note 14 Pro+
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
+        "hwConcurrency": 8,  "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 720",
+    },
+    # ── Others (additional) ───────────────────────────────────────────────────
+    {
+        "model": "A142",          "androidVersion": "14",   # Nothing Phone (2a)
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
+        "hwConcurrency": 8,  "deviceMemory": 8,  "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Mali-G610 MC4",
+    },
+    {
+        "model": "RMX3851",       "androidVersion": "14",   # Realme GT 6
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
+        "hwConcurrency": 8,  "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 735",
+    },
+    {
+        "model": "CPH2629",       "androidVersion": "14",   # Oppo Reno 12 Pro
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
+        "hwConcurrency": 8,  "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Immortalis-G720 MC12",
+    },
+    {
+        "model": "V2324A",        "androidVersion": "14",   # vivo X100 Pro
+        "chromeVersion": "138.0.7204.100",
+        "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
+        "hwConcurrency": 8,  "deviceMemory": 12, "maxTouchPoints": 5,
+        "platform": "Linux armv81",
+        "webglVendor": "ARM", "webglRenderer": "Immortalis-G720 MC12",
+    },
 ]
 
 
