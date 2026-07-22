@@ -1,4 +1,4 @@
-import React, { useState } from "react"
+import React, { useState, useEffect } from "react"
 import { useCheckEmails, useGetEmailStats, useLoginCheckEmails, useBrowserCheckEmails } from "@workspace/api-client-react"
 import type { EmailResult, EmailStats, LoginResult, BrowserLoginResult } from "@workspace/api-client-react"
 
@@ -403,17 +403,65 @@ function LoginChecker() {
 
 /* ───────────────────────── BROWSER CHECKER ───────────────────────── */
 function BrowserChecker() {
-  const [inputText, setInputText] = useState("");
-  const [proxyText, setProxyText] = useState("");
-  const [concurrency, setConcurrency] = useState(3);
-  const [freshProfile, setFreshProfile] = useState(true); // fresh device per run (default ON)
+  // ── localStorage keys ────────────────────────────────────────────────────
+  const LS = {
+    input: "vbc_input", proxy: "vbc_proxy", concurrency: "vbc_conc",
+    fresh: "vbc_fresh", results: "vbc_results", total: "vbc_total",
+    active: "vbc_active", savedAt: "vbc_saved_at",
+  } as const;
+  const lsGet = <T,>(key: string, fb: T): T => {
+    try { const v = localStorage.getItem(key); return v != null ? JSON.parse(v) : fb; } catch { return fb; }
+  };
+
+  const [inputText,    setInputText]    = useState<string>(() => lsGet(LS.input, ""));
+  const [proxyText,    setProxyText]    = useState<string>(() => lsGet(LS.proxy, ""));
+  const [concurrency,  setConcurrency]  = useState<number>(() => lsGet(LS.concurrency, 3));
+  const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, true));
+  const [activeList,   setActiveList]   = useState<"opened" | "not_opened">(() => lsGet(LS.active, "opened"));
+  const [total,        setTotal]        = useState<number>(() => lsGet(LS.total, 0));
+
+  // Restore results — convert stale "checking" → "unknown" (stream died on refresh)
+  const [results, setResults] = useState<ExtBrowserResult[]>(() =>
+    (lsGet(LS.results, []) as ExtBrowserResult[]).map(r =>
+      r.status === "checking" ? { ...r, status: "unknown" as const, reason: "Tab was closed/refreshed mid-check" } : r
+    )
+  );
+
+  // "Restored" banner — shown if results were saved from a previous session
+  const [restoredAt, setRestoredAt] = useState<string | null>(() => {
+    const at = localStorage.getItem(LS.savedAt);
+    const saved: ExtBrowserResult[] = lsGet(LS.results, []);
+    return saved.length > 0 && at ? at : null;
+  });
+
+  // Auto-save all state to localStorage on every change
+  useEffect(() => { try { localStorage.setItem(LS.input,       JSON.stringify(inputText));    } catch {} }, [inputText]);
+  useEffect(() => { try { localStorage.setItem(LS.proxy,       JSON.stringify(proxyText));    } catch {} }, [proxyText]);
+  useEffect(() => { try { localStorage.setItem(LS.concurrency, JSON.stringify(concurrency));  } catch {} }, [concurrency]);
+  useEffect(() => { try { localStorage.setItem(LS.fresh,       JSON.stringify(freshProfile)); } catch {} }, [freshProfile]);
+  useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
+  useEffect(() => { try { localStorage.setItem(LS.total,       JSON.stringify(total));        } catch {} }, [total]);
+  useEffect(() => {
+    try {
+      const toSave = results.filter(r => r.status !== "checking");
+      if (toSave.length > 0) {
+        localStorage.setItem(LS.results, JSON.stringify(toSave));
+        const ts = new Date().toLocaleTimeString();
+        localStorage.setItem(LS.savedAt, ts);
+      }
+    } catch {}
+  }, [results]);
+
+  // Hard Refresh — wipe localStorage + reset all UI state
+  const handleHardRefresh = () => {
+    Object.values(LS).forEach(k => { try { localStorage.removeItem(k); } catch {} });
+    setInputText(""); setProxyText(""); setConcurrency(3); setFreshProfile(true);
+    setResults([]); setTotal(0); setActiveList("opened"); setRestoredAt(null);
+  };
 
   const parseProxies = (text: string) =>
     text.split(/\n+/).map(l => l.trim()).filter(Boolean);
-  const [results, setResults] = useState<ExtBrowserResult[]>([]);
-  const [activeList, setActiveList] = useState<"opened" | "not_opened">("opened");
   const [isChecking, setIsChecking] = useState(false);
-  const [total, setTotal] = useState(0);
   const abortRef = React.useRef<AbortController | null>(null);
 
   const parseCredentials = (text: string) => {
@@ -693,6 +741,15 @@ function BrowserChecker() {
                 <Globe className="w-4 h-4 mr-2" />OPEN BROWSER & CHECK
               </Button>
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleHardRefresh}
+              disabled={isChecking}
+              className="w-full font-mono text-xs h-8 border-red-500/30 text-red-400/80 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/50 transition-colors"
+            >
+              <RefreshCw className="w-3 h-3 mr-1.5" />HARD REFRESH (sabka data clear)
+            </Button>
           </CardContent>
         </Card>
 
@@ -720,6 +777,15 @@ function BrowserChecker() {
 
       {/* Results */}
       <div className="lg:col-span-2 space-y-5">
+
+        {/* Session restored banner */}
+        {restoredAt && !isChecking && (
+          <div className="flex items-center justify-between rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-[11px] font-mono text-blue-400/80">
+            <span>💾 Session restored from <span className="text-blue-300">{restoredAt}</span> — {results.length} results loaded</span>
+            <button onClick={() => setRestoredAt(null)} className="ml-3 text-blue-400/50 hover:text-blue-400 transition-colors text-xs">✕</button>
+          </div>
+        )}
+
         {/* Live progress bar */}
         {(isChecking || (results.length > 0 && results.length < total)) && (
           <div className="space-y-2">
