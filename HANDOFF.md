@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 21, 2026 — Session 17_
+_Last updated: July 22, 2026 — Session 19_
 
 ---
 
@@ -1360,6 +1360,50 @@ After password submit, URL stays on `challenge/pwd` instead of navigating to TOT
    - Root cause: Session 2 reduced waits to `1500-2000ms`, then further to `700-1000ms` — proxy latency means page takes 2-4s to navigate → URL checked too early → falsely classified as `verification_required`
 
 **Next agent: run curl test first (see NEXT_AGENT_PROMPT.md), then fix whatever's still failing.**
+
+---
+
+## Session 19 Changes (July 22, 2026) — TypeScript Fixes + Full Verification
+
+### ✅ TypeScript errors fixed (all pass clean)
+
+**Files changed:**
+
+1. **`lib/api-zod/dist/`** — Built missing declaration files (`tsc -p tsconfig.json` in `lib/api-zod/`). Required by api-server typecheck via project references.
+2. **`lib/db/dist/`** — Built missing declaration files (same reason).
+3. **`artifacts/api-server/src/lib/jobStore.ts` (line 203)** — Fixed type assertion: `rest as JobResult` → `rest as unknown as JobResult` (TS2352 overlap error).
+4. **`artifacts/api-server/src/routes/emails.ts` (lines 51–55)** — Added explicit `(r: { status: string })` type to filter callbacks (TS7006 implicit any).
+5. **`artifacts/api-server/src/routes/jobs.ts` (lines 97, 108, 177)** — Changed `req.params.id!` → `String(req.params.id)` (Express 5 types `params` as `string | string[]`).
+
+**Result:** `pnpm run typecheck` passes clean (0 errors).
+
+### ✅ Session 17 Chrome session lock confirmed applied
+
+The `_CHROME_SESSION_LOCK_PATH` fix (detailed in Session 17 UNRESOLVED section) was already in the codebase:
+- Constant defined at line 32
+- Lock acquired at line 953 (before Chrome launch, after Xvfb)
+- Released at lines 988–989 (Chrome launch failure path) and 1057–1062 (main finally block)
+- This means concurrent Chrome instances are serialized — OOM kill bug is fixed
+
+### ✅ Full verification
+
+| Check | Result |
+|---|---|
+| `pnpm run typecheck` (api-server) | ✅ 0 errors |
+| `pnpm run build` (api-server) | ✅ builds in ~175ms |
+| `GET /api/healthz` | ✅ `{"status":"ok"}` |
+| `GET /api/jobs` | ✅ `{"jobs":[]}` |
+| `GET /api/jobs/active` | ✅ `{"job":null}` |
+| `POST /api/emails/check` | ✅ SMTP check working |
+| `POST /api/emails/login-check` (empty) | ✅ validation error returned |
+| `POST /api/emails/browser-check` (empty) | ✅ validation error returned |
+| `artifacts/api-server: API Server` workflow | ✅ running on port 8080 |
+| `artifacts/gmail-checker: web` workflow | ✅ running on port 5173 |
+| Background job architecture (Session 18) | ✅ all files present and functional |
+
+### ⚠️ Health route note
+
+The health route is at `/api/healthz` (not `/api/health`). This is intentional — see `health.ts`.
 
 ---
 

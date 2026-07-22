@@ -94,7 +94,7 @@ router.get("/jobs/active", (_req: Request, res: Response) => {
 // ── GET /jobs/:id — full job state ────────────────────────────────────────────
 
 router.get("/jobs/:id", (req: Request, res: Response) => {
-  const job = getJob(req.params.id!);
+  const job = getJob(String(req.params.id));
   if (!job) {
     res.status(404).json({ error: "Job not found" });
     return;
@@ -105,7 +105,7 @@ router.get("/jobs/:id", (req: Request, res: Response) => {
 // ── GET /jobs/:id/stream — SSE stream ────────────────────────────────────────
 
 router.get("/jobs/:id/stream", (req: Request, res: Response) => {
-  const job = getJob(req.params.id!);
+  const job = getJob(String(req.params.id));
   if (!job) {
     res.status(404).json({ error: "Job not found" });
     return;
@@ -174,7 +174,7 @@ router.get("/jobs/:id/stream", (req: Request, res: Response) => {
 // ── POST /jobs/:id/cancel — cancel a running job ──────────────────────────────
 
 router.post("/jobs/:id/cancel", (req: Request, res: Response) => {
-  const ok = abortJob(req.params.id!);
+  const ok = abortJob(String(req.params.id));
   if (!ok) {
     res.status(400).json({ error: "Job is not running or not found" });
     return;

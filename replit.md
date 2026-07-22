@@ -1,75 +1,65 @@
 # Vanguard MX — Gmail Bulk Checker
 
-A pnpm monorepo with a React frontend and Express API server for bulk Gmail verification using SMTP, IMAP, and browser automation.
+## Project Overview
 
-## How to Run
-
-Two workflows run in parallel (start via the **▶ Project** button):
-
-| Workflow | Command | Port |
-|---|---|---|
-| `artifacts/gmail-checker: web` | `PORT=5173 BASE_PATH=/ pnpm --filter @workspace/gmail-checker run dev` | 5173 |
-| `artifacts/api-server: API Server` | `PORT=8080 pnpm --filter @workspace/api-server run dev` | 8080 |
-
-> **Note:** PORT and BASE_PATH must be passed inline in the command — artifact.toml env injection does not apply after a GitHub import.
+**Vanguard MX** is a Gmail account bulk checker with three modes:
+- **SMTP** — basic MX/SMTP check (no credentials needed)
+- **IMAP** — direct IMAP login check
+- **Browser Check** — main feature: Selenium + undetected-chromedriver (Python), signs into Gmail via residential proxy with full antidetect fingerprinting
 
 ## Architecture
 
-```
-artifacts/
-  api-server/                        ← Express API (TypeScript, esbuild)
-    gmail_uc_checker.py              ← Python Selenium browser automation
-    src/lib/browserLoginChecker.ts   ← Node wrapper spawning Python per account
-    src/lib/imapChecker.ts           ← IMAP login checker
-    src/lib/emailVerifier.ts         ← SMTP MX verifier
-    src/routes/emails.ts             ← API routes
-  gmail-checker/                     ← React + Vite + Tailwind frontend
-    src/pages/home.tsx               ← Main UI (SMTP / IMAP / Browser tabs)
-lib/
-  api-zod/                           ← Shared Zod schemas
-  api-client-react/                  ← Generated React Query hooks
-```
+pnpm monorepo with two artifacts:
 
-## Check Modes
+| Artifact | Tech | Port |
+|---|---|---|
+| `artifacts/gmail-checker` | React + Vite frontend | 5173 |
+| `artifacts/api-server` | Express (Node) + Python Selenium backend | 8080 |
 
-1. **SMTP Check** — MX/SMTP handshake, no credentials needed
-2. **IMAP Check** — Direct IMAP login, requires email + password
-3. **Browser Check** — Selenium + undetected-chromedriver signs into Gmail
-   - Requires a residential/mobile proxy (Replit datacenter IP is blocked by Google)
-   - 28 real Android phone fingerprint profiles (antidetect)
-   - Sticky proxy sessions per account
-   - TOTP/2FA auto-entry via pyotp
-   - Concurrent checking (1–10 threads)
+Key files:
+- `artifacts/api-server/gmail_uc_checker.py` — All Python Selenium browser automation (~2200 lines)
+- `artifacts/api-server/src/lib/browserLoginChecker.ts` — Node wrapper: spawns Python, concurrency, sticky session
+- `artifacts/api-server/src/routes/emails.ts` — Express routes (SSE stream endpoint)
+- `artifacts/gmail-checker/src/pages/home.tsx` — Full React frontend
 
-## Python Dependencies
+## How to Run
 
+Both workflows are pre-configured and start automatically:
+
+- **Frontend:** `artifacts/gmail-checker: web` → `PORT=5173 BASE_PATH=/ pnpm --filter @workspace/gmail-checker run dev`
+- **API Server:** `artifacts/api-server: API Server` → `PORT=8080 pnpm --filter @workspace/api-server run dev`
+
+If workflows fail after a fresh import, restart both. If deps are missing:
 ```bash
+pnpm install
 pip install -r artifacts/api-server/requirements.txt
 ```
 
-Packages: `undetected-chromedriver`, `selenium`, `pyotp`, `requests`
+## Environment / Secrets
 
-## Test the API Directly
+No Replit secrets required. The proxy password is entered manually in the UI each time.
 
-```bash
-curl -s -X POST http://localhost:8080/api/emails/browser-check \
-  -H "Content-Type: application/json" \
-  --max-time 300 \
-  -d '{
-    "credentials":[{"email":"user@gmail.com","password":"pass","totp":"BASE32SECRET"}],
-    "proxy":"http://user:pass@rp.example.com:6060",
-    "concurrency":2,
-    "freshProfile":true
-  }'
+**Proxy format (enter in UI):**
+```
+http://USERNAME:PASSWORD@rp.scrapegw.com:6060
 ```
 
-## Important Notes
+## Credential Format
 
-- **Browser Check requires a residential proxy** — datacenter IPs are blocked by Google
-- **Chrome launch lock** — a cross-process `fcntl` file lock (`/tmp/gmail_checker_chrome_launch.lock`) serializes Chrome launches to prevent OOM crashes when running concurrent accounts
-- **Fingerprints** are saved to `/tmp/gmail_checker_profiles/<email>/fingerprint.json`; `freshProfile: true` wipes them before each run
-- Chromium is provided by Nix (`nixpkgs.geckodriver` entry; actual Chromium resolved via `which chromium`)
+```
+email:password
+email:password:BASE32_TOTP_SECRET
+```
+
+The 3rd field is the base32 TOTP secret (from Google Authenticator app setup), NOT an app password.
+
+## Known Issues
+
+- **Concurrent Chrome crash (UNRESOLVED):** When 2+ accounts check simultaneously, one may fail with `Connection refused` due to OOM. Fix documented in `HANDOFF.md` Session 17. Workaround: use concurrency=1.
+- Browser Check requires a **residential proxy** — Replit's datacenter IP is blocked by Google.
+- Each check takes 35–120 seconds per account (intentional human-like delays).
 
 ## User Preferences
 
-- Keep the existing project structure and stack
+- Keep the project's existing stack and structure.
+- HANDOFF.md is the source of truth for session history and open bugs — update it after each session.

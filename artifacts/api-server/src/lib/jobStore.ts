@@ -200,7 +200,7 @@ export function emitJobEvent(jobId: string, event: JobEvent): void {
     }
     case "result": {
       const { type: _t, timestamp: _ts, ...rest } = event;
-      job.results.push(rest as JobResult);
+      job.results.push(rest as unknown as JobResult);
       job.checkingEmails = job.checkingEmails.filter(
         e => e !== (event.email as string),
       );

@@ -48,11 +48,11 @@ router.post("/emails/stats", (req, res) => {
 
   const { results } = parsed.data;
   const total = results.length;
-  const valid = results.filter((r) => r.status === "valid").length;
-  const invalid = results.filter((r) => r.status === "invalid").length;
-  const disabled = results.filter((r) => r.status === "disabled").length;
-  const catchAll = results.filter((r) => r.status === "catch_all").length;
-  const unknown = results.filter((r) => r.status === "unknown").length;
+  const valid = results.filter((r: { status: string }) => r.status === "valid").length;
+  const invalid = results.filter((r: { status: string }) => r.status === "invalid").length;
+  const disabled = results.filter((r: { status: string }) => r.status === "disabled").length;
+  const catchAll = results.filter((r: { status: string }) => r.status === "catch_all").length;
+  const unknown = results.filter((r: { status: string }) => r.status === "unknown").length;
 
   res.json({
     total,
