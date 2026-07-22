@@ -10,4 +10,6 @@ import type { LoginCredential } from './loginCredential';
 export interface BrowserCheckInput {
   /** @maxItems 50 */
   credentials: LoginCredential[];
+  /** Proxy URL to route browser traffic through (e.g. http://user:pass@host:port or socks5://host:port) */
+  proxy?: string;
 }

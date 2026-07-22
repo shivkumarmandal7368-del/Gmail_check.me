@@ -9,6 +9,7 @@
 export * from './browserCheckInput';
 export * from './browserCheckResponse';
 export * from './browserLoginResult';
+export * from './browserLoginResultCategory';
 export * from './browserLoginResultStatus';
 export * from './emailCheckInput';
 export * from './emailCheckResponse';

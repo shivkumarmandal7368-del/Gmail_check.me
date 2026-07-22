@@ -18,9 +18,12 @@ export type BrowserLoginStatus =
   | "2fa_required"
   | "unknown";
 
+export type BrowserResultCategory = "open" | "not_open" | "delete" | "unknown";
+
 export interface BrowserLoginResult {
   email: string;
   status: BrowserLoginStatus;
+  category: BrowserResultCategory;
   reason: string;
   totpCode: string | null;
   debugScreenshot?: string;
@@ -107,6 +110,7 @@ async function checkOneAccount(
       resolve({
         email,
         status: "unknown",
+        category: "unknown",
         reason: `Browser check timed out after ${TIMEOUT_MS / 1000}s`,
         totpCode,
       });
@@ -136,6 +140,7 @@ async function checkOneAccount(
         resolve({
           email,
           status: (parsed.status as BrowserLoginStatus) ?? "unknown",
+          category: (parsed.category as BrowserResultCategory) ?? "unknown",
           reason: parsed.reason ?? "No reason returned",
           totpCode: parsed.totpCode ?? totpCode,
           debugScreenshot: parsed.debugScreenshot ?? undefined,
@@ -148,6 +153,7 @@ async function checkOneAccount(
         resolve({
           email,
           status: "unknown",
+          category: "unknown",
           reason: `Python script exited ${code} without valid JSON.\n${snippet}`,
           totpCode,
         });
@@ -159,6 +165,7 @@ async function checkOneAccount(
       resolve({
         email,
         status: "unknown",
+        category: "unknown",
         reason: `Failed to spawn Python: ${err.message}`,
         totpCode,
       });
@@ -210,6 +217,7 @@ export async function browserLoginCheck(
         const result: BrowserLoginResult = {
           email: cred.email,
           status: "unknown",
+          category: "unknown",
           reason: "Job cancelled by user",
           totpCode: null,
         };
@@ -230,6 +238,7 @@ export async function browserLoginCheck(
         (err: unknown) => ({
           email: cred.email,
           status: "unknown" as BrowserLoginStatus,
+          category: "unknown" as BrowserResultCategory,
           reason: `Browser check failed: ${err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)}`,
           totpCode: null,
         }),

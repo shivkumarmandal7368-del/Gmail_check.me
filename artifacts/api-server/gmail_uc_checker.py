@@ -54,6 +54,25 @@ def log(msg: str):
     print(f"[UC] {msg}", file=sys.stderr, flush=True)
 
 
+def browser_result_category(result: dict) -> str:
+    """Return the stable UI category for a browser-check result."""
+    status = result.get("status", "")
+    if status == "opened":
+        return "open"
+    if status != "verification_required":
+        return "unknown"
+
+    reason = str(result.get("reason", "")).lower()
+    is_delete_reason = any(marker in reason for marker in (
+        "silently bounced back to password page (automation detected)",
+        "google is asking for phone/device verification",
+        "google requires phone or device verification (verify your info to continue)",
+        "google requires phone or device verification (cannot bypass automatically)",
+        "google requires phone or device verification to continue (cannot bypass automatically)",
+    ))
+    return "delete" if is_delete_reason else "not_open"
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def rand_sleep(min_ms: int, max_ms: int):
@@ -1021,6 +1040,7 @@ def main():
         result = check_gmail(email, password, totp_secret, _retry_proxy, True, proxy_for_ip_check)
         _blocked_reason = result.get("reason", "")
 
+    result["category"] = browser_result_category(result)
     result["durationMs"] = int((time.time() - _t0) * 1000)
     log(f"{email} — Total duration: {result['durationMs']}ms ({result['durationMs']//1000}s)")
     print(json.dumps(result), flush=True)
@@ -2500,6 +2520,16 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
     # ── True final fallback ───────────────────────────────────────────────────
     shot = screenshot_b64()
+    # Google sometimes leaves the browser on the bare accounts host after a
+    # successful sign-in/interstitial. Per the checker rules, this unexpected
+    # page is an Open result rather than a verification failure.
+    if get_hostname(url) == "accounts.google.com":
+        return {
+            "status": "opened",
+            "reason": "Unexpected page: https://accounts.google.com — classified as Open",
+            "totpCode": totp_code,
+            "debugScreenshot": shot,
+        }
     return {
         "status": "unknown",
         "reason": f"Unexpected page: {url[:80]}",

@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useRef } from "react"
 import { useCheckEmails, useGetEmailStats, useLoginCheckEmails } from "@workspace/api-client-react"
 import type { EmailResult, EmailStats, LoginResult, BrowserLoginResult } from "@workspace/api-client-react"
+import { getBrowserResultCategory } from "@/lib/browserResultCategory"
 
 // Extended result type: adds "checking" in-flight status + per-account timing + original credentials
 type ExtBrowserResult = Omit<BrowserLoginResult, "status"> & {
   status: BrowserLoginResult["status"] | "checking";
+  category?: BrowserLoginResult["category"];
   durationMs?: number;
   /** Original password from input — preserved for export */
   password?: string;
@@ -706,7 +708,7 @@ function BrowserChecker() {
 
   const handleBulkRetryUnknown = () => {
     const creds = results
-      .filter(r => r.status !== "opened" && r.status !== "verification_required" && r.status !== "checking")
+      .filter(r => getBrowserResultCategory(r) === "unknown" && r.status !== "checking")
       .flatMap(r => {
         const c = credsMapRef.current[r.email];
         return c ? [{ email: r.email, password: c.password, totp: c.totpSecret }] : [];
@@ -727,7 +729,9 @@ function BrowserChecker() {
   };
 
   const selectAllUnknown = () => setSelectedUnknown(new Set(
-    results.filter(r => r.status !== "opened" && r.status !== "verification_required" && r.status !== "checking").map(r => r.email)
+    results.filter(r =>
+      getBrowserResultCategory(r) === "unknown" && r.status !== "checking"
+    ).map(r => r.email)
   ));
 
   const clearSelectionUnknown = () => setSelectedUnknown(new Set());
@@ -736,15 +740,15 @@ function BrowserChecker() {
   const isChecking = isRunning || connStatus === "connecting" || connStatus === "reconnecting";
 
   const inFlight      = results.filter(r => r.status === "checking");
-  const opened        = results.filter(r => r.status === "opened");
-  const notOpened     = results.filter(r => r.status === "verification_required");
-  const unknownList   = results.filter(r =>
-    r.status !== "opened" && r.status !== "verification_required" && r.status !== "checking"
-  );
+  const opened        = results.filter(r => getBrowserResultCategory(r) === "open");
+  const deleteList    = results.filter(r => getBrowserResultCategory(r) === "delete");
+  const notOpened     = results.filter(r => getBrowserResultCategory(r) === "not_open");
+  const unknownList   = results.filter(r => getBrowserResultCategory(r) === "unknown" && r.status !== "checking");
   const unknownRetryCount = unknownList.filter(r => !!credsMapRef.current[r.email]).length;
   const completedCount = results.filter(r => r.status !== "checking").length;
   const displayed = activeList === "opened" ? opened
     : activeList === "not_opened" ? notOpened
+    : activeList === "delete" ? deleteList
     : [...inFlight, ...unknownList];
   const progress = total > 0 ? Math.round((completedCount / total) * 100) : 0;
 
@@ -914,13 +918,13 @@ function BrowserChecker() {
         </Card>
 
         {(results.length > 0 || isChecking) && (
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
             <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "opened" ? "border-green-500/60 bg-green-500/5" : "border-border bg-card/40")}
               onClick={() => setActiveList("opened")}>
               <CardContent className="p-3 flex flex-col items-center gap-1">
                 <MailCheck className={cn("w-4 h-4", opened.length > 0 ? "text-green-400" : "text-muted-foreground/30")} />
                 <span className={cn("text-xl font-mono font-bold", opened.length > 0 ? "text-green-400" : "text-muted-foreground/30")}>{opened.length}</span>
-                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">OPENED</span>
+                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">OPEN</span>
               </CardContent>
             </Card>
             <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "not_opened" ? "border-red-500/60 bg-red-500/5" : "border-border bg-card/40")}
@@ -928,7 +932,15 @@ function BrowserChecker() {
               <CardContent className="p-3 flex flex-col items-center gap-1">
                 <MailX className={cn("w-4 h-4", notOpened.length > 0 ? "text-red-400" : "text-muted-foreground/30")} />
                 <span className={cn("text-xl font-mono font-bold", notOpened.length > 0 ? "text-red-400" : "text-muted-foreground/30")}>{notOpened.length}</span>
-                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">NOT OPENED</span>
+                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">NOT OPEN</span>
+              </CardContent>
+            </Card>
+            <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "delete" ? "border-orange-500/60 bg-orange-500/5" : "border-border bg-card/40")}
+              onClick={() => setActiveList("delete")}>
+              <CardContent className="p-3 flex flex-col items-center gap-1">
+                <Trash2 className={cn("w-4 h-4", deleteList.length > 0 ? "text-orange-400" : "text-muted-foreground/30")} />
+                <span className={cn("text-xl font-mono font-bold", deleteList.length > 0 ? "text-orange-400" : "text-muted-foreground/30")}>{deleteList.length}</span>
+                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">DELETE</span>
               </CardContent>
             </Card>
             <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "unknown" ? "border-yellow-500/60 bg-yellow-500/5" : "border-border bg-card/40")}
@@ -987,12 +999,17 @@ function BrowserChecker() {
               <button onClick={() => setActiveList("opened")}
                 className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
                   activeList === "opened" ? "bg-green-500/10 text-green-400 border-green-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
-                <MailCheck className="w-3.5 h-3.5" />OPENED ({opened.length})
+                <MailCheck className="w-3.5 h-3.5" />OPEN ({opened.length})
               </button>
               <button onClick={() => setActiveList("not_opened")}
                 className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
                   activeList === "not_opened" ? "bg-red-500/10 text-red-400 border-red-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
-                <MailX className="w-3.5 h-3.5" />NOT OPENED ({notOpened.length})
+                <MailX className="w-3.5 h-3.5" />NOT OPEN ({notOpened.length})
+              </button>
+              <button onClick={() => setActiveList("delete")}
+                className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
+                  activeList === "delete" ? "bg-orange-500/10 text-orange-400 border-orange-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
+                <Trash2 className="w-3.5 h-3.5" />DELETE ({deleteList.length})
               </button>
               <button onClick={() => setActiveList("unknown")}
                 className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
@@ -1039,7 +1056,7 @@ function BrowserChecker() {
             {results.length === 0 && !isChecking ? (
               <EmptyState icon={<Globe className="w-8 h-8 mb-3 opacity-50" />} label="AWAITING CREDENTIALS" />
             ) : displayed.length === 0 && !isChecking ? (
-              <EmptyState label={`NO ${activeList === "opened" ? "OPENED" : activeList === "not_opened" ? "FAILED" : "UNKNOWN"} ACCOUNTS`} />
+              <EmptyState label={`NO ${activeList === "opened" ? "OPEN" : activeList === "not_opened" ? "NOT OPEN" : activeList === "delete" ? "DELETE" : "UNKNOWN"} ACCOUNTS`} />
             ) : displayed.length === 0 && isChecking ? (
               <div className="h-full min-h-[200px] flex flex-col items-center justify-center text-muted-foreground font-mono text-sm p-8 opacity-60">
                 <Loader2 className="w-8 h-8 mb-3 animate-spin opacity-50" />
@@ -1138,7 +1155,7 @@ function BrowserChecker() {
                         </TableCell>
                       )}
                       <TableCell>
-                        {r.status !== "opened" && r.status !== "verification_required" && r.status !== "checking" && !isChecking ? (
+                        {getBrowserResultCategory(r) === "unknown" && r.status !== "checking" && !isChecking ? (
                           <button onClick={() => handleRetry(r.email)}
                             className="flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded border border-border hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-colors">
                             <RefreshCw className="w-2.5 h-2.5" />RETRY

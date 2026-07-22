@@ -60,13 +60,14 @@ export const BrowserCheckEmailsBody = zod.object({
   "password": zod.string(),
   "totp": zod.string().optional().describe('Base32 TOTP secret from the authenticator app setup (optional — for 2FA accounts)')
 })).max(browserCheckEmailsBodyCredentialsMax),
-  "proxy": zod.string().optional().describe('Proxy URL to route browser traffic through (e.g. http://user:pass@host:port or socks5://host:port)')
+  "proxy": zod.string().optional().describe('Proxy URL to route browser traffic through (e.g. http:\/\/user:pass@host:port or socks5:\/\/host:port)')
 })
 
 export const BrowserCheckEmailsResponse = zod.object({
   "results": zod.array(zod.object({
   "email": zod.string(),
   "status": zod.enum(['opened', 'verification_required', 'wrong_password', '2fa_required', 'unknown']).describe('opened = mailbox opened; verification_required = phone\/device verify needed; wrong_password = bad credentials; 2fa_required = 2FA code needed but not provided; unknown = error'),
+  "category": zod.enum(['open', 'not_open', 'delete', 'unknown']).optional().describe('Stable UI category: open, not_open, delete, or unknown'),
   "reason": zod.string(),
   "totpCode": zod.string().nullish()
 })),

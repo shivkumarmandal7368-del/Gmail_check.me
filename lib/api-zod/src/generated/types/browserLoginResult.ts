@@ -5,12 +5,15 @@
  * Gmail Checker API
  * OpenAPI spec version: 0.1.0
  */
+import type { BrowserLoginResultCategory } from './browserLoginResultCategory';
 import type { BrowserLoginResultStatus } from './browserLoginResultStatus';
 
 export interface BrowserLoginResult {
   email: string;
   /** opened = mailbox opened; verification_required = phone/device verify needed; wrong_password = bad credentials; 2fa_required = 2FA code needed but not provided; unknown = error */
   status: BrowserLoginResultStatus;
+  /** Stable UI category: open, not_open, delete, or unknown */
+  category?: BrowserLoginResultCategory;
   reason: string;
   /** @nullable */
   totpCode?: string | null;

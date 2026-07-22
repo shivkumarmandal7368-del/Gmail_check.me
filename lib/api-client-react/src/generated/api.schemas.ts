@@ -98,10 +98,25 @@ export const BrowserLoginResultStatus = {
   unknown: 'unknown',
 } as const;
 
+/**
+ * Stable UI category: open, not_open, delete, or unknown
+ */
+export type BrowserLoginResultCategory = typeof BrowserLoginResultCategory[keyof typeof BrowserLoginResultCategory];
+
+
+export const BrowserLoginResultCategory = {
+  open: 'open',
+  not_open: 'not_open',
+  delete: 'delete',
+  unknown: 'unknown',
+} as const;
+
 export interface BrowserLoginResult {
   email: string;
   /** opened = mailbox opened; verification_required = phone/device verify needed; wrong_password = bad credentials; 2fa_required = 2FA code needed but not provided; unknown = error */
   status: BrowserLoginResultStatus;
+  /** Stable UI category: open, not_open, delete, or unknown */
+  category?: BrowserLoginResultCategory;
   reason: string;
   /** @nullable */
   totpCode?: string | null;

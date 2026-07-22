@@ -263,6 +263,10 @@ components:
           type: string
           enum: [opened, verification_required, wrong_password, 2fa_required, unknown]
           description: "opened = mailbox opened; verification_required = phone/device verify needed; wrong_password = bad credentials; 2fa_required = 2FA code needed but not provided; unknown = error"
+        category:
+          type: string
+          enum: [open, not_open, delete, unknown]
+          description: "Stable UI category: open, not_open, delete, or unknown"
         reason:
           type: string
         totpCode:
