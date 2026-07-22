@@ -649,6 +649,20 @@ try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e
   }};
 }})();
 try{{var _tz='{tz}';var _dto=Intl.DateTimeFormat;function _dtow(l,o){{o=o||{{}};if(!o.timeZone)o.timeZone=_tz;return new _dto(l,o);}}try{{Object.keys(_dto).forEach(function(k){{_dtow[k]=_dto[k];}});}}catch(e2){{}}try{{_dtow.prototype=_dto.prototype;}}catch(e3){{}}Intl.DateTimeFormat=_dtow;}}catch(e){{}}
+(function(){{
+  try{{
+    var _origRTC=window.RTCPeerConnection;
+    if(_origRTC){{
+      window.RTCPeerConnection=function(cfg){{
+        if(cfg&&cfg.iceServers)cfg.iceServers=[];
+        return new _origRTC(cfg);
+      }};
+      window.RTCPeerConnection.prototype=_origRTC.prototype;
+    }}
+    window.webkitRTCPeerConnection=undefined;
+    window.mozRTCPeerConnection=undefined;
+  }}catch(e){{}}
+}})();
 """
 
 
