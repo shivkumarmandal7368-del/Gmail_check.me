@@ -642,20 +642,38 @@ function BrowserChecker() {
     try { await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" }); } catch {}
   };
 
-  // Hard Refresh — re-fetches server state, does NOT kill the running job
-  const handleHardRefresh = async () => {
-    if (!jobId) return;
-    setConnStatus("reconnecting");
-    try {
-      const res = await fetch(`/api/jobs/${jobId}`);
-      if (!res.ok) { setConnStatus("idle"); return; }
-      const { job } = await res.json();
-      if (!job) { setConnStatus("idle"); return; }
-      applyJobState(job);
-      setRestoredAt(new Date().toLocaleTimeString());
-      if (job.status === "running") { setReconnectedAt(new Date().toLocaleTimeString()); connectToJobStream(jobId, job.eventsCount ?? 0); }
-      else setConnStatus("idle");
-    } catch { setConnStatus("disconnected"); }
+  // Hard Refresh — completely resets application state and clears all session storage.
+  // After this, browser page reloads will also start fresh (no auto-restore).
+  // Running jobs on the server are NOT cancelled — they keep running but the UI is reset.
+  const handleHardRefresh = () => {
+    // 1. Abort any active SSE connection and pending reconnect
+    sseAbortRef.current?.abort();
+    sseAbortRef.current = null;
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
+    activeJobIdRef.current = null;
+    credsMapRef.current = {};
+
+    // 2. Clear all session/results localStorage keys so auto-restore won't fire on next page load
+    try { localStorage.removeItem(LS.results); } catch {}
+    try { localStorage.removeItem(LS.total); } catch {}
+    try { localStorage.removeItem(LS.active); } catch {}
+    try { localStorage.removeItem(LS.savedAt); } catch {}
+    try { localStorage.removeItem(LS.jobId); } catch {}
+    try { localStorage.removeItem(LS.creds); } catch {}
+
+    // 3. Reset all UI state to initial values
+    setResults([]);
+    setTotal(0);
+    setJobId(null);
+    setIsRunning(false);
+    setConnStatus("idle");
+    setReconnectedAt(null);
+    setRestoredAt(null);
+    setSelectedUnknown(new Set());
+    setActiveList("opened");
   };
 
   const startRetryJob = async (creds: Array<{ email: string; password: string; totp?: string }>) => {
@@ -989,12 +1007,9 @@ function BrowserChecker() {
               )}
               <Button variant="outline" size="sm"
                 onClick={() => download(
-                  displayed.filter(r => r.status !== "checking").map(r => {
-                    const parts = [r.email, r.password ?? ""];
-                    if (r.totpSecret) parts.push(r.totpSecret);
-                    parts.push(statusLabel(r.status));
-                    return parts.join(":");
-                  }).join("\n"),
+                  displayed.filter(r => r.status !== "checking").map(r =>
+                    [r.email, r.password ?? "", r.totpSecret ?? "", statusLabel(r.status)].join(":")
+                  ).join("\n"),
                   `gmail_${activeList}.txt`, "text/plain")}
                 disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
                 <Download className="w-3 h-3 mr-1" />.TXT
@@ -1036,13 +1051,9 @@ function BrowserChecker() {
                       </TableHead>
                     )}
                     <TableHead className="font-mono text-xs">EMAIL</TableHead>
-                    {displayed.some(r => r.password) && (
-                      <TableHead className="font-mono text-xs min-w-[110px]">PASSWORD</TableHead>
-                    )}
-                    {displayed.some(r => r.totpSecret) && (
-                      <TableHead className="font-mono text-xs min-w-[140px]">2FA SECRET</TableHead>
-                    )}
-                    <TableHead className="font-mono text-xs w-[130px]">STATUS</TableHead>
+                    <TableHead className="font-mono text-xs min-w-[110px]">PASSWORD</TableHead>
+                    <TableHead className="font-mono text-xs min-w-[140px]">2FA SECRET</TableHead>
+                    <TableHead className="font-mono text-xs w-[130px]">RESULT</TableHead>
                     <TableHead className="font-mono text-xs min-w-[160px]">REASON</TableHead>
                     {displayed.some(r => r.durationMs != null) && (
                       <TableHead className="font-mono text-xs w-[65px]">TIME</TableHead>
@@ -1072,16 +1083,12 @@ function BrowserChecker() {
                         </TableCell>
                       )}
                       <TableCell className="font-medium text-foreground/90">{r.email}</TableCell>
-                      {displayed.some(x => x.password) && (
-                        <TableCell className="font-mono text-xs text-muted-foreground max-w-[150px] truncate" title={r.password ?? ""}>
-                          {r.password ?? <span className="opacity-30">—</span>}
-                        </TableCell>
-                      )}
-                      {displayed.some(x => x.totpSecret) && (
-                        <TableCell className="font-mono text-xs text-cyan-400/80 max-w-[160px] truncate" title={r.totpSecret ?? ""}>
-                          {r.totpSecret ?? <span className="text-muted-foreground opacity-30">—</span>}
-                        </TableCell>
-                      )}
+                      <TableCell className="font-mono text-xs text-muted-foreground max-w-[150px] truncate" title={r.password ?? ""}>
+                        {r.password ?? <span className="opacity-30">—</span>}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs text-cyan-400/80 max-w-[160px] truncate" title={r.totpSecret ?? ""}>
+                        {r.totpSecret ?? <span className="text-muted-foreground opacity-30">—</span>}
+                      </TableCell>
                       <TableCell><BrowserStatusBadge status={r.status} /></TableCell>
                       <TableCell className="text-muted-foreground break-words">
                         {r.status === "checking"
