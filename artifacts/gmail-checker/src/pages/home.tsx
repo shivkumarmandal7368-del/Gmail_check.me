@@ -27,7 +27,7 @@ import {
 
 type SmtpFilter = "all" | "valid" | "invalid" | "disabled" | "catch_all" | "unknown";
 type Mode = "smtp" | "login" | "browser";
-type LoginList = "opened" | "not_opened";
+type LoginList = "opened" | "not_opened" | "unknown";
 
 export default function Home() {
   const [mode, setMode] = useState<Mode>("smtp");
@@ -422,7 +422,8 @@ function BrowserChecker() {
   const [proxyText,    setProxyText]    = useState<string>(() => lsGet(LS.proxy, ""));
   const [concurrency,  setConcurrency]  = useState<number>(() => lsGet(LS.concurrency, 3));
   const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, true));
-  const [activeList,   setActiveList]   = useState<"opened" | "not_opened">(() => lsGet(LS.active, "opened"));
+  const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
+  const [selectedUnknown, setSelectedUnknown] = useState<Set<string>>(new Set());
   const [total,        setTotal]        = useState<number>(() => lsGet(LS.total, 0));
   const [jobId,        setJobId]        = useState<string | null>(() => localStorage.getItem(LS.jobId));
   const [isRunning,    setIsRunning]    = useState(false);
@@ -626,7 +627,7 @@ function BrowserChecker() {
     sseAbortRef.current?.abort();
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     appendModeRef.current = false;
-    setResults([]); setTotal(credentials.length); setReconnectedAt(null); setRestoredAt(null);
+    setResults([]); setTotal(credentials.length); setReconnectedAt(null); setRestoredAt(null); setSelectedUnknown(new Set());
     try {
       const res = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: buildBody(credentials) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -677,25 +678,48 @@ function BrowserChecker() {
     startRetryJob([{ email, password: cred.password, totp: cred.totpSecret }]);
   };
 
-  const handleBulkRetry = () => {
-    const verifyEmails = results.filter(r => r.status === "verification_required").map(r => r.email);
-    if (verifyEmails.length === 0) return;
-    const creds = verifyEmails.flatMap(email => {
+  const handleBulkRetryUnknown = () => {
+    const creds = results
+      .filter(r => r.status !== "opened" && r.status !== "wrong_password" && r.status !== "checking")
+      .flatMap(r => {
+        const c = credsMapRef.current[r.email];
+        return c ? [{ email: r.email, password: c.password, totp: c.totpSecret }] : [];
+      });
+    if (creds.length > 0) startRetryJob(creds);
+  };
+
+  const handleRetrySelected = () => {
+    const creds = [...selectedUnknown].flatMap(email => {
       const c = credsMapRef.current[email];
       return c ? [{ email, password: c.password, totp: c.totpSecret }] : [];
     });
-    if (creds.length > 0) startRetryJob(creds);
+    if (creds.length > 0) { startRetryJob(creds); setSelectedUnknown(new Set()); }
   };
+
+  const toggleUnknownSelect = (email: string) => {
+    setSelectedUnknown(prev => { const n = new Set(prev); n.has(email) ? n.delete(email) : n.add(email); return n; });
+  };
+
+  const selectAllUnknown = () => setSelectedUnknown(new Set(
+    results.filter(r => r.status !== "opened" && r.status !== "wrong_password" && r.status !== "checking").map(r => r.email)
+  ));
+
+  const clearSelectionUnknown = () => setSelectedUnknown(new Set());
 
   // isChecking = derived (true while job is running OR SSE is connecting/reconnecting)
   const isChecking = isRunning || connStatus === "connecting" || connStatus === "reconnecting";
 
-  const inFlight = results.filter(r => r.status === "checking");
-  const opened = results.filter(r => r.status === "opened");
-  const notOpened = results.filter(r => r.status !== "opened" && r.status !== "checking");
-  const verifyCount = results.filter(r => r.status === "verification_required").length;
+  const inFlight      = results.filter(r => r.status === "checking");
+  const opened        = results.filter(r => r.status === "opened");
+  const notOpened     = results.filter(r => r.status === "wrong_password");
+  const unknownList   = results.filter(r =>
+    r.status !== "opened" && r.status !== "wrong_password" && r.status !== "checking"
+  );
+  const unknownRetryCount = unknownList.filter(r => !!credsMapRef.current[r.email]).length;
   const completedCount = results.filter(r => r.status !== "checking").length;
-  const displayed = activeList === "opened" ? opened : [...inFlight, ...notOpened];
+  const displayed = activeList === "opened" ? opened
+    : activeList === "not_opened" ? notOpened
+    : [...inFlight, ...unknownList];
   const progress = total > 0 ? Math.round((completedCount / total) * 100) : 0;
 
   const statusLabel = (status: ExtBrowserResult["status"]): string => {
@@ -864,21 +888,29 @@ function BrowserChecker() {
         </Card>
 
         {(results.length > 0 || isChecking) && (
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-3 gap-2">
             <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "opened" ? "border-green-500/60 bg-green-500/5" : "border-border bg-card/40")}
               onClick={() => setActiveList("opened")}>
-              <CardContent className="p-4 flex flex-col items-center gap-1">
-                <MailCheck className={cn("w-5 h-5", opened.length > 0 ? "text-green-400" : "text-muted-foreground/30")} />
-                <span className={cn("text-2xl font-mono font-bold", opened.length > 0 ? "text-green-400" : "text-muted-foreground/30")}>{opened.length}</span>
-                <span className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">OPENED</span>
+              <CardContent className="p-3 flex flex-col items-center gap-1">
+                <MailCheck className={cn("w-4 h-4", opened.length > 0 ? "text-green-400" : "text-muted-foreground/30")} />
+                <span className={cn("text-xl font-mono font-bold", opened.length > 0 ? "text-green-400" : "text-muted-foreground/30")}>{opened.length}</span>
+                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">OPENED</span>
               </CardContent>
             </Card>
             <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "not_opened" ? "border-red-500/60 bg-red-500/5" : "border-border bg-card/40")}
               onClick={() => setActiveList("not_opened")}>
-              <CardContent className="p-4 flex flex-col items-center gap-1">
-                <MailX className={cn("w-5 h-5", notOpened.length > 0 ? "text-red-400" : "text-muted-foreground/30")} />
-                <span className={cn("text-2xl font-mono font-bold", notOpened.length > 0 ? "text-red-400" : "text-muted-foreground/30")}>{notOpened.length}</span>
-                <span className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">NOT OPENED</span>
+              <CardContent className="p-3 flex flex-col items-center gap-1">
+                <MailX className={cn("w-4 h-4", notOpened.length > 0 ? "text-red-400" : "text-muted-foreground/30")} />
+                <span className={cn("text-xl font-mono font-bold", notOpened.length > 0 ? "text-red-400" : "text-muted-foreground/30")}>{notOpened.length}</span>
+                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">NOT OPENED</span>
+              </CardContent>
+            </Card>
+            <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "unknown" ? "border-yellow-500/60 bg-yellow-500/5" : "border-border bg-card/40")}
+              onClick={() => setActiveList("unknown")}>
+              <CardContent className="p-3 flex flex-col items-center gap-1">
+                <HelpCircle className={cn("w-4 h-4", unknownList.length > 0 ? "text-yellow-400" : "text-muted-foreground/30")} />
+                <span className={cn("text-xl font-mono font-bold", unknownList.length > 0 ? "text-yellow-400" : "text-muted-foreground/30")}>{unknownList.length}</span>
+                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">UNKNOWN</span>
               </CardContent>
             </Card>
           </div>
@@ -925,7 +957,7 @@ function BrowserChecker() {
 
         <Card className="border-border bg-card/50 min-h-[400px] flex flex-col overflow-hidden">
           <div className="border-b border-border p-3 flex items-center justify-between bg-card gap-3 flex-wrap">
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               <button onClick={() => setActiveList("opened")}
                 className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
                   activeList === "opened" ? "bg-green-500/10 text-green-400 border-green-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
@@ -934,14 +966,25 @@ function BrowserChecker() {
               <button onClick={() => setActiveList("not_opened")}
                 className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
                   activeList === "not_opened" ? "bg-red-500/10 text-red-400 border-red-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
-                <MailX className="w-3.5 h-3.5" />NOT OPENED ({notOpened.length + inFlight.length})
+                <MailX className="w-3.5 h-3.5" />NOT OPENED ({notOpened.length})
+              </button>
+              <button onClick={() => setActiveList("unknown")}
+                className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
+                  activeList === "unknown" ? "bg-yellow-500/10 text-yellow-400 border-yellow-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
+                <HelpCircle className="w-3.5 h-3.5" />UNKNOWN ({unknownList.length + inFlight.length})
               </button>
             </div>
             <div className="flex gap-1.5 flex-wrap">
-              {verifyCount > 0 && !isChecking && (
-                <Button variant="outline" size="sm" onClick={handleBulkRetry}
+              {activeList === "unknown" && selectedUnknown.size > 0 && !isChecking && (
+                <Button variant="outline" size="sm" onClick={handleRetrySelected}
                   className="font-mono text-xs h-8 px-2 border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/10">
-                  <RefreshCw className="w-3 h-3 mr-1" />RETRY ALL VERIFY ({verifyCount})
+                  <RefreshCw className="w-3 h-3 mr-1" />RETRY SELECTED ({selectedUnknown.size})
+                </Button>
+              )}
+              {activeList === "unknown" && unknownRetryCount > 0 && !isChecking && (
+                <Button variant="outline" size="sm" onClick={handleBulkRetryUnknown}
+                  className="font-mono text-xs h-8 px-2 border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/10">
+                  <RefreshCw className="w-3 h-3 mr-1" />RETRY ALL UNKNOWN ({unknownRetryCount})
                 </Button>
               )}
               <Button variant="outline" size="sm"
@@ -973,7 +1016,7 @@ function BrowserChecker() {
             {results.length === 0 && !isChecking ? (
               <EmptyState icon={<Globe className="w-8 h-8 mb-3 opacity-50" />} label="AWAITING CREDENTIALS" />
             ) : displayed.length === 0 && !isChecking ? (
-              <EmptyState label={`NO ${activeList === "opened" ? "OPENED" : "FAILED"} ACCOUNTS`} />
+              <EmptyState label={`NO ${activeList === "opened" ? "OPENED" : activeList === "not_opened" ? "FAILED" : "UNKNOWN"} ACCOUNTS`} />
             ) : displayed.length === 0 && isChecking ? (
               <div className="h-full min-h-[200px] flex flex-col items-center justify-center text-muted-foreground font-mono text-sm p-8 opacity-60">
                 <Loader2 className="w-8 h-8 mb-3 animate-spin opacity-50" />
@@ -984,6 +1027,14 @@ function BrowserChecker() {
                 <TableHeader className="bg-background/50 sticky top-0 backdrop-blur-sm z-10">
                   <TableRow className="hover:bg-transparent">
                     <TableHead className="font-mono text-xs w-[48px] text-center sticky left-0 bg-card/80 backdrop-blur-sm z-20">#</TableHead>
+                    {activeList === "unknown" && (
+                      <TableHead className="w-[36px] text-center">
+                        <input type="checkbox"
+                          checked={unknownList.length > 0 && selectedUnknown.size === unknownList.length}
+                          onChange={e => e.target.checked ? selectAllUnknown() : clearSelectionUnknown()}
+                          className="accent-yellow-400 cursor-pointer" />
+                      </TableHead>
+                    )}
                     <TableHead className="font-mono text-xs">EMAIL</TableHead>
                     {displayed.some(r => r.password) && (
                       <TableHead className="font-mono text-xs min-w-[110px]">PASSWORD</TableHead>
@@ -1012,6 +1063,14 @@ function BrowserChecker() {
                   {displayed.map((r, idx) => (
                     <TableRow key={r.email} className="font-mono text-sm">
                       <TableCell className="text-center text-muted-foreground/50 text-xs tabular-nums sticky left-0 bg-card/80 backdrop-blur-sm">{idx + 1}</TableCell>
+                      {activeList === "unknown" && (
+                        <TableCell className="text-center">
+                          <input type="checkbox"
+                            checked={selectedUnknown.has(r.email)}
+                            onChange={() => toggleUnknownSelect(r.email)}
+                            className="accent-yellow-400 cursor-pointer" />
+                        </TableCell>
+                      )}
                       <TableCell className="font-medium text-foreground/90">{r.email}</TableCell>
                       {displayed.some(x => x.password) && (
                         <TableCell className="font-mono text-xs text-muted-foreground max-w-[150px] truncate" title={r.password ?? ""}>
@@ -1064,7 +1123,7 @@ function BrowserChecker() {
                         </TableCell>
                       )}
                       <TableCell>
-                        {(r.status === "verification_required" || r.status === "unknown") && !isChecking ? (
+                        {r.status !== "opened" && r.status !== "wrong_password" && r.status !== "checking" && !isChecking ? (
                           <button onClick={() => handleRetry(r.email)}
                             className="flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded border border-border hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-colors">
                             <RefreshCw className="w-2.5 h-2.5" />RETRY

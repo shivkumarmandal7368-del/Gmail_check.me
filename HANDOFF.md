@@ -1363,6 +1363,45 @@ After password submit, URL stays on `challenge/pwd` instead of navigating to TOT
 
 ---
 
+## Session 22 Changes (July 22, 2026) — Unknown Category Split
+
+### ✅ Three-bucket result categorization in BrowserChecker
+
+Added a third **UNKNOWN** bucket, moving ambiguous statuses out of "Not Opened":
+
+| Bucket | Statuses | Color |
+|--------|----------|-------|
+| **Opened** | `opened` | Green |
+| **Not Opened** | `wrong_password` only | Red |
+| **Unknown** | `unknown`, `verification_required`, `2fa_required`, any other non-opened/non-failed status | Yellow |
+
+**Why:** "Not Opened" previously mixed definitive failures (wrong password) with recoverable states (Google blocked, 2FA needed, timeout, detection fail). Users now clearly see which accounts are dead vs which ones are worth retrying.
+
+### ✅ Changes in `artifacts/gmail-checker/src/pages/home.tsx`
+
+- **`type LoginList`**: extended to `"opened" | "not_opened" | "unknown"`
+- **`notOpened`** filter: now only `wrong_password` (definitive failure)
+- **`unknownList`** (new): everything that is not `opened`, `wrong_password`, or `checking`
+- **`displayed`**: 3-way branch on `activeList`; Unknown tab shows in-flight + unknownList
+- **`selectedUnknown`** state (`Set<string>`): per-row checkboxes for the Unknown tab
+- **Stat cards**: 3-column grid (green / red / yellow) — each card is a tab selector
+- **Tab buttons**: OPENED · NOT OPENED · UNKNOWN with matching accent colours
+- **Retry buttons** (visible only on Unknown tab):
+  - `RETRY SELECTED (N)` — retries checked rows, clears selection after
+  - `RETRY ALL UNKNOWN (N)` — retries every account in unknownList that has stored creds
+- **Checkbox column**: appears in the table header/rows only when viewing the Unknown tab; header checkbox toggles select-all / deselect-all
+- **Export (TXT / CSV / JSON)**: unchanged API, uses `displayed` → works correctly for all three tabs
+- **Per-row RETRY button**: now shown for any status that is not `opened`, `wrong_password`, or `checking` (previously only `verification_required` | `unknown`)
+- **Empty state**: "NO UNKNOWN ACCOUNTS" on the Unknown tab
+
+### ✅ Verification
+
+- `pnpm --filter @workspace/gmail-checker run typecheck`: **0 errors**
+- App loads clean, no browser console errors
+- All three workflows running
+
+---
+
 ## Session 21 Changes (July 22, 2026) — Fresh Import Setup + Critical Bug Fix
 
 ### ✅ Fresh import setup
