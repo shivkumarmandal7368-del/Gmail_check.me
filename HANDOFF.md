@@ -1363,6 +1363,34 @@ After password submit, URL stays on `challenge/pwd` instead of navigating to TOT
 
 ---
 
+## Session 23 Changes (July 22, 2026) — Corrected Result Categorization
+
+### ✅ Classification fix in BrowserChecker
+
+Corrected the three-bucket mapping to match final status labels exactly:
+
+| Section | Status filter | Badge shown |
+|---------|--------------|-------------|
+| **Opened** | `status === "opened"` | OPENED (green) |
+| **Not Opened** | `status === "verification_required"` | VERIFY (yellow) — Google verification pages |
+| **Unknown** | everything else (not `opened`, not `verification_required`, not `checking`) | UNKNOWN / BAD PASS / 2FA NEEDED / etc. |
+
+**Rules enforced:**
+- VERIFY is never classified as Unknown
+- UNKNOWN status is never classified as Not Opened
+- Each record appears in exactly one section
+
+**Changed filters** (all in `artifacts/gmail-checker/src/pages/home.tsx`):
+- `notOpened` filter: `wrong_password` → `verification_required`
+- `unknownList` filter: excludes `verification_required` instead of `wrong_password`
+- `handleBulkRetryUnknown` inline filter: same swap
+- `selectAllUnknown` inline filter: same swap
+- Per-row RETRY button: now shows for all non-opened/non-verification_required/non-checking rows (including `wrong_password`, `2fa_required`, `unknown`)
+
+**No change to:** stat card layout, tab buttons, export functions, checkboxes, or HANDOFF structure.
+
+---
+
 ## Session 22 Changes (July 22, 2026) — Unknown Category Split
 
 ### ✅ Three-bucket result categorization in BrowserChecker

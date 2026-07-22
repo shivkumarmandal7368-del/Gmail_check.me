@@ -680,7 +680,7 @@ function BrowserChecker() {
 
   const handleBulkRetryUnknown = () => {
     const creds = results
-      .filter(r => r.status !== "opened" && r.status !== "wrong_password" && r.status !== "checking")
+      .filter(r => r.status !== "opened" && r.status !== "verification_required" && r.status !== "checking")
       .flatMap(r => {
         const c = credsMapRef.current[r.email];
         return c ? [{ email: r.email, password: c.password, totp: c.totpSecret }] : [];
@@ -701,7 +701,7 @@ function BrowserChecker() {
   };
 
   const selectAllUnknown = () => setSelectedUnknown(new Set(
-    results.filter(r => r.status !== "opened" && r.status !== "wrong_password" && r.status !== "checking").map(r => r.email)
+    results.filter(r => r.status !== "opened" && r.status !== "verification_required" && r.status !== "checking").map(r => r.email)
   ));
 
   const clearSelectionUnknown = () => setSelectedUnknown(new Set());
@@ -711,9 +711,9 @@ function BrowserChecker() {
 
   const inFlight      = results.filter(r => r.status === "checking");
   const opened        = results.filter(r => r.status === "opened");
-  const notOpened     = results.filter(r => r.status === "wrong_password");
+  const notOpened     = results.filter(r => r.status === "verification_required");
   const unknownList   = results.filter(r =>
-    r.status !== "opened" && r.status !== "wrong_password" && r.status !== "checking"
+    r.status !== "opened" && r.status !== "verification_required" && r.status !== "checking"
   );
   const unknownRetryCount = unknownList.filter(r => !!credsMapRef.current[r.email]).length;
   const completedCount = results.filter(r => r.status !== "checking").length;
@@ -1123,7 +1123,7 @@ function BrowserChecker() {
                         </TableCell>
                       )}
                       <TableCell>
-                        {r.status !== "opened" && r.status !== "wrong_password" && r.status !== "checking" && !isChecking ? (
+                        {r.status !== "opened" && r.status !== "verification_required" && r.status !== "checking" && !isChecking ? (
                           <button onClick={() => handleRetry(r.email)}
                             className="flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded border border-border hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-colors">
                             <RefreshCw className="w-2.5 h-2.5" />RETRY
