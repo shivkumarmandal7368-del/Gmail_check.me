@@ -521,7 +521,8 @@ function BrowserChecker() {
     try {
       const res = await fetch(`/api/jobs/${id}`);
       if (!res.ok) { setJobId(null); return; }
-      const job = await res.json();
+      const { job } = await res.json();
+      if (!job) { setJobId(null); return; }
       applyJobState(job);
       setRestoredAt(new Date().toLocaleTimeString());
       if (job.status === "running") {
@@ -574,7 +575,8 @@ function BrowserChecker() {
       try {
         const res = await fetch(`/api/jobs/${id}`);
         if (!res.ok) { setConnStatus("disconnected"); return; }
-        const job = await res.json();
+        const { job } = await res.json();
+        if (!job) { setConnStatus("disconnected"); return; }
         if (job.status !== "running") { applyJobState(job); setConnStatus("idle"); setIsRunning(false); return; }
         setReconnectedAt(new Date().toLocaleTimeString());
         connectToJobStream(id, job.eventsCount ?? 0);
@@ -646,7 +648,8 @@ function BrowserChecker() {
     try {
       const res = await fetch(`/api/jobs/${jobId}`);
       if (!res.ok) { setConnStatus("idle"); return; }
-      const job = await res.json();
+      const { job } = await res.json();
+      if (!job) { setConnStatus("idle"); return; }
       applyJobState(job);
       setRestoredAt(new Date().toLocaleTimeString());
       if (job.status === "running") { setReconnectedAt(new Date().toLocaleTimeString()); connectToJobStream(jobId, job.eventsCount ?? 0); }
