@@ -9,7 +9,7 @@
  * On-disk:   full job state including all results and event log.
  */
 
-import { readFile, writeFile, mkdir, readdir, unlink } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, unlink, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -79,6 +79,9 @@ const jobs = new Map<string, Job>();
 /** In-memory SSE subscriber sets — not persisted */
 const subscribers = new Map<string, Set<(event: JobEvent) => void>>();
 
+/** Serialize disk writes per job so large snapshots cannot overlap or reorder. */
+const persistQueues = new Map<string, Promise<void>>();
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 /**
@@ -118,6 +121,16 @@ export async function initJobStore(): Promise<void> {
       jobs.set(job.id, job);
     } catch (e) {
       console.error(`[JobStore] Failed to load ${file}:`, e);
+      // A previous non-atomic write may have been interrupted mid-flight.
+      // Keep the original for recovery, but quarantine it so every restart
+      // does not repeatedly fail on the same broken JSON file.
+      try {
+        const quarantined = `${file}.corrupt-${Date.now()}`;
+        await rename(join(DATA_DIR, file), join(DATA_DIR, quarantined));
+        console.error(`[JobStore] Quarantined corrupt job file as ${quarantined}`);
+      } catch (quarantineError) {
+        console.error(`[JobStore] Could not quarantine ${file}:`, quarantineError);
+      }
     }
   }
 
@@ -126,13 +139,33 @@ export async function initJobStore(): Promise<void> {
 
 // ── Persistence ───────────────────────────────────────────────────────────────
 
-/** Write job state to disk (fire-and-forget; errors are logged but not thrown). */
+/**
+ * Write job state to disk (fire-and-forget; errors are logged but not thrown).
+ *
+ * Use a unique temporary file followed by rename so a server restart can
+ * never observe a partially written JSON document. Direct writeFile() calls
+ * were able to overlap for large jobs and produce concatenated JSON.
+ */
 function persistJob(job: Job): Promise<void> {
-  return writeFile(
-    join(DATA_DIR, `${job.id}.json`),
-    JSON.stringify(job),
-    "utf8",
-  ).catch(e => console.error(`[JobStore] Persist error for ${job.id}:`, e));
+  const target = join(DATA_DIR, `${job.id}.json`);
+  const snapshot = JSON.stringify(job);
+  const previous = persistQueues.get(job.id) ?? Promise.resolve();
+  const next = previous.then(async () => {
+    const temp = join(DATA_DIR, `${job.id}.json.tmp-${randomBytes(6).toString("hex")}`);
+    try {
+      await writeFile(temp, snapshot, "utf8");
+      await rename(temp, target);
+    } finally {
+      try { await unlink(temp); } catch {}
+    }
+  }).catch(e => {
+    console.error(`[JobStore] Persist error for ${job.id}:`, e);
+  });
+  persistQueues.set(job.id, next);
+  void next.then(() => {
+    if (persistQueues.get(job.id) === next) persistQueues.delete(job.id);
+  });
+  return next;
 }
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────

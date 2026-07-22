@@ -30,6 +30,60 @@ import {
 type SmtpFilter = "all" | "valid" | "invalid" | "disabled" | "catch_all" | "unknown";
 type Mode = "smtp" | "login" | "browser";
 type LoginList = "opened" | "not_opened" | "delete" | "unknown";
+type ServerStatus = "checking" | "live" | "offline";
+
+function ServerLiveButton() {
+  const [status, setStatus] = useState<ServerStatus>("checking");
+  const [lastChecked, setLastChecked] = useState<string | null>(null);
+
+  const checkServer = async (forceReconnect = false) => {
+    setStatus("checking");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch("/api/healthz", {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setStatus("live");
+      setLastChecked(new Date().toLocaleTimeString());
+      if (forceReconnect) {
+        window.dispatchEvent(new CustomEvent("vanguard-live-request"));
+      }
+    } catch {
+      setStatus("offline");
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  useEffect(() => {
+    void checkServer();
+    const timer = window.setInterval(() => void checkServer(), 15000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const statusConfig: Record<ServerStatus, { label: string; dot: string; text: string }> = {
+    checking: { label: "RECONNECTING…", dot: "bg-yellow-400 animate-pulse", text: "text-yellow-400" },
+    live: { label: "LIVE", dot: "bg-green-400", text: "text-green-400" },
+    offline: { label: "OFFLINE", dot: "bg-red-400", text: "text-red-400" },
+  };
+  const current = statusConfig[status];
+
+  return (
+    <button
+      type="button"
+      onClick={() => void checkServer(true)}
+      title={lastChecked ? `Last checked ${lastChecked}` : "Connect to the live server"}
+      className="flex items-center gap-2 text-sm text-muted-foreground bg-card px-3 py-1.5 rounded-full border border-border hover:border-primary/50 hover:text-foreground transition-colors"
+    >
+      <span className={cn("h-2 w-2 rounded-full", current.dot)} />
+      <Activity className={cn("w-4 h-4", current.text)} />
+      <span className={cn("font-mono", current.text)}>{current.label}</span>
+    </button>
+  );
+}
 
 export default function Home() {
   const [mode, setMode] = useState<Mode>("smtp");
@@ -49,10 +103,7 @@ export default function Home() {
               <p className="text-sm text-muted-foreground font-mono">SMTP + IMAP Verification</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 text-sm text-muted-foreground bg-card px-3 py-1.5 rounded-full border border-border">
-            <Activity className="w-4 h-4 text-primary" />
-            <span className="font-mono">System Online</span>
-          </div>
+          <ServerLiveButton />
         </header>
 
         {/* Mode Toggle */}
@@ -450,6 +501,7 @@ function BrowserChecker() {
   // refs
   const sseAbortRef      = useRef<AbortController | null>(null);
   const reconnectTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttempt = useRef(0);
   const pausePollTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeJobIdRef   = useRef<string | null>(jobId);
   const appendModeRef    = useRef(false);
@@ -485,6 +537,18 @@ function BrowserChecker() {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       if (pausePollTimer.current) clearTimeout(pausePollTimer.current);
     };
+  }, []);
+
+  // The header LIVE button can force an immediate health check and reconnect
+  // the persisted browser job instead of waiting for the background timer.
+  useEffect(() => {
+    const handleLiveRequest = () => {
+      const id = activeJobIdRef.current ?? localStorage.getItem(LS.jobId);
+      if (!id) return;
+      void restoreJobFromServer(id);
+    };
+    window.addEventListener("vanguard-live-request", handleLiveRequest);
+    return () => window.removeEventListener("vanguard-live-request", handleLiveRequest);
   }, []);
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -569,6 +633,7 @@ function BrowserChecker() {
   const connectToJobStream = (id: string, since = 0) => {
     sseAbortRef.current?.abort();
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    reconnectTimer.current = null;
     activeJobIdRef.current = id;
     setConnStatus("connecting");
     const abort = new AbortController();
@@ -577,6 +642,7 @@ function BrowserChecker() {
       try {
         const resp = await fetch(`/api/jobs/${id}/stream?since=${since}`, { signal: abort.signal });
         if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+        reconnectAttempt.current = 0;
         setConnStatus("connected");
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
@@ -592,7 +658,12 @@ function BrowserChecker() {
             try { handleJobEvent(JSON.parse(dataLine.slice(6))); } catch {}
           }
         }
-        setConnStatus("idle"); setIsRunning(false);
+        // A proxy/network can close an SSE body without throwing. Check the
+        // persisted job before deciding whether this was a real completion.
+        if (activeJobIdRef.current === id) {
+          setConnStatus("disconnected");
+          scheduleReconnect(id);
+        }
       } catch (err: any) {
         if (err?.name === "AbortError") return;
         console.error("[BrowserChecker] SSE:", err);
@@ -603,14 +674,26 @@ function BrowserChecker() {
   };
 
   const scheduleReconnect = (id: string) => {
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    const attempt = reconnectAttempt.current++;
+    const delay = Math.min(15000, 3000 * Math.max(1, 2 ** Math.min(attempt, 2)));
     reconnectTimer.current = setTimeout(async () => {
+      reconnectTimer.current = null;
       if (activeJobIdRef.current !== id) return;
       setConnStatus("reconnecting");
       try {
         const res = await fetch(`/api/jobs/${id}`);
-        if (!res.ok) { setConnStatus("disconnected"); return; }
+        if (!res.ok) {
+          setConnStatus("disconnected");
+          scheduleReconnect(id);
+          return;
+        }
         const { job } = await res.json();
-        if (!job) { setConnStatus("disconnected"); return; }
+        if (!job) {
+          setConnStatus("disconnected");
+          scheduleReconnect(id);
+          return;
+        }
         if (job.status !== "running") {
           applyJobState(job);
           setConnStatus("idle");
@@ -622,8 +705,11 @@ function BrowserChecker() {
         }
         setReconnectedAt(new Date().toLocaleTimeString());
         connectToJobStream(id, job.eventsCount ?? 0);
-      } catch { setConnStatus("disconnected"); }
-    }, 3000);
+      } catch {
+        setConnStatus("disconnected");
+        scheduleReconnect(id);
+      }
+    }, delay);
   };
 
   const handleJobEvent = (evt: any) => {
@@ -684,6 +770,8 @@ function BrowserChecker() {
     try { localStorage.setItem(LS.creds, JSON.stringify(newCredsMap)); } catch {}
     sseAbortRef.current?.abort();
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    reconnectTimer.current = null;
+    reconnectAttempt.current = 0;
     appendModeRef.current = false;
     setResults([]); setTotal(credentials.length); setReconnectedAt(null); setRestoredAt(null); setSelectedUnknown(new Set());
     setJobStatus("running"); setPauseRequested(false); setResumeReady(false);
@@ -738,6 +826,7 @@ function BrowserChecker() {
       clearTimeout(reconnectTimer.current);
       reconnectTimer.current = null;
     }
+    reconnectAttempt.current = 0;
 
     // 2. Cancel the server job (terminates all running Chrome/Python processes)
     const currentJobId = activeJobIdRef.current ?? jobId;
