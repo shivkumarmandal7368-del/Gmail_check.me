@@ -1816,11 +1816,45 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         # Wait for Gmail to fully load (signin/continue is an auto-redirect page)
         log(f"{email} — Waiting for Gmail redirect after TOTP…")
         _totp_redirect_early = None
+        _second_totp_done = False   # guard: only enter second TOTP once
         deadline = time.time() + 30
         while time.time() < deadline:
             url = driver.current_url
             if "mail.google.com" in get_hostname(url):
                 break
+
+            # ── Second TOTP: Google sometimes asks for TOTP twice ─────────────
+            # After first TOTP is submitted, Google may redirect back to another
+            # TOTP page (challenge/totp OR v3/signin/TL=...).  Re-enter fresh code.
+            _on_second_totp = (
+                "challenge/totp" in url
+                or "challenge/ipp" in url
+                or ("v3/signin" in url and "challenge" not in url and "v3/signin/identifier" not in url)
+            )
+            if _on_second_totp and not _second_totp_done:
+                log(f"{email} — Second TOTP page detected ({url[:60]}), entering fresh code")
+                _sec_code = generate_totp(totp_secret) if totp_secret else totp_code
+                if _sec_code:
+                    _sec_field = wait_for_any(TOTP_SELECTORS, timeout=6)
+                    if _sec_field:
+                        try:
+                            _sec_field.clear()
+                            rand_sleep(40, 80)
+                            clipboard_type(driver, _sec_field, _sec_code)
+                            rand_sleep(100, 200)
+                            _sec_field.send_keys(Keys.ENTER)
+                            log(f"{email} — Second TOTP entered: {_sec_code}")
+                            rand_sleep(700, 1200)
+                        except Exception as _ste:
+                            log(f"{email} — Second TOTP entry error: {_ste}")
+                else:
+                    # No TOTP secret — can't enter code, mark opened per user rule
+                    log(f"{email} — Second TOTP page, no secret → opened per user rule")
+                    shot = screenshot_b64()
+                    return {"status": "opened", "reason": "Mailbox opened successfully ✅", "totpCode": None, "debugScreenshot": shot}
+                _second_totp_done = True
+                continue  # restart loop with fresh URL check
+
             # ── Early exit: detect "Verify your info to continue" immediately ──
             # Any non-TOTP challenge URL = verification_required, no need to wait
             _is_hard_block = (

@@ -610,6 +610,49 @@ if not totp_code:
 
 ---
 
+## Session 17 — Part 3 (July 22, 2026) — Second TOTP request handling
+
+### Confirmed Expected Behavior (user clarification)
+For these accounts, Google ALWAYS shows the TOTP page. After entering the first TOTP code, Google sometimes shows a **second TOTP page** — this is normal and expected for these accounts. Both occurrences should result in `opened`.
+
+### Bug Found
+After first TOTP entered, the 30s redirect loop checked for Gmail but did NOT handle a second TOTP page:
+- `challenge/totp` (second time): `_is_hard_block = False` → loop waits 30s → `classify()` → returns `None` (challenge/totp not in classify's opened paths) → falls to interstitial loop → "Unexpected page" → **`unknown`**
+- `v3/signin/TL=...` (second time): 30s timeout → classify() → v3/signin check → `opened` ✅ (already worked)
+
+### Fix Applied — TOTP redirect loop (line ~1819)
+Added `_on_second_totp` detection inside the 30s post-TOTP redirect loop:
+
+```python
+_second_totp_done = False  # guard: only enter second TOTP once
+while time.time() < deadline:
+    url = driver.current_url
+    if "mail.google.com" in get_hostname(url): break
+
+    _on_second_totp = (
+        "challenge/totp" in url
+        or "challenge/ipp" in url
+        or ("v3/signin" in url and "challenge" not in url and "v3/signin/identifier" not in url)
+    )
+    if _on_second_totp and not _second_totp_done:
+        # generate fresh TOTP code and re-enter it
+        _sec_code = generate_totp(totp_secret) if totp_secret else totp_code
+        if _sec_code:
+            _sec_field = wait_for_any(TOTP_SELECTORS, timeout=6)
+            if _sec_field:
+                _sec_field.clear(); clipboard_type(...); send_keys(ENTER)
+        else:
+            return {"status": "opened", ...}  # no secret → opened per user rule
+        _second_totp_done = True
+        continue  # restart loop
+
+    # ... existing _is_hard_block and signin/continue logic ...
+```
+
+`_second_totp_done = True` guard prevents infinite loop if Google keeps showing TOTP. After second entry, flow continues normally.
+
+---
+
 ## Session 16 Changes (July 21, 2026) — v3/signin Google Authenticator page fix
 
 ### Problem
