@@ -642,29 +642,33 @@ function BrowserChecker() {
     try { await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" }); } catch {}
   };
 
-  // Hard Refresh — completely resets application state and clears all session storage.
-  // After this, browser page reloads will also start fresh (no auto-restore).
-  // Running jobs on the server are NOT cancelled — they keep running but the UI is reset.
-  const handleHardRefresh = () => {
-    // 1. Abort any active SSE connection and pending reconnect
+  // Hard Refresh — immediately cancels the running job on the server (stops all Chrome
+  // processes), then resets EVERYTHING to a pristine fresh-page-load state.
+  const handleHardRefresh = async () => {
+    // 1. Kill the SSE stream and any pending reconnect timer immediately
     sseAbortRef.current?.abort();
     sseAbortRef.current = null;
     if (reconnectTimer.current) {
       clearTimeout(reconnectTimer.current);
       reconnectTimer.current = null;
     }
+
+    // 2. Cancel the server job (terminates all running Chrome/Python processes)
+    const currentJobId = activeJobIdRef.current ?? jobId;
     activeJobIdRef.current = null;
+    if (currentJobId) {
+      try { await fetch(`/api/jobs/${currentJobId}/cancel`, { method: "POST" }); } catch {}
+    }
+
+    // 3. Wipe all LS keys — input, proxy, config, results, session — everything
+    Object.values(LS).forEach(k => { try { localStorage.removeItem(k); } catch {} });
+    try { sessionStorage.clear(); } catch {}
+
+    // 4. Clear all refs
     credsMapRef.current = {};
+    appendModeRef.current = false;
 
-    // 2. Clear all session/results localStorage keys so auto-restore won't fire on next page load
-    try { localStorage.removeItem(LS.results); } catch {}
-    try { localStorage.removeItem(LS.total); } catch {}
-    try { localStorage.removeItem(LS.active); } catch {}
-    try { localStorage.removeItem(LS.savedAt); } catch {}
-    try { localStorage.removeItem(LS.jobId); } catch {}
-    try { localStorage.removeItem(LS.creds); } catch {}
-
-    // 3. Reset all UI state to initial values
+    // 5. Reset ALL React state — identical to a fresh page load
     setResults([]);
     setTotal(0);
     setJobId(null);
@@ -674,6 +678,10 @@ function BrowserChecker() {
     setRestoredAt(null);
     setSelectedUnknown(new Set());
     setActiveList("opened");
+    setInputText("");
+    setProxyText("");
+    setConcurrency(3);
+    setFreshProfile(true);
   };
 
   const startRetryJob = async (creds: Array<{ email: string; password: string; totp?: string }>) => {
@@ -897,9 +905,9 @@ function BrowserChecker() {
                 <Globe className="w-4 h-4 mr-2" />OPEN BROWSER & CHECK
               </Button>
             )}
-            {/* Hard Refresh — re-fetches server state, does NOT kill the job */}
-            <Button variant="outline" size="sm" onClick={handleHardRefresh} disabled={!jobId || connStatus === "reconnecting"}
-              className="w-full font-mono text-xs h-8 border-blue-500/30 text-blue-400/80 hover:bg-blue-500/10 hover:text-blue-400 hover:border-blue-500/50 transition-colors">
+            {/* Hard Refresh — always enabled; cancels running job & resets to fresh page load */}
+            <Button variant="outline" size="sm" onClick={handleHardRefresh}
+              className="w-full font-mono text-xs h-8 border-red-500/30 text-red-400/80 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/50 transition-colors">
               <RefreshCw className="w-3 h-3 mr-1.5" />HARD REFRESH
             </Button>
           </CardContent>

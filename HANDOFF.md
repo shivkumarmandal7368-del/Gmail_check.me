@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 22, 2026 — Session 24_
+_Last updated: July 22, 2026 — Session 25_
 
 ---
 
@@ -1360,6 +1360,53 @@ After password submit, URL stays on `challenge/pwd` instead of navigating to TOT
    - Root cause: Session 2 reduced waits to `1500-2000ms`, then further to `700-1000ms` — proxy latency means page takes 2-4s to navigate → URL checked too early → falsely classified as `verification_required`
 
 **Next agent: run curl test first (see NEXT_AGENT_PROMPT.md), then fix whatever's still failing.**
+
+---
+
+## Session 25 Changes (July 22, 2026) — Hard Refresh: Full Reset + Cancel Job
+
+### ✅ Hard Refresh — correct full-reset implementation
+
+**Regression in Session 24:** `handleHardRefresh` did not cancel the server job (Chrome processes kept running), did not clear the input/proxy/config fields, and the button remained `disabled={!jobId || connStatus === "reconnecting"}` (old `disabled` prop was never removed). Results appeared to stop working because the API server had a port conflict (EADDRINUSE) from a stale process — the results pipeline itself was never broken.
+
+**Fixed behavior:**
+
+```
+handleHardRefresh (async):
+  1. Abort SSE stream + clear reconnect timer immediately
+  2. POST /api/jobs/{currentJobId}/cancel  →  terminates all Chrome/Python processes
+  3. localStorage.removeItem() for ALL LS keys (input, proxy, concurrency, freshProfile,
+     results, total, active, savedAt, jobId, creds)
+  4. sessionStorage.clear()
+  5. Clear credsMapRef + appendModeRef
+  6. setResults([]), setTotal(0), setJobId(null), setIsRunning(false),
+     setConnStatus("idle"), setReconnectedAt(null), setRestoredAt(null),
+     setSelectedUnknown(new Set()), setActiveList("opened"),
+     setInputText(""), setProxyText(""), setConcurrency(3), setFreshProfile(true)
+```
+
+**Button:** `disabled` prop removed entirely — always clickable, even while checking is running. Button styled red (`border-red-500/30`) to signal destructive action.
+
+### ✅ Results regression — root cause identified and fixed
+
+Results not appearing was **not a code regression** in the results pipeline. Root cause: both workflows crashed with `EADDRINUSE` (address already in use) because stale Node.js/Vite processes from the previous restart cycle were still holding ports 8080 and 5173. Fixed by killing stale processes (`fuser -k`) and restarting both workflows cleanly.
+
+The SSE stream, `handleJobEvent`, `connectToJobStream`, and `applyJobState` functions were never modified and are intact.
+
+### ✅ Verification
+
+| Check | Result |
+|-------|--------|
+| `pnpm --filter @workspace/gmail-checker run typecheck` | ✅ 0 errors |
+| `GET /api/healthz` | ✅ `{"status":"ok"}` |
+| `POST /api/jobs` (create job) | ✅ returns jobId |
+| `POST /api/jobs/{id}/cancel` | ✅ `{"ok":true}` |
+| Hard Refresh button always enabled | ✅ no `disabled` prop |
+| Hard Refresh cancels server job | ✅ sends cancel request |
+| Hard Refresh clears input + proxy + config | ✅ |
+| Hard Refresh clears all localStorage + sessionStorage | ✅ |
+| Hard Refresh resets all UI state | ✅ |
+| Both workflows running cleanly | ✅ |
 
 ---
 
