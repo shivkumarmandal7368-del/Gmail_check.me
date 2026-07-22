@@ -1363,6 +1363,48 @@ After password submit, URL stays on `challenge/pwd` instead of navigating to TOT
 
 ---
 
+## Session 18 Changes (July 22, 2026) — Background Execution & Session Persistence
+
+### ✅ True Background Job Architecture
+
+Jobs now run entirely on the server — browser tab close, phone lock, network drop, or full page refresh never stops a running check.
+
+#### New files
+
+| File | Purpose |
+|---|---|
+| `artifacts/api-server/src/lib/jobStore.ts` | File-backed persistent job store. Each job saved to `.job-data/{id}.json`. On server restart, `running` jobs become `interrupted` (partial results preserved). SSE pub/sub per job. |
+| `artifacts/api-server/src/lib/jobRunner.ts` | Starts `browserLoginCheck()` fire-and-forget. Returns `jobId` immediately. `AbortController` per job for cancellation. |
+| `artifacts/api-server/src/routes/jobs.ts` | REST + SSE routes: `POST /api/jobs`, `GET /api/jobs/active`, `GET /api/jobs/:id`, `GET /api/jobs/:id/stream?since=N`, `POST /api/jobs/:id/cancel`. Route order: `/active` registered before `/:id`. |
+
+#### Modified files
+
+| File | What changed |
+|---|---|
+| `artifacts/api-server/src/routes/index.ts` | Added `jobsRouter` |
+| `artifacts/api-server/src/app.ts` | Added `initJobStore()` on startup (recovery of interrupted jobs) |
+| `artifacts/api-server/src/lib/browserLoginChecker.ts` | Added `signal?: AbortSignal` as 8th param. Checked before each account starts — returns `cancelled` result if aborted. |
+| `artifacts/gmail-checker/src/pages/home.tsx` | Full `BrowserChecker` rewrite. New job-based flow (see below). |
+| `.gitignore` | Added `.job-data/` |
+
+#### Frontend reconnect flow (`BrowserChecker`)
+
+- On mount: reads `vbc_job_id` from localStorage → fetches `GET /api/jobs/:id` → merges results + `checkingEmails` placeholders → if still running, opens SSE with `?since=eventsCount`
+- **Hard Refresh button**: re-fetches server state and reconnects SSE — does NOT kill the job (previously wiped all data)
+- Auto-reconnect: on SSE disconnect, waits 3s → re-fetches job state → reconnects if still running
+- Connection status indicator in card header: `idle | connecting | connected | reconnecting | disconnected`
+- "🔄 Reconnected to running job at {time}" banner when rejoining
+- `localStorage` key `vbc_job_id` added alongside existing keys
+
+#### Key architectural notes
+
+- `GET /api/jobs/:id/stream?since=N` replays events from index N — frontend passes `eventsCount` from REST fetch so reconnect never replays duplicates
+- Job data directory: `artifacts/api-server/.job-data/` (relative to `process.cwd()` = `artifacts/api-server/` at runtime)
+- `isChecking` is now derived state (`isRunning || connStatus === "connecting" || connStatus === "reconnecting"`) — not a separate `useState`
+- Old `/api/emails/browser-check-stream` endpoint untouched (SMTP/IMAP paths unaffected)
+
+---
+
 ## What's Next (Future Work)
 
 1. **Proxy health pre-flight** — ping proxy before starting batch, warn if dead/slow  

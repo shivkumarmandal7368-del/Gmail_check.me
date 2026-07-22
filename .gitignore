@@ -47,3 +47,6 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Job store — server-side background job persistence (runtime state, not source code)
+.job-data/

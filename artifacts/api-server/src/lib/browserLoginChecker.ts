@@ -194,6 +194,7 @@ export async function browserLoginCheck(
   proxies?: string[],          // rotation list — one proxy per account (round-robin)
   freshProfile = false,        // wipe Chrome profile + fingerprint before each check
   onAccountStart?: (email: string) => void,  // fires just before Python spawns (for SSE "checking" badge)
+  signal?: AbortSignal,        // abort signal — checked before each new account starts
 ): Promise<BrowserLoginResult[]> {
   // Proxy selection: rotation list takes priority over single proxy
   const getProxy = (idx: number): string | undefined => {
@@ -203,6 +204,19 @@ export async function browserLoginCheck(
 
   const tasks = credentials.map(
     (cred, idx) => async () => {
+      // Check abort signal before starting a new account.
+      // Accounts already in-flight will run to completion.
+      if (signal?.aborted) {
+        const result: BrowserLoginResult = {
+          email: cred.email,
+          status: "unknown",
+          reason: "Job cancelled by user",
+          totpCode: null,
+        };
+        onAccountComplete?.(result);
+        return result;
+      }
+
       const baseProxy = getProxy(idx);
       // Inject a unique sticky-session ID so the entire Chrome login for this
       // account uses ONE fixed exit IP. Without this, a rotating proxy changes

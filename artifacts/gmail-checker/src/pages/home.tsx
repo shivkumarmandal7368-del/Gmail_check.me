@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from "react"
-import { useCheckEmails, useGetEmailStats, useLoginCheckEmails, useBrowserCheckEmails } from "@workspace/api-client-react"
+import React, { useState, useEffect, useRef } from "react"
+import { useCheckEmails, useGetEmailStats, useLoginCheckEmails } from "@workspace/api-client-react"
 import type { EmailResult, EmailStats, LoginResult, BrowserLoginResult } from "@workspace/api-client-react"
 
 // Extended result type: adds "checking" in-flight status + per-account timing
@@ -407,7 +407,7 @@ function BrowserChecker() {
   const LS = {
     input: "vbc_input", proxy: "vbc_proxy", concurrency: "vbc_conc",
     fresh: "vbc_fresh", results: "vbc_results", total: "vbc_total",
-    active: "vbc_active", savedAt: "vbc_saved_at",
+    active: "vbc_active", savedAt: "vbc_saved_at", jobId: "vbc_job_id",
   } as const;
   const lsGet = <T,>(key: string, fb: T): T => {
     try { const v = localStorage.getItem(key); return v != null ? JSON.parse(v) : fb; } catch { return fb; }
@@ -419,53 +419,62 @@ function BrowserChecker() {
   const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, true));
   const [activeList,   setActiveList]   = useState<"opened" | "not_opened">(() => lsGet(LS.active, "opened"));
   const [total,        setTotal]        = useState<number>(() => lsGet(LS.total, 0));
+  const [jobId,        setJobId]        = useState<string | null>(() => localStorage.getItem(LS.jobId));
+  const [isRunning,    setIsRunning]    = useState(false);
+  const [connStatus,   setConnStatus]   = useState<"idle"|"connecting"|"connected"|"reconnecting"|"disconnected">("idle");
+  const [reconnectedAt, setReconnectedAt] = useState<string | null>(null);
 
-  // Restore results — convert stale "checking" → "unknown" (stream died on refresh)
   const [results, setResults] = useState<ExtBrowserResult[]>(() =>
     (lsGet(LS.results, []) as ExtBrowserResult[]).map(r =>
       r.status === "checking" ? { ...r, status: "unknown" as const, reason: "Tab was closed/refreshed mid-check" } : r
     )
   );
 
-  // "Restored" banner — shown if results were saved from a previous session
   const [restoredAt, setRestoredAt] = useState<string | null>(() => {
     const at = localStorage.getItem(LS.savedAt);
     const saved: ExtBrowserResult[] = lsGet(LS.results, []);
     return saved.length > 0 && at ? at : null;
   });
 
-  // Auto-save all state to localStorage on every change
+  // refs
+  const sseAbortRef      = useRef<AbortController | null>(null);
+  const reconnectTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeJobIdRef   = useRef<string | null>(jobId);
+  const appendModeRef    = useRef(false);
+
+  // ── Auto-save ─────────────────────────────────────────────────────────────
   useEffect(() => { try { localStorage.setItem(LS.input,       JSON.stringify(inputText));    } catch {} }, [inputText]);
   useEffect(() => { try { localStorage.setItem(LS.proxy,       JSON.stringify(proxyText));    } catch {} }, [proxyText]);
   useEffect(() => { try { localStorage.setItem(LS.concurrency, JSON.stringify(concurrency));  } catch {} }, [concurrency]);
   useEffect(() => { try { localStorage.setItem(LS.fresh,       JSON.stringify(freshProfile)); } catch {} }, [freshProfile]);
   useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
   useEffect(() => { try { localStorage.setItem(LS.total,       JSON.stringify(total));        } catch {} }, [total]);
+  useEffect(() => { try { if (jobId) localStorage.setItem(LS.jobId, jobId); else localStorage.removeItem(LS.jobId); } catch {} }, [jobId]);
   useEffect(() => {
     try {
       const toSave = results.filter(r => r.status !== "checking");
       if (toSave.length > 0) {
         localStorage.setItem(LS.results, JSON.stringify(toSave));
-        const ts = new Date().toLocaleTimeString();
-        localStorage.setItem(LS.savedAt, ts);
+        localStorage.setItem(LS.savedAt, new Date().toLocaleTimeString());
       }
     } catch {}
   }, [results]);
 
-  // Hard Refresh — wipe localStorage + reset all UI state
-  const handleHardRefresh = () => {
-    Object.values(LS).forEach(k => { try { localStorage.removeItem(k); } catch {} });
-    setInputText(""); setProxyText(""); setConcurrency(3); setFreshProfile(true);
-    setResults([]); setTotal(0); setActiveList("opened"); setRestoredAt(null);
-  };
+  // ── On mount: restore from server ────────────────────────────────────────
+  useEffect(() => {
+    const saved = localStorage.getItem(LS.jobId);
+    if (saved) restoreJobFromServer(saved);
+    return () => {
+      sseAbortRef.current?.abort();
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    };
+  }, []);
 
-  const parseProxies = (text: string) =>
-    text.split(/\n+/).map(l => l.trim()).filter(Boolean);
-  const [isChecking, setIsChecking] = useState(false);
-  const abortRef = React.useRef<AbortController | null>(null);
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  const parseProxies = (text: string) => text.split(/\n+/).map(l => l.trim()).filter(Boolean);
 
-  const parseCredentials = (text: string) => {
-    return text.split(/\n+/).map(l => l.trim()).filter(Boolean).map(line => {
+  const parseCredentials = (text: string) =>
+    text.split(/\n+/).map(l => l.trim()).filter(Boolean).map(line => {
       const parts = line.split(":");
       if (parts.length < 2) return null;
       const email = parts[0].trim();
@@ -475,116 +484,181 @@ function BrowserChecker() {
       if (!email || !password) return null;
       return { email, password, ...(totp ? { totp } : {}) };
     }).filter(Boolean) as Array<{ email: string; password: string; totp?: string }>;
+
+  const applyJobState = (job: any) => {
+    setResults(prev => {
+      const merged = [...prev];
+      for (const r of (job.results ?? [])) {
+        const idx = merged.findIndex(x => x.email === r.email);
+        if (idx !== -1) merged[idx] = r; else merged.push(r);
+      }
+      for (const email of (job.checkingEmails ?? [])) {
+        if (!merged.some(x => x.email === email))
+          merged.push({ email, status: "checking" as const, reason: "Browser running…", totpCode: null });
+      }
+      return merged;
+    });
+    setTotal(t => Math.max(t, job.total ?? 0));
+    setIsRunning(job.status === "running");
   };
 
-  const runStream = async (credentials: Array<{ email: string; password: string; totp?: string }>, appendResults: boolean) => {
-    const abort = new AbortController();
-    abortRef.current = abort;
-
-    if (!appendResults) {
-      setResults([]);
-    }
-    setIsChecking(true);
-    setTotal(prev => appendResults ? prev : credentials.length);
-
-    const proxies = parseProxies(proxyText);
-
+  const restoreJobFromServer = async (id: string) => {
     try {
-      const resp = await fetch("/api/emails/browser-check-stream", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          credentials,
-          ...(proxies.length > 1
-            ? { proxies }
-            : proxies.length === 1
-              ? { proxy: proxies[0] }
-              : {}),
-          concurrency,
-          freshProfile,
-        }),
-        signal: abort.signal,
-      });
-
-      if (!resp.ok || !resp.body) {
-        throw new Error(`HTTP ${resp.status}`);
+      const res = await fetch(`/api/jobs/${id}`);
+      if (!res.ok) { setJobId(null); return; }
+      const job = await res.json();
+      applyJobState(job);
+      setRestoredAt(new Date().toLocaleTimeString());
+      if (job.status === "running") {
+        setReconnectedAt(new Date().toLocaleTimeString());
+        connectToJobStream(id, job.eventsCount ?? 0);
       }
+    } catch (e) { console.error("[BrowserChecker] restore:", e); }
+  };
 
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const blocks = buf.split("\n\n");
-        buf = blocks.pop() ?? "";
-        for (const block of blocks) {
-          const dataLine = block.split("\n").find(l => l.startsWith("data: "));
-          if (!dataLine) continue;
-          try {
-            const evt = JSON.parse(dataLine.slice(6));
-            if (evt.type === "started") {
-              setTotal(appendResults ? ((t: number) => t + evt.total) : evt.total);
-            } else if (evt.type === "checking") {
-              // Account just started — show spinner placeholder in table
-              setResults(prev => {
-                if (prev.some(r => r.email === evt.email)) return prev;
-                return [...prev, { email: evt.email, status: "checking" as const, reason: "Browser running…", totpCode: null }];
-              });
-            } else if (evt.type === "result") {
-              const { type: _t, ...result } = evt;
-              setResults(prev => {
-                // Replace existing entry for this email (checking placeholder / retry), or append
-                const idx = prev.findIndex(r => r.email === result.email);
-                if (idx !== -1) {
-                  const next = [...prev];
-                  next[idx] = result as ExtBrowserResult;
-                  return next;
-                }
-                return [...prev, result as ExtBrowserResult];
-              });
-            }
-          } catch {}
+  const connectToJobStream = (id: string, since = 0) => {
+    sseAbortRef.current?.abort();
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    activeJobIdRef.current = id;
+    setConnStatus("connecting");
+    const abort = new AbortController();
+    sseAbortRef.current = abort;
+    (async () => {
+      try {
+        const resp = await fetch(`/api/jobs/${id}/stream?since=${since}`, { signal: abort.signal });
+        if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+        setConnStatus("connected");
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const blocks = buf.split("\n\n"); buf = blocks.pop() ?? "";
+          for (const block of blocks) {
+            const dataLine = block.split("\n").find(l => l.startsWith("data: "));
+            if (!dataLine) continue;
+            try { handleJobEvent(JSON.parse(dataLine.slice(6))); } catch {}
+          }
         }
+        setConnStatus("idle"); setIsRunning(false);
+      } catch (err: any) {
+        if (err?.name === "AbortError") return;
+        console.error("[BrowserChecker] SSE:", err);
+        setConnStatus("disconnected");
+        if (activeJobIdRef.current === id) scheduleReconnect(id);
       }
-    } catch (err: any) {
-      if (err?.name !== "AbortError") console.error("[BrowserChecker]", err);
-    } finally {
-      setIsChecking(false);
-      abortRef.current = null;
+    })();
+  };
+
+  const scheduleReconnect = (id: string) => {
+    reconnectTimer.current = setTimeout(async () => {
+      if (activeJobIdRef.current !== id) return;
+      setConnStatus("reconnecting");
+      try {
+        const res = await fetch(`/api/jobs/${id}`);
+        if (!res.ok) { setConnStatus("disconnected"); return; }
+        const job = await res.json();
+        if (job.status !== "running") { applyJobState(job); setConnStatus("idle"); setIsRunning(false); return; }
+        setReconnectedAt(new Date().toLocaleTimeString());
+        connectToJobStream(id, job.eventsCount ?? 0);
+      } catch { setConnStatus("disconnected"); }
+    }, 3000);
+  };
+
+  const handleJobEvent = (evt: any) => {
+    if (evt.type === "checking") {
+      setResults(prev => prev.some(r => r.email === evt.email) ? prev :
+        [...prev, { email: evt.email, status: "checking" as const, reason: "Browser running…", totpCode: null }]);
+    } else if (evt.type === "result") {
+      const { type: _t, ...result } = evt;
+      setResults(prev => {
+        const idx = prev.findIndex(r => r.email === result.email);
+        if (idx !== -1) { const n = [...prev]; n[idx] = result as ExtBrowserResult; return n; }
+        return [...prev, result as ExtBrowserResult];
+      });
+    } else if (evt.type === "done" || evt.type === "cancelled") {
+      setIsRunning(false); setConnStatus("idle");
     }
   };
 
-  const handleCheck = () => {
+  const buildBody = (creds: Array<{ email: string; password: string; totp?: string }>) => {
+    const proxies = parseProxies(proxyText);
+    return JSON.stringify({
+      credentials: creds,
+      ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
+      concurrency, freshProfile,
+    });
+  };
+
+  const handleCheck = async () => {
     const credentials = parseCredentials(inputText);
     if (credentials.length === 0) return;
-    runStream(credentials, false);
+    sseAbortRef.current?.abort();
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    appendModeRef.current = false;
+    setResults([]); setTotal(credentials.length); setReconnectedAt(null); setRestoredAt(null);
+    try {
+      const res = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: buildBody(credentials) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { jobId: id } = await res.json();
+      setJobId(id); activeJobIdRef.current = id; setIsRunning(true);
+      connectToJobStream(id, 0);
+    } catch (e) { console.error("[BrowserChecker] handleCheck:", e); }
   };
 
-  const handleStop = () => {
-    abortRef.current?.abort();
+  const handleStop = async () => {
+    if (!jobId) return;
+    try { await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" }); } catch {}
+  };
+
+  // Hard Refresh — re-fetches server state, does NOT kill the running job
+  const handleHardRefresh = async () => {
+    if (!jobId) return;
+    setConnStatus("reconnecting");
+    try {
+      const res = await fetch(`/api/jobs/${jobId}`);
+      if (!res.ok) { setConnStatus("idle"); return; }
+      const job = await res.json();
+      applyJobState(job);
+      setRestoredAt(new Date().toLocaleTimeString());
+      if (job.status === "running") { setReconnectedAt(new Date().toLocaleTimeString()); connectToJobStream(jobId, job.eventsCount ?? 0); }
+      else setConnStatus("idle");
+    } catch { setConnStatus("disconnected"); }
+  };
+
+  const startRetryJob = async (creds: Array<{ email: string; password: string; totp?: string }>) => {
+    sseAbortRef.current?.abort();
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    appendModeRef.current = true;
+    setTotal(t => t + creds.length);
+    try {
+      const res = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: buildBody(creds) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { jobId: id } = await res.json();
+      setJobId(id); activeJobIdRef.current = id; setIsRunning(true);
+      connectToJobStream(id, 0);
+    } catch (e) { console.error("[BrowserChecker] retry:", e); setTotal(t => t - creds.length); }
   };
 
   const handleRetry = (email: string) => {
     const line = inputText.split(/\n+/).find(l => l.trim().startsWith(email + ":"));
     if (!line) return;
     const cred = parseCredentials(line);
-    if (cred.length === 0) return;
-    runStream(cred, true);
+    if (cred.length > 0) startRetryJob(cred);
   };
 
   const handleBulkRetry = () => {
-    const verifyEmails = results
-      .filter(r => r.status === "verification_required")
-      .map(r => r.email);
+    const verifyEmails = results.filter(r => r.status === "verification_required").map(r => r.email);
     if (verifyEmails.length === 0) return;
     const lines = inputText.split(/\n+/).filter(l => verifyEmails.some(e => l.trim().startsWith(e + ":")));
     const creds = parseCredentials(lines.join("\n"));
-    if (creds.length === 0) return;
-    runStream(creds, true);
+    if (creds.length > 0) startRetryJob(creds);
   };
+
+  // isChecking = derived (true while job is running OR SSE is connecting/reconnecting)
+  const isChecking = isRunning || connStatus === "connecting" || connStatus === "reconnecting";
 
   const inFlight = results.filter(r => r.status === "checking");
   const opened = results.filter(r => r.status === "opened");
@@ -606,6 +680,15 @@ function BrowserChecker() {
     download(JSON.stringify(rows, null, 2), name + ".json", "application/json");
   };
 
+  // Connection status indicator text/colour
+  const connLabel: Record<typeof connStatus, { text: string; cls: string }> = {
+    idle:         { text: "",                    cls: "" },
+    connecting:   { text: "⟳ Connecting…",      cls: "text-blue-400/70" },
+    connected:    { text: "● Live",              cls: "text-green-400" },
+    reconnecting: { text: "⟳ Reconnecting…",    cls: "text-yellow-400" },
+    disconnected: { text: "✕ Disconnected",      cls: "text-red-400/70" },
+  };
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
       {/* Input */}
@@ -614,6 +697,11 @@ function BrowserChecker() {
           <CardHeader className="pb-2">
             <CardTitle className="text-xs font-mono uppercase tracking-wider text-muted-foreground flex items-center gap-2">
               <Globe className="w-3.5 h-3.5 text-primary" />Browser Login Check
+              {connStatus !== "idle" && (
+                <span className={cn("ml-auto text-[10px] font-mono", connLabel[connStatus].cls)}>
+                  {connLabel[connStatus].text}
+                </span>
+              )}
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -649,9 +737,7 @@ function BrowserChecker() {
                     <>
                       <p className="font-semibold">🔀 {count} proxies loaded — rotation active</p>
                       <p className="text-green-300/70">
-                        {creds > 0
-                          ? `${creds} accounts → ${count} proxies (round-robin)`
-                          : "Har account ko alag IP milegi (round-robin)"}
+                        {creds > 0 ? `${creds} accounts → ${count} proxies (round-robin)` : "Har account ko alag IP milegi (round-robin)"}
                       </p>
                     </>
                   )}
@@ -680,47 +766,29 @@ function BrowserChecker() {
                 <Activity className="w-3 h-3" /> Concurrent Threads
               </label>
               <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setConcurrency(c => Math.max(1, c - 1))}
-                  disabled={isChecking || concurrency <= 1}
+                <button onClick={() => setConcurrency(c => Math.max(1, c - 1))} disabled={isChecking || concurrency <= 1}
                   className="w-8 h-8 rounded border border-border bg-card text-sm font-mono font-bold hover:bg-muted/50 disabled:opacity-30 transition-colors">−</button>
                 <div className="flex-1 text-center font-mono text-lg font-bold text-primary">{concurrency}</div>
-                <button
-                  onClick={() => setConcurrency(c => Math.min(10, c + 1))}
-                  disabled={isChecking || concurrency >= 10}
+                <button onClick={() => setConcurrency(c => Math.min(10, c + 1))} disabled={isChecking || concurrency >= 10}
                   className="w-8 h-8 rounded border border-border bg-card text-sm font-mono font-bold hover:bg-muted/50 disabled:opacity-30 transition-colors">+</button>
               </div>
               <p className="text-[10px] text-muted-foreground/60 font-mono text-center">{concurrency} browser{concurrency > 1 ? "s" : ""} simultaneously (1–10)</p>
             </div>
 
             {/* Fresh device toggle */}
-            <button
-              onClick={() => !isChecking && setFreshProfile(f => !f)}
-              disabled={isChecking}
-              className={cn(
-                "w-full rounded-lg border p-3 text-left transition-colors",
-                freshProfile
-                  ? "border-blue-500/40 bg-blue-500/5"
-                  : "border-border bg-card/30 opacity-60"
-              )}>
+            <button onClick={() => !isChecking && setFreshProfile(f => !f)} disabled={isChecking}
+              className={cn("w-full rounded-lg border p-3 text-left transition-colors",
+                freshProfile ? "border-blue-500/40 bg-blue-500/5" : "border-border bg-card/30 opacity-60")}>
               <div className="flex items-center justify-between mb-1">
                 <span className="text-[10px] font-mono uppercase tracking-widest text-blue-400/80 flex items-center gap-1">
                   <Smartphone className="w-3 h-3" /> Fresh Device Per Run
                 </span>
-                <div className={cn(
-                  "w-8 h-4 rounded-full transition-colors relative",
-                  freshProfile ? "bg-blue-500" : "bg-border"
-                )}>
-                  <div className={cn(
-                    "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
-                    freshProfile ? "left-4" : "left-0.5"
-                  )} />
+                <div className={cn("w-8 h-4 rounded-full transition-colors relative", freshProfile ? "bg-blue-500" : "bg-border")}>
+                  <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", freshProfile ? "left-4" : "left-0.5")} />
                 </div>
               </div>
               <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
-                {freshProfile
-                  ? "✓ Har run mein naya device — Chrome profile + fingerprint wipe hoga"
-                  : "Same device reuse hoga (faster second check)"}
+                {freshProfile ? "✓ Har run mein naya device — Chrome profile + fingerprint wipe hoga" : "Same device reuse hoga (faster second check)"}
               </p>
             </button>
 
@@ -741,14 +809,10 @@ function BrowserChecker() {
                 <Globe className="w-4 h-4 mr-2" />OPEN BROWSER & CHECK
               </Button>
             )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleHardRefresh}
-              disabled={isChecking}
-              className="w-full font-mono text-xs h-8 border-red-500/30 text-red-400/80 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/50 transition-colors"
-            >
-              <RefreshCw className="w-3 h-3 mr-1.5" />HARD REFRESH (sabka data clear)
+            {/* Hard Refresh — re-fetches server state, does NOT kill the job */}
+            <Button variant="outline" size="sm" onClick={handleHardRefresh} disabled={!jobId || connStatus === "reconnecting"}
+              className="w-full font-mono text-xs h-8 border-blue-500/30 text-blue-400/80 hover:bg-blue-500/10 hover:text-blue-400 hover:border-blue-500/50 transition-colors">
+              <RefreshCw className="w-3 h-3 mr-1.5" />HARD REFRESH
             </Button>
           </CardContent>
         </Card>
@@ -778,8 +842,16 @@ function BrowserChecker() {
       {/* Results */}
       <div className="lg:col-span-2 space-y-5">
 
+        {/* Reconnected to running job banner */}
+        {reconnectedAt && isRunning && (
+          <div className="flex items-center justify-between rounded-lg border border-green-500/30 bg-green-500/5 px-3 py-2 text-[11px] font-mono text-green-400/80">
+            <span>🔄 Reconnected to running job at <span className="text-green-300">{reconnectedAt}</span> — {completedCount}/{total} done</span>
+            <button onClick={() => setReconnectedAt(null)} className="ml-3 text-green-400/50 hover:text-green-400 transition-colors text-xs">✕</button>
+          </div>
+        )}
+
         {/* Session restored banner */}
-        {restoredAt && !isChecking && (
+        {restoredAt && !isRunning && (
           <div className="flex items-center justify-between rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-[11px] font-mono text-blue-400/80">
             <span>💾 Session restored from <span className="text-blue-300">{restoredAt}</span> — {results.length} results loaded</span>
             <button onClick={() => setRestoredAt(null)} className="ml-3 text-blue-400/50 hover:text-blue-400 transition-colors text-xs">✕</button>
@@ -799,7 +871,7 @@ function BrowserChecker() {
             <Progress value={progress} className="h-1 bg-border" />
             {isChecking && (
               <p className="text-[11px] text-muted-foreground/60 font-mono">
-                {concurrency} browser{concurrency > 1 ? "s" : ""} running — results appear as each account finishes
+                {concurrency} browser{concurrency > 1 ? "s" : ""} running — tab band karo, kaam nahi rukega 🔒
               </p>
             )}
           </div>
@@ -819,7 +891,6 @@ function BrowserChecker() {
                 <MailX className="w-3.5 h-3.5" />NOT OPENED ({notOpened.length + inFlight.length})
               </button>
             </div>
-            {/* Bulk retry + Export buttons */}
             <div className="flex gap-1.5 flex-wrap">
               {verifyCount > 0 && !isChecking && (
                 <Button variant="outline" size="sm" onClick={handleBulkRetry}
@@ -925,8 +996,7 @@ function BrowserChecker() {
                       )}
                       <TableCell>
                         {(r.status === "verification_required" || r.status === "unknown") && !isChecking ? (
-                          <button
-                            onClick={() => handleRetry(r.email)}
+                          <button onClick={() => handleRetry(r.email)}
                             className="flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded border border-border hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-colors">
                             <RefreshCw className="w-2.5 h-2.5" />RETRY
                           </button>
