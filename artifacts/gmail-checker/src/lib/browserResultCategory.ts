@@ -19,7 +19,6 @@ export function getBrowserResultCategory(result: BrowserResultForCategory): Brow
   const isDeleteReason =
     reason.includes("silently bounced back to password page (automation detected)") ||
     reason.includes("google is asking for phone/device verification") ||
-    reason.includes("google requires phone or device verification (verify your info to continue)") ||
     reason.includes("google requires phone or device verification (cannot bypass automatically)") ||
     reason.includes("google requires phone or device verification to continue (cannot bypass automatically)");
 

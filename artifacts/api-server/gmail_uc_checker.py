@@ -66,7 +66,6 @@ def browser_result_category(result: dict) -> str:
     is_delete_reason = any(marker in reason for marker in (
         "silently bounced back to password page (automation detected)",
         "google is asking for phone/device verification",
-        "google requires phone or device verification (verify your info to continue)",
         "google requires phone or device verification (cannot bypass automatically)",
         "google requires phone or device verification to continue (cannot bypass automatically)",
     ))
