@@ -4,8 +4,6 @@ import { getBrowserResultCategory } from "./browserResultCategory";
 const deleteReasons = [
   "Google silently bounced back to password page (automation detected). Profile wiped — auto-retrying with fresh fingerprint.",
   "Google is asking for phone/device verification",
-  "Google requires phone or device verification (cannot bypass automatically)",
-  "Google requires phone or device verification to continue (cannot bypass automatically)",
 ];
 
 for (const reason of deleteReasons) {
@@ -26,6 +24,36 @@ assert.equal(
   }),
   "not_open",
 );
+assert.equal(
+  getBrowserResultCategory({
+    status: "verification_required",
+    reason: "Google requires phone or device verification (cannot bypass automatically)",
+  }),
+  "not_open",
+);
+assert.equal(
+  getBrowserResultCategory({
+    status: "verification_required",
+    reason: "Google requires phone or device verification to continue (cannot bypass automatically)",
+  }),
+  "not_open",
+);
+assert.equal(
+  getBrowserResultCategory({
+    status: "verification_required",
+    category: "delete",
+    reason: "Google requires phone or device verification (Verify your info to continue)",
+  }),
+  "not_open",
+);
+assert.equal(
+  getBrowserResultCategory({
+    status: "verification_required",
+    category: "delete",
+    reason: "Google requires phone or device verification (cannot bypass automatically)",
+  }),
+  "not_open",
+);
 assert.equal(getBrowserResultCategory({ status: "opened", category: "open", reason: "Mailbox opened" }), "open");
 assert.equal(getBrowserResultCategory({ status: "wrong_password", category: "unknown", reason: "Wrong password" }), "unknown");
 
@@ -33,7 +61,7 @@ assert.equal(getBrowserResultCategory({ status: "wrong_password", category: "unk
 assert.equal(
   getBrowserResultCategory({
     status: "verification_required",
-    reason: "Google requires phone or device verification (cannot bypass automatically)",
+    reason: "Google is asking for phone/device verification",
   }),
   "delete",
 );
