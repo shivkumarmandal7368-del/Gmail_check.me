@@ -990,6 +990,61 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
     return fp
 
 
+def _webgl_extensions(vendor: str, renderer: str) -> tuple[list[str], list[str]]:
+    """Return (webgl1_exts, webgl2_exts) that match a real Android Chrome device.
+
+    Key rule: real Android GPUs expose ASTC/ETC/ETC1 compression — NOT S3TC/DXT
+    (which is desktop-only).  Headless Linux/ANGLE exposes the opposite set, so
+    the extension list is one of the strongest headless-detection signals.
+    """
+    # ── Base set present on every modern Android Chrome GPU ──────────────────
+    wgl1: list[str] = [
+        "ANGLE_instanced_arrays", "EXT_blend_minmax", "EXT_color_buffer_half_float",
+        "EXT_disjoint_timer_query", "EXT_float_blend", "EXT_frag_depth",
+        "EXT_shader_texture_lod", "EXT_texture_filter_anisotropic",
+        "EXT_texture_norm16", "KHR_parallel_shader_compile",
+        "OES_depth24", "OES_depth32", "OES_element_index_uint",
+        "OES_fbo_render_mipmap", "OES_standard_derivatives",
+        "OES_texture_float", "OES_texture_float_linear",
+        "OES_texture_half_float", "OES_texture_half_float_linear",
+        "OES_vertex_array_object", "WEBGL_color_buffer_float",
+        "WEBGL_compressed_texture_astc",   # Android — NOT on Linux desktop
+        "WEBGL_compressed_texture_etc",    # Android ETC2 — NOT on Linux desktop
+        "WEBGL_compressed_texture_etc1",   # Android ETC1 — NOT on Linux desktop
+        "WEBGL_debug_renderer_info", "WEBGL_debug_shaders",
+        "WEBGL_depth_texture", "WEBGL_draw_buffers",
+        "WEBGL_lose_context", "WEBGL_multi_draw",
+    ]
+    wgl2: list[str] = [
+        "EXT_color_buffer_float", "EXT_color_buffer_half_float",
+        "EXT_disjoint_timer_query_webgl2", "EXT_float_blend",
+        "EXT_texture_filter_anisotropic", "EXT_texture_norm16",
+        "KHR_parallel_shader_compile", "OES_draw_buffers_indexed",
+        "OES_texture_float_linear", "WEBGL_compressed_texture_astc",
+        "WEBGL_compressed_texture_etc", "WEBGL_debug_renderer_info",
+        "WEBGL_debug_shaders", "WEBGL_lose_context", "WEBGL_multi_draw",
+    ]
+    # ── BPTC texture compression + OVR_multiview2 for newer GPU generations ──
+    # Adreno 720+, Mali G610/G710/G715/G720/Immortalis, all Xclipse
+    newer = False
+    if vendor == "Qualcomm":
+        newer = any(x in renderer for x in ("720", "730", "735", "740", "750", "830"))
+    elif "Xclipse" in renderer or vendor in ("Samsung Electronics Co., Ltd.", "AMD"):
+        newer = True
+    else:  # ARM Mali / Immortalis
+        newer = any(x in renderer for x in ("G610", "G710", "G715", "G720", "Immortalis"))
+
+    if newer:
+        # Insert BPTC after EXT_texture_filter_anisotropic (alphabetical position)
+        i1 = wgl1.index("EXT_texture_norm16")
+        wgl1.insert(i1, "EXT_texture_compression_bptc")
+        i2 = wgl2.index("EXT_texture_norm16")
+        wgl2.insert(i2, "EXT_texture_compression_bptc")
+        wgl2.append("OVR_multiview2")
+
+    return wgl1, wgl2
+
+
 def _webgl_gl_version(vendor: str, renderer: str) -> str:
     """Return a realistic GL_VERSION string matched to the GPU vendor and renderer model.
 
@@ -1037,6 +1092,10 @@ def make_stealth_js(fp: dict) -> str:
     wv   = fp["webglVendor"].replace("'", "\\'")
     wr   = fp["webglRenderer"].replace("'", "\\'")
     gl_ver = _webgl_gl_version(fp["webglVendor"], fp["webglRenderer"]).replace("'", "\\'")
+    import json as _json
+    _wgl1, _wgl2 = _webgl_extensions(fp["webglVendor"], fp["webglRenderer"])
+    wgl1_js = _json.dumps(_wgl1)
+    wgl2_js = _json.dumps(_wgl2)
     cv   = fp["chromeVersion"]
     av   = fp["androidVersion"]
     mdl  = fp["model"].replace("'", "\\'")
@@ -1157,23 +1216,34 @@ try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e
 (function(){{
   var _ws={wn};
   function _phash(p){{var h=p^0xDEAD;h=((h>>16)^h)*0x45d9f3b|0;h=((h>>16)^h)*0x45d9f3b|0;return(h^(h>>16))&0xFFFF;}}
-  var _wn={wn};var _wv='{wv}';var _wr='{wr}';
-  function patch(ctx){{
+  var _wv='{wv}';var _wr='{wr}';
+  var _e1={wgl1_js};
+  var _e2={wgl2_js};
+  function patch(ctx,extList){{
     var gp=ctx.prototype.getParameter;
     ctx.prototype.getParameter=function(p){{
       if(p===37445)return _wv;          // UNMASKED_VENDOR_WEBGL
       if(p===37446)return _wr;          // UNMASKED_RENDERER_WEBGL
-      if(p===7936) return _wv;          // GL_VENDOR  (basic — reveals server GPU on headless)
-      if(p===7937) return _wr;          // GL_RENDERER (basic — reveals "ANGLE (Intel, Mesa...)")
-      if(p===7938) return '{gl_ver}';  // GL_VERSION — vendor-matched (Adreno V@, Mali v1.r, Xclipse bare)
-      if(p===35724)return 'OpenGL ES GLSL ES 3.20';          // SHADING_LANGUAGE_VERSION
+      if(p===7936) return _wv;          // GL_VENDOR
+      if(p===7937) return _wr;          // GL_RENDERER
+      if(p===7938) return '{gl_ver}';   // GL_VERSION — vendor-matched
+      if(p===35724)return 'OpenGL ES GLSL ES 3.20'; // SHADING_LANGUAGE_VERSION
+      if(p===3379) return 16384;        // MAX_TEXTURE_SIZE (SwiftShader returns 8192 — wrong)
+      if(p===34024)return 16384;        // MAX_RENDERBUFFER_SIZE
+      if(p===34076)return 16384;        // MAX_CUBE_MAP_TEXTURE_SIZE
       var v=gp.call(this,p);
       if(typeof v==='number'){{var n=(_phash(p)/65535)*_ws*4-_ws*2;return v+n*Math.sign(v||1);}}
       return v;
     }};
+    ctx.prototype.getSupportedExtensions=function(){{return extList.slice();}};
+    var _origGE=ctx.prototype.getExtension;
+    ctx.prototype.getExtension=function(name){{
+      if(extList.indexOf(name)===-1)return null;
+      return _origGE.call(this,name);
+    }};
   }}
-  patch(WebGLRenderingContext);
-  if(window.WebGL2RenderingContext)patch(WebGL2RenderingContext);
+  patch(WebGLRenderingContext,_e1);
+  if(window.WebGL2RenderingContext)patch(WebGL2RenderingContext,_e2);
 }})();
 (function(){{
   var seed={cs};
