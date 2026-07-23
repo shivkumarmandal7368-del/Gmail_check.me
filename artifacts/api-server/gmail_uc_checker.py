@@ -775,16 +775,20 @@ _RANDOM_TIMEZONES = [
 ]
 
 
-def geo_lookup_proxy(proxy_url: str, _label: str = "") -> dict | None:
+def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dict | None:
     """Hit ip-api.com through the proxy to get exit IP's full details.
-    Returns timezone/language/geo fields (for fingerprint) + full IP info (for display)."""
-    tag = f"[geo{(' ' + _label) if _label else ''}]"
-    try:
-        import requests as req
-        from urllib.parse import urlparse, quote
+    Returns timezone/language/geo fields (for fingerprint) + full IP info (for display).
+    Retries up to _retries times (2 s sleep between) to handle transient proxy errors.
+    Geo-lock MUST succeed when a proxy is used — timezone/language mismatch flags accounts."""
+    import time as _time
+    from urllib.parse import urlparse, quote
+    import requests as req
 
-        # Re-encode proxy URL — proxy usernames can contain + and other special chars
-        # that Python's urllib mis-handles. We parse manually and re-encode each part.
+    tag = f"[geo{(' ' + _label) if _label else ''}]"
+
+    # Parse + re-encode proxy URL once — proxy usernames can contain + and other special
+    # chars that Python's urllib mis-handles. We parse manually and re-encode each part.
+    try:
         _parsed = urlparse(proxy_url)
         _user   = quote(_parsed.username or "", safe="")
         _pass   = quote(_parsed.password or "", safe="")
@@ -792,51 +796,62 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "") -> dict | None:
         _port   = _parsed.port or 6060
         _scheme = _parsed.scheme or "http"
         _safe_proxy = f"{_scheme}://{_user}:{_pass}@{_host}:{_port}"
-
         proxies = {"http": _safe_proxy, "https": _safe_proxy}
-        log(f"{tag} Fetching ip-api.com via proxy {_host}:{_port}")
-        r = req.get(
-            "http://ip-api.com/json?fields=status,query,country,countryCode,continent,"
-            "continentCode,regionName,city,district,zip,isp,org,as,asname,mobile,proxy,"
-            "hosting,reverse,currency,offset,timezone,lat,lon",
-            proxies=proxies, timeout=15
-        )
-        data = r.json()
-        if data.get("status") != "success":
-            log(f"{tag} ip-api.com returned non-success: {data.get('message', data)}")
-            return None
-        cc  = data.get("countryCode", "US")
-        tz  = data.get("timezone") or random.choice(_RANDOM_TIMEZONES)
-        lg  = _COUNTRY_LANG.get(cc, "en-US")
-        lat = float(data.get("lat", 39.8283))
-        lon = float(data.get("lon", -98.5795))
-        log(f"{tag} Got IP {data.get('query')} — {data.get('city')}, {cc} / {data.get('isp')}")
-        return {
-            # Fingerprint fields (timezone, language, geo)
-            "timezone": tz, "language": lg, "countryCode": cc, "lat": lat, "lon": lon,
-            # Full IP display info
-            "ip":            data.get("query"),
-            "city":          data.get("city"),
-            "district":      data.get("district"),
-            "zip":           data.get("zip"),
-            "region":        data.get("regionName"),
-            "country":       data.get("country"),
-            "continent":     data.get("continent"),
-            "continentCode": data.get("continentCode"),
-            "isp":           data.get("isp"),
-            "org":           data.get("org"),
-            "as":            data.get("as"),
-            "asname":        data.get("asname"),
-            "reverse":       data.get("reverse"),
-            "currency":      data.get("currency"),
-            "offset":        data.get("offset"),
-            "mobile":        data.get("mobile"),
-            "proxy":         data.get("proxy"),
-            "hosting":       data.get("hosting"),
-        }
-    except Exception as _geo_err:
-        log(f"{tag} geo_lookup_proxy failed: {_geo_err}")
+    except Exception as _parse_err:
+        log(f"{tag} Failed to parse proxy URL: {_parse_err}")
         return None
+
+    for _attempt in range(1, _retries + 1):
+        try:
+            log(f"{tag} Fetching ip-api.com via proxy {_host}:{_port} (attempt {_attempt}/{_retries})")
+            r = req.get(
+                "http://ip-api.com/json?fields=status,query,country,countryCode,continent,"
+                "continentCode,regionName,city,district,zip,isp,org,as,asname,mobile,proxy,"
+                "hosting,reverse,currency,offset,timezone,lat,lon",
+                proxies=proxies, timeout=15
+            )
+            data = r.json()
+            if data.get("status") != "success":
+                log(f"{tag} ip-api.com returned non-success: {data.get('message', data)}")
+                if _attempt < _retries:
+                    _time.sleep(2)
+                continue
+            cc  = data.get("countryCode", "US")
+            tz  = data.get("timezone") or random.choice(_RANDOM_TIMEZONES)
+            lg  = _COUNTRY_LANG.get(cc, "en-US")
+            lat = float(data.get("lat", 39.8283))
+            lon = float(data.get("lon", -98.5795))
+            log(f"{tag} Got IP {data.get('query')} — {data.get('city')}, {cc} / {data.get('isp')}")
+            return {
+                # Fingerprint fields (timezone, language, geo)
+                "timezone": tz, "language": lg, "countryCode": cc, "lat": lat, "lon": lon,
+                # Full IP display info
+                "ip":            data.get("query"),
+                "city":          data.get("city"),
+                "district":      data.get("district"),
+                "zip":           data.get("zip"),
+                "region":        data.get("regionName"),
+                "country":       data.get("country"),
+                "continent":     data.get("continent"),
+                "continentCode": data.get("continentCode"),
+                "isp":           data.get("isp"),
+                "org":           data.get("org"),
+                "as":            data.get("as"),
+                "asname":        data.get("asname"),
+                "reverse":       data.get("reverse"),
+                "currency":      data.get("currency"),
+                "offset":        data.get("offset"),
+                "mobile":        data.get("mobile"),
+                "proxy":         data.get("proxy"),
+                "hosting":       data.get("hosting"),
+            }
+        except Exception as _geo_err:
+            log(f"{tag} geo_lookup_proxy attempt {_attempt}/{_retries} failed: {_geo_err}")
+            if _attempt < _retries:
+                _time.sleep(2)
+
+    log(f"{tag} ⚠️ GEO LOCK FAILED after {_retries} attempts — timezone/language mismatch risk!")
+    return None
 
 
 def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dict:
@@ -1910,6 +1925,20 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
                 log(f"Post-login geo saved → {fp.get('ip')} | {fp.get('city')}, {fp.get('countryCode')}")
             except Exception as _fpe:
                 log(f"Post-login geo fingerprint save failed: {_fpe}")
+            # Re-inject correct timezone + language into the running Chrome session via CDP.
+            # Chrome was launched with the wrong (random) timezone — fix it live so any
+            # subsequent page loads in this session reflect the correct proxy location.
+            try:
+                driver.execute_cdp_cmd("Emulation.setTimezoneOverride",
+                                       {"timezoneId": fp["timezone"]})
+                driver.execute_cdp_cmd("Emulation.setLocaleOverride",
+                                       {"locale": fp["language"]})
+                log(f"Post-login CDP tz/lang re-applied → {fp['timezone']} / {fp['language']}")
+            except Exception as _cdp_tz:
+                log(f"Post-login CDP re-apply skipped (non-fatal): {_cdp_tz}")
+        else:
+            log("⚠️ Post-login geo fallback also failed — fingerprint timezone may not match exit IP."
+                " Account risk: medium. Delete profile to force fresh geo-lock on next run.")
 
     # Full IP details from fingerprint (now includes post-login fallback result if applicable)
     if fp.get("ip"):
