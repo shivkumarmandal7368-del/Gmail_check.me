@@ -1867,6 +1867,19 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     except Exception as e:
         log(f"Network UA override warning: {e}")
 
+    # Set Chrome's actual timezone + locale via CDP at startup.
+    # The stealth JS (line ~1116) only fakes Intl.DateTimeFormat at the JS level —
+    # Chrome's underlying OS timezone stays UTC (Replit's system TZ) unless we set it here.
+    # This must be called BEFORE any page navigation so every request/Date reflects the proxy's locale.
+    try:
+        driver.execute_cdp_cmd("Emulation.setTimezoneOverride",
+                               {"timezoneId": fp.get("timezone", "America/New_York")})
+        driver.execute_cdp_cmd("Emulation.setLocaleOverride",
+                               {"locale": fp.get("language", "en-US")})
+        log(f"CDP timezone/locale set → {fp.get('timezone', 'America/New_York')} / {fp.get('language', 'en-US')}")
+    except Exception as e:
+        log(f"CDP timezone/locale warning (non-fatal): {e}")
+
     # Exit IP fetch skipped — each account uses a unique sticky session ID for IP isolation
     exit_ip = None
 
