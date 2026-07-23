@@ -677,37 +677,121 @@ PHONE_PROFILES = [
 ]
 
 
-def get_or_create_fingerprint(profile_dir: str) -> dict:
+# ── Country code → Accept-Language mapping ────────────────────────────────────
+_COUNTRY_LANG: dict[str, str] = {
+    # English-primary
+    "US": "en-US", "CA": "en-CA", "GB": "en-GB", "AU": "en-AU",
+    "NZ": "en-NZ", "IE": "en-GB", "IN": "en-IN", "PK": "en-US",
+    "NG": "en-US", "GH": "en-US", "ZA": "en-ZA", "SG": "en-SG",
+    "PH": "en-PH", "MY": "en-MY", "BD": "en-US", "LK": "en-US",
+    "KE": "en-US", "UG": "en-US", "TZ": "en-US",
+    # European
+    "DE": "de-DE", "AT": "de-AT", "CH": "de-CH",
+    "FR": "fr-FR", "BE": "fr-BE",
+    "ES": "es-ES",
+    "IT": "it-IT",
+    "PT": "pt-PT",
+    "NL": "nl-NL",
+    "PL": "pl-PL",
+    "RU": "ru-RU",
+    "TR": "tr-TR",
+    "SE": "sv-SE", "NO": "nb-NO", "DK": "da-DK", "FI": "fi-FI",
+    "CZ": "cs-CZ", "SK": "sk-SK", "RO": "ro-RO", "HU": "hu-HU",
+    "GR": "el-GR", "UA": "uk-UA", "HR": "hr-HR", "BG": "bg-BG",
+    # Latin America
+    "MX": "es-MX", "AR": "es-AR", "CO": "es-CO", "CL": "es-CL",
+    "PE": "es-PE", "VE": "es-VE", "BR": "pt-BR",
+    # Asia-Pacific
+    "JP": "ja-JP", "KR": "ko-KR",
+    "CN": "zh-CN", "TW": "zh-TW", "HK": "zh-HK",
+    "TH": "th-TH", "VN": "vi-VN", "ID": "id-ID",
+    # Middle East / Africa
+    "SA": "ar-SA", "AE": "ar-AE", "EG": "ar-EG", "MA": "ar-MA",
+    "IQ": "ar-IQ", "JO": "ar-JO", "KW": "ar-KW",
+    "IL": "he-IL",
+}
+
+_RANDOM_TIMEZONES = [
+    "America/New_York", "America/Chicago", "America/Los_Angeles",
+    "America/Denver", "America/Toronto", "America/Vancouver",
+    "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Madrid",
+    "Europe/Rome", "Europe/Amsterdam", "Europe/Warsaw",
+    "Asia/Calcutta", "Asia/Tokyo", "Asia/Seoul", "Asia/Singapore",
+    "Asia/Dubai", "Asia/Bangkok", "Asia/Jakarta", "Asia/Hong_Kong",
+    "Australia/Sydney", "Australia/Melbourne",
+]
+
+
+def geo_lookup_proxy(proxy_url: str) -> dict | None:
+    """Hit ip-api.com through the proxy to get exit IP's country + timezone.
+    Returns {"timezone": "...", "language": "..."} or None on any failure."""
+    try:
+        import requests as req
+        proxies = {"http": proxy_url, "https": proxy_url}
+        r = req.get(
+            "http://ip-api.com/json?fields=status,countryCode,timezone",
+            proxies=proxies, timeout=10
+        )
+        data = r.json()
+        if data.get("status") != "success":
+            return None
+        cc = data.get("countryCode", "US")
+        tz = data.get("timezone") or random.choice(_RANDOM_TIMEZONES)
+        lg = _COUNTRY_LANG.get(cc, "en-US")
+        return {"timezone": tz, "language": lg, "countryCode": cc}
+    except Exception:
+        return None
+
+
+def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dict:
     """Load the saved fingerprint for this profile, or generate & save a new one.
     This makes every account look like a consistent, unique device — same as
-    antidetect/cloner behaviour."""
+    antidetect/cloner behaviour.
+    If proxy is given and geo-lookup hasn't run yet, timezone + language are
+    derived from the proxy's exit IP (so they match the IP location)."""
     fp_path = os.path.join(profile_dir, "fingerprint.json")
     if os.path.exists(fp_path):
         try:
             with open(fp_path, "r") as f:
                 existing = json.load(f)
             if all(k in existing for k in ("model", "screenW", "canvasSeed")):
+                # If proxy is provided and geo hasn't been locked yet, do it now
+                if proxy and not existing.get("geoLocked"):
+                    geo = geo_lookup_proxy(proxy)
+                    if geo:
+                        existing["timezone"]    = geo["timezone"]
+                        existing["language"]    = geo["language"]
+                        existing["countryCode"] = geo["countryCode"]
+                        existing["geoLocked"]   = True
+                        try:
+                            with open(fp_path, "w") as f:
+                                json.dump(existing, f, indent=2)
+                        except Exception:
+                            pass
                 return existing
         except Exception:
             pass
     fp = random.choice(PHONE_PROFILES).copy()
     fp["canvasSeed"]  = random.randint(1, 254)        # unique canvas XOR per account
     fp["audioNoise"]  = round(random.uniform(0.00001, 0.00009), 7)  # unique audio shift
-    # Per-account timezone — each account looks like a different person in a different city
-    fp["timezone"] = random.choice([
-        "America/New_York", "America/Chicago", "America/Los_Angeles",
-        "America/Denver", "America/Toronto", "America/Vancouver",
-        "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Madrid",
-        "Europe/Rome", "Europe/Amsterdam", "Europe/Warsaw",
-        "Asia/Calcutta", "Asia/Tokyo", "Asia/Seoul", "Asia/Singapore",
-        "Asia/Dubai", "Asia/Bangkok", "Asia/Jakarta", "Asia/Hong_Kong",
-        "Australia/Sydney", "Australia/Melbourne",
-    ])
-    # Per-account language — varies the Accept-Language header and navigator.languages
-    fp["language"] = random.choice([
-        "en-US", "en-US", "en-US", "en-US",  # weighted — most users are en-US
-        "en-GB", "en-CA", "en-AU", "en-IN",
-    ])
+    # Timezone + language — from proxy exit IP if available, else random
+    if proxy:
+        geo = geo_lookup_proxy(proxy)
+    else:
+        geo = None
+    if geo:
+        fp["timezone"]    = geo["timezone"]
+        fp["language"]    = geo["language"]
+        fp["countryCode"] = geo["countryCode"]
+        fp["geoLocked"]   = True
+    else:
+        fp["geoLocked"] = False
+        fp["timezone"] = random.choice(_RANDOM_TIMEZONES)
+        # Per-account language — varies the Accept-Language header and navigator.languages
+        fp["language"] = random.choice([
+            "en-US", "en-US", "en-US", "en-US",  # weighted — most users are en-US
+            "en-GB", "en-CA", "en-AU", "en-IN",
+        ])
     # ── App-cloner style: every account has its own unique device identity ────
     # Battery — real phones vary; always discharging (mobile check, plugged-in is rare)
     fp["batteryLevel"]    = round(random.uniform(0.15, 0.94), 2)
@@ -1106,10 +1190,13 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     log(f"Chrome profile: {profile_dir} (fresh={fresh_profile})")
 
     # ── Load or generate unique fingerprint (fresh_profile → always new) ──────
-    fp = get_or_create_fingerprint(profile_dir)
+    fp = get_or_create_fingerprint(profile_dir, proxy=proxy)
     fp_summary = (f"{fp['model']} | {fp['webglRenderer']} | "
                   f"{fp['screenW']}x{fp['screenH']} dpr={fp['dpr']} | canvas={fp['canvasSeed']}")
+    geo_info = (f"tz={fp.get('timezone','?')} lang={fp.get('language','?')} "
+                f"cc={fp.get('countryCode','?')} geoLocked={fp.get('geoLocked', False)}")
     log(f"Fingerprint: {fp_summary}")
+    log(f"Geo fingerprint: {geo_info}")
     MOBILE_UA = (
         f"Mozilla/5.0 (Linux; Android {fp['androidVersion']}; {fp['model']}) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "

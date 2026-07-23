@@ -1385,6 +1385,20 @@ User asked: "Aur aise chije aur apni finger print main hai lekin fake lag rha ho
 - API server rebuilt and restarted cleanly on port 8080 ✅
 - Both workflows running ✅
 
+### ✅ Proxy-matched Timezone + Language (added same session)
+
+**Problem:** Timezone/language were random — proxy IP India ka, timezone America/New_York = instant mismatch detection.
+
+**Fix:** `geo_lookup_proxy(proxy_url)` function added — proxy ke through `http://ip-api.com/json` hit karke exit IP ka country + timezone fetch karta hai.
+
+- **`_COUNTRY_LANG` mapping** — 60+ country codes → Accept-Language (IN→`en-IN`, DE→`de-DE`, JP→`ja-JP`, SA→`ar-SA`, BR→`pt-BR`, etc.)
+- **`get_or_create_fingerprint(profile_dir, proxy=None)`** — signature updated, proxy accept karta hai
+- **New fingerprints:** geo lookup se timezone + language set hoti hai; fail hone par random fallback
+- **Existing fingerprints without geo:** agar proxy available aur `geoLocked` missing → geo lookup karta hai, fingerprint.json update karta hai
+- **`geoLocked: true`** field — ek baar lookup hone ke baad dobara nahi karta (consistent per-account)
+- **Call site updated:** `get_or_create_fingerprint(profile_dir, proxy=proxy)` at line ~1193
+- **Log output:** `Geo fingerprint: tz=Asia/Kolkata lang=en-IN cc=IN geoLocked=True`
+
 ### ⚠️ Remaining fingerprint concerns (lower priority, not fixed this session)
 - All 40+ phone profiles share identical `chromeVersion: "138.0.7204.100"` — no version variation across profiles (fixing this risks UA/ChromeDriver version mismatch)
 - `screen.orientation` is a plain object, not a `ScreenOrientation` instance — `instanceof` check would fail (low risk)
