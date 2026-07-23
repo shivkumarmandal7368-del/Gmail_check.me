@@ -1833,7 +1833,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
 
     _login_result: dict = {}
     try:
-        _login_result = _do_login(driver, email, password, totp_code, totp_secret)
+        _login_result = _do_login(driver, email, password, totp_code, totp_secret, fresh_profile)
     except Exception as e:
         log(f"Login exception: {e}")
         _login_result = {"status": "unknown", "reason": f"Login error: {str(e)[:300]}", "totpCode": totp_code}
@@ -1877,7 +1877,7 @@ def _cleanup(path: str | None, xvfb_proc=None):
 
 # ── Login flow ────────────────────────────────────────────────────────────────
 
-def _do_login(driver, email: str, password: str, totp_code: str | None, totp_secret: str | None = None) -> dict:
+def _do_login(driver, email: str, password: str, totp_code: str | None, totp_secret: str | None = None, fresh_profile: bool = False) -> dict:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
 
