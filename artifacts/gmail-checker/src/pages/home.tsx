@@ -607,13 +607,20 @@ function BrowserChecker() {
     })();
   };
 
-  const scheduleReconnect = (id: string) => {
+  const scheduleReconnect = (id: string, attempt = 0) => {
+    // Retry with gentle backoff: 3s, 5s, 7s … max 10s. Keeps retrying forever
+    // (browser tab throttles setTimeout when inactive — Live button bypasses this).
+    const delay = Math.min(3000 + attempt * 2000, 10000);
     reconnectTimer.current = setTimeout(async () => {
       if (activeJobIdRef.current !== id) return;
       setConnStatus("reconnecting");
       try {
         const res = await fetch(`/api/jobs/${id}`);
-        if (!res.ok) { setConnStatus("disconnected"); return; }
+        if (!res.ok) {
+          // Server error — keep retrying
+          if (activeJobIdRef.current === id) scheduleReconnect(id, attempt + 1);
+          return;
+        }
         const { job } = await res.json();
         if (!job) { setConnStatus("disconnected"); return; }
         if (job.status !== "running") {
@@ -627,8 +634,32 @@ function BrowserChecker() {
         }
         setReconnectedAt(new Date().toLocaleTimeString());
         connectToJobStream(id, job.eventsCount ?? 0);
-      } catch { setConnStatus("disconnected"); }
-    }, 3000);
+      } catch {
+        // Network error — keep retrying
+        if (activeJobIdRef.current === id) scheduleReconnect(id, attempt + 1);
+      }
+    }, delay);
+  };
+
+  // Manual instant reconnect — clears any pending auto-retry timer and connects now.
+  const handleLiveReconnect = async () => {
+    if (!jobId) return;
+    if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
+    setConnStatus("connecting");
+    try {
+      const res = await fetch(`/api/jobs/${jobId}`);
+      if (!res.ok) { setConnStatus("disconnected"); return; }
+      const { job } = await res.json();
+      if (!job) { setConnStatus("disconnected"); return; }
+      if (job.status !== "running") {
+        applyJobState(job);
+        setConnStatus("idle");
+        if (job.status === "paused" && (job.checkingEmails ?? []).length > 0) schedulePausedJobPoll(jobId);
+        return;
+      }
+      setReconnectedAt(new Date().toLocaleTimeString());
+      connectToJobStream(jobId, job.eventsCount ?? 0);
+    } catch { setConnStatus("disconnected"); }
   };
 
   const handleJobEvent = (evt: any) => {
@@ -662,10 +693,16 @@ function BrowserChecker() {
       setPauseRequested(false);
       setResumeReady(false);
       setIsRunning(true);
-    } else if (evt.type === "done" || evt.type === "cancelled" || evt.type === "interrupted") {
+    } else if (evt.type === "done" || evt.type === "cancelled") {
       setJobStatus(evt.type);
       setPauseRequested(false);
       setResumeReady(false);
+      setIsRunning(false); setConnStatus("idle");
+    } else if (evt.type === "interrupted") {
+      // Server restarted mid-job — partial results saved, resume is possible.
+      // Do NOT force resumeReady(false); applyJobState already set it correctly.
+      setJobStatus("interrupted");
+      setPauseRequested(false);
       setIsRunning(false); setConnStatus("idle");
     }
   };
