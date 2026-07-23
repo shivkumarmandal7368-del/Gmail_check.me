@@ -1301,13 +1301,21 @@ function BrowserChecker() {
                       )}
                       {displayed.some(x => (x as any).ipInfo) && (
                         <TableCell className="text-[10px] font-mono leading-relaxed">
-                          {(r as any).ipInfo ? (
-                            <div className="space-y-0.5">
-                              <div className="text-green-400/90 font-bold tracking-wider">{(r as any).ipInfo.ip ?? "—"}</div>
-                              <div className="text-muted-foreground/70">{[(r as any).ipInfo.city, (r as any).ipInfo.region, (r as any).ipInfo.countryCode].filter(Boolean).join(", ")}</div>
-                              <div className="text-blue-400/70 truncate max-w-[170px]" title={(r as any).ipInfo.isp}>{(r as any).ipInfo.isp ?? ""}</div>
-                            </div>
-                          ) : "—"}
+                          {(r as any).ipInfo ? (() => {
+                            const ip = (r as any).ipInfo;
+                            return (
+                              <div className="space-y-0.5">
+                                <div className="flex items-center gap-1">
+                                  <span className="text-green-400/90 font-bold tracking-wider">{ip.ip ?? "—"}</span>
+                                  {ip.mobile === true && <span className="text-[9px] px-1 py-0.5 rounded bg-green-500/20 text-green-400 font-mono">📱 MOBILE</span>}
+                                  {ip.proxy === true && <span className="text-[9px] px-1 py-0.5 rounded bg-yellow-500/20 text-yellow-400 font-mono">🔀 PROXY</span>}
+                                  {ip.hosting === true && <span className="text-[9px] px-1 py-0.5 rounded bg-red-500/20 text-red-400 font-mono">🖥 DC</span>}
+                                </div>
+                                <div className="text-muted-foreground/70">{[ip.city, ip.region, ip.countryCode].filter(Boolean).join(", ")}</div>
+                                <div className="text-blue-400/70 truncate max-w-[170px]" title={ip.isp}>{ip.isp ?? ""}</div>
+                              </div>
+                            );
+                          })() : "—"}
                         </TableCell>
                       )}
                       {displayed.some(x => (x as any).fingerprint) && (

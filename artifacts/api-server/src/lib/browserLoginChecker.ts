@@ -29,6 +29,9 @@ export interface IpInfo {
   isp?: string;
   org?: string;
   as?: string;
+  mobile?: boolean;   // true = cellular/mobile IP
+  proxy?: boolean;    // true = proxy/VPN detected
+  hosting?: boolean;  // true = datacenter IP
 }
 
 export interface BrowserLoginResult {

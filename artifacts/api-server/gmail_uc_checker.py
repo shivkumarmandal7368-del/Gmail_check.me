@@ -782,7 +782,7 @@ def geo_lookup_proxy(proxy_url: str) -> dict | None:
         import requests as req
         proxies = {"http": proxy_url, "https": proxy_url}
         r = req.get(
-            "http://ip-api.com/json?fields=status,query,country,countryCode,regionName,city,isp,org,as,timezone,lat,lon",
+            "http://ip-api.com/json?fields=status,query,country,countryCode,regionName,city,isp,org,as,mobile,proxy,hosting,timezone,lat,lon",
             proxies=proxies, timeout=10
         )
         data = r.json()
@@ -804,6 +804,9 @@ def geo_lookup_proxy(proxy_url: str) -> dict | None:
             "isp":     data.get("isp"),
             "org":     data.get("org"),
             "as":      data.get("as"),
+            "mobile":  data.get("mobile"),    # True = mobile/cellular IP
+            "proxy":   data.get("proxy"),     # True = proxy/VPN detected
+            "hosting": data.get("hosting"),   # True = datacenter/hosting IP
         }
     except Exception:
         return None
@@ -829,8 +832,8 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
                         existing["language"]    = geo["language"]
                         existing["countryCode"] = geo["countryCode"]
                         existing["geoLocked"]   = True
-                        for _k in ("ip", "city", "region", "country", "isp", "org", "as"):
-                            if geo.get(_k):
+                        for _k in ("ip", "city", "region", "country", "isp", "org", "as", "mobile", "proxy", "hosting"):
+                            if geo.get(_k) is not None:
                                 existing[_k] = geo[_k]
                         try:
                             with open(fp_path, "w") as f:
@@ -855,8 +858,8 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
         fp["lat"]         = geo.get("lat", 39.8283)
         fp["lon"]         = geo.get("lon", -98.5795)
         fp["geoLocked"]   = True
-        for _k in ("ip", "city", "region", "country", "isp", "org", "as"):
-            if geo.get(_k):
+        for _k in ("ip", "city", "region", "country", "isp", "org", "as", "mobile", "proxy", "hosting"):
+            if geo.get(_k) is not None:
                 fp[_k] = geo[_k]
     else:
         fp["geoLocked"] = False
@@ -1843,7 +1846,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     _login_result["fingerprint"] = fp_summary
     # Full IP details from fingerprint geo-lock (no extra network call)
     if fp.get("ip"):
-        _login_result["ipInfo"] = {k: fp.get(k) for k in ("ip", "city", "region", "country", "countryCode", "isp", "org", "as") if fp.get(k)}
+        _login_result["ipInfo"] = {k: fp.get(k) for k in ("ip", "city", "region", "country", "countryCode", "isp", "org", "as", "mobile", "proxy", "hosting") if fp.get(k) is not None}
         log(f"Exit IP: {fp.get('ip')} | {fp.get('city')}, {fp.get('countryCode')} | {fp.get('isp')}")
     else:
         _login_result["ipInfo"] = None
