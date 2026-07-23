@@ -990,6 +990,44 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
     return fp
 
 
+def _webgl_gl_version(vendor: str, renderer: str) -> str:
+    """Return a realistic GL_VERSION string matched to the GPU vendor and renderer model.
+
+    Each GPU family has its own driver version format:
+      Qualcomm Adreno  → 'OpenGL ES 3.2 V@<driver> (GIT@<hash>, ...)'
+      ARM Mali         → 'OpenGL ES 3.2 v1.r<N>p0-01eac0'
+      Samsung Xclipse  → 'OpenGL ES 3.2'   (bare — real devices report this)
+    """
+    if vendor == "Qualcomm":
+        # V@ driver numbers match the real Qualcomm OpenGL driver released with each SoC gen.
+        if "830" in renderer:          # Snapdragon 8 Elite (SD 8s Gen 4)
+            return "OpenGL ES 3.2 V@0720.0 (GIT@7f9f5d9, I8e3c47a6d5, 1be3571ebb, 1425f5b6da, 1)"
+        if "750" in renderer:          # Snapdragon 8 Gen 3
+            return "OpenGL ES 3.2 V@0615.0 (GIT@ae0c09c, I4b09e844d7, 1be3571ebb, 1425f5b6da, 1)"
+        if "740" in renderer:          # Snapdragon 8 Gen 2
+            return "OpenGL ES 3.2 V@0502.0 (GIT@c4a0898, I37649b2cee, 1be3571ebb, 1425f5b6da, 1)"
+        if "730" in renderer or "735" in renderer:  # SD 8 Gen 1 / 7s Gen 2
+            return "OpenGL ES 3.2 V@0490.0 (GIT@de90a5a, Ia5f5d518dc, 1be3571ebb, 1425f5b6da, 1)"
+        if "720" in renderer:          # Snapdragon 7 Gen 3
+            return "OpenGL ES 3.2 V@0502.0 (GIT@c4a0898, I37649b2cee, 1be3571ebb, 1425f5b6da, 1)"
+        if "642" in renderer:          # Snapdragon 778G
+            return "OpenGL ES 3.2 V@0490.0 (GIT@de90a5a, Ia5f5d518dc, 1be3571ebb, 1425f5b6da, 1)"
+        return "OpenGL ES 3.2 V@0490.0 (GIT@de90a5a, Ia5f5d518dc, 1be3571ebb, 1425f5b6da, 1)"
+    if "Xclipse" in renderer or vendor in ("Samsung Electronics Co., Ltd.", "AMD"):
+        # Samsung Xclipse (RDNA-based) — real Galaxy S22/S23/S24/A55 devices return a bare string
+        return "OpenGL ES 3.2"
+    # ARM Mali / Immortalis — driver revision varies by architecture generation
+    if "G78" in renderer or "G68" in renderer:
+        return "OpenGL ES 3.2 v1.r40p0-01eac0"
+    if "G710" in renderer or "G610" in renderer:
+        return "OpenGL ES 3.2 v1.r44p0-01eac0"
+    if "G77" in renderer:
+        return "OpenGL ES 3.2 v1.r37p0-01eac0"
+    if "G715" in renderer or "G720" in renderer or "Immortalis" in renderer:
+        return "OpenGL ES 3.2 v1.r47p0-01eac0"
+    return "OpenGL ES 3.2 v1.r44p0-01eac0"
+
+
 def make_stealth_js(fp: dict) -> str:
     """Build the CDP stealth script with values from this account's fingerprint.
     Covers every modern fingerprinting surface: canvas, audio, WebGL, navigator,
@@ -998,6 +1036,7 @@ def make_stealth_js(fp: dict) -> str:
     an   = fp["audioNoise"]
     wv   = fp["webglVendor"].replace("'", "\\'")
     wr   = fp["webglRenderer"].replace("'", "\\'")
+    gl_ver = _webgl_gl_version(fp["webglVendor"], fp["webglRenderer"]).replace("'", "\\'")
     cv   = fp["chromeVersion"]
     av   = fp["androidVersion"]
     mdl  = fp["model"].replace("'", "\\'")
@@ -1126,7 +1165,7 @@ try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e
       if(p===37446)return _wr;          // UNMASKED_RENDERER_WEBGL
       if(p===7936) return _wv;          // GL_VENDOR  (basic — reveals server GPU on headless)
       if(p===7937) return _wr;          // GL_RENDERER (basic — reveals "ANGLE (Intel, Mesa...)")
-      if(p===7938) return 'OpenGL ES 3.2 v1.r47p0-01eac0';  // GL_VERSION
+      if(p===7938) return '{gl_ver}';  // GL_VERSION — vendor-matched (Adreno V@, Mali v1.r, Xclipse bare)
       if(p===35724)return 'OpenGL ES GLSL ES 3.20';          // SHADING_LANGUAGE_VERSION
       var v=gp.call(this,p);
       if(typeof v==='number'){{var n=(_phash(p)/65535)*_ws*4-_ws*2;return v+n*Math.sign(v||1);}}
