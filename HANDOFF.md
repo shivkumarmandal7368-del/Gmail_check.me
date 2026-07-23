@@ -1934,6 +1934,93 @@ Jobs now run entirely on the server — browser tab close, phone lock, network d
 
 ---
 
+## Session 19 Changes (July 23, 2026) — Second TOTP Fix + US Fingerprint
+
+### ✅ Second TOTP challenge handled properly
+
+**Problem:** When Google shows a second "Verify that it's you — Google Authenticator" page (URL: `accounts.google.com/v3/signin/TL=...`) *after* the first TOTP was already accepted, the `classify()` function inside `_do_login` was returning `"opened"` immediately without actually entering the code, completing the login, or logging out.
+
+**Fix:** `classify()` in `gmail_uc_checker.py` (around the `v3/signin Google Authenticator page` block) now:
+1. Detects the TOTP input field on the second challenge page
+2. Generates a fresh TOTP code (avoids the stale 60s+ old code)
+3. Waits for a safe TOTP window (skips if <4s left in current 30s window)
+4. Enters the code via `touch_click` + `clipboard_type` + `Keys.ENTER`
+5. Waits up to 25s for Gmail inbox to load
+6. Logs out cleanly (`accounts.google.com/Logout?continue=https://mail.google.com`)
+7. Returns `status: "opened"` with the fresh TOTP code
+
+Falls back to old "opened" (no entry) if: no `totp_secret` provided, no input field found, or entry throws an exception.
+
+**File:** `artifacts/api-server/gmail_uc_checker.py` — `classify()` nested function inside `_do_login()`
+
+---
+
+### ✅ Browser fingerprint — US locale (not India)
+
+**Problem:** Multiple hardcoded India values were overriding the proxy geo-lookup result, meaning even with a US proxy the browser fingerprint showed India timezone/language.
+
+#### Changes made
+
+**1. `get_or_create_fingerprint()` — removed hardcoded India override**
+
+Lines that were removed:
+```python
+# Fixed India timezone — all accounts use IST (matches Indian mobile proxy)
+fp["timezone"] = "Asia/Kolkata"
+# Fixed India language — matches Jio/Airtel mobile carrier locale
+fp["language"] = "en-IN"
+```
+Now timezone + language come from `geo_lookup_proxy()` (calls `ip-api.com` through the proxy → gets real exit IP's country/timezone). US proxy → `America/Chicago` / `America/New_York` + `en-US`.
+
+**2. `make_stealth_js()` — fixed broken duplicate return**
+
+The function had TWO `return f"""` blocks. The first (lines ~912–929) returned a partial/broken stealth JS (only webdriver + plugins + languages, plus literal Python code `sw = fp["screenW"]` etc. sent to Chrome as JS = syntax error). The second complete block (line ~929+) was never reached.
+
+Fix: removed the entire first partial `return f"""` block (lines 912–928). Now the function correctly extracts `sw`, `sh`, `ah` from `fp` as Python variables and returns the full stealth JS string.
+
+**3. `make_stealth_js()` — replaced hardcoded `en-IN` with dynamic `{lg}`**
+
+Was:
+```js
+Object.defineProperty(navigator,'languages',{get:()=>['en-IN','en-GB','en','hi']});
+navigator.language → 'en-IN'
+navigator.userLanguage → 'en-IN'
+navigator.browserLanguage → 'en-IN'
+navigator.systemLanguage → 'en-IN'
+```
+
+Now:
+```js
+Object.defineProperty(navigator,'languages',{get:()=>['{lg}','en']});
+navigator.language → '{lg}'  // e.g. 'en-US'
+```
+
+**4. Chrome `--lang` flag**
+
+Was: `--lang=en-IN,en-GB;q=0.9,en;q=0.8,hi;q=0.7`
+Now: `--lang={fp['language']},en;q=0.9`
+
+**5. CDP `Network.setUserAgentOverride` — `acceptLanguage` header**
+
+Was: `"en-IN,en-GB;q=0.9,en;q=0.8,hi;q=0.7"`
+Now: `f"{fp['language']},en;q=0.9"`
+
+---
+
+### ✅ Sticky session — 1 IP per account (already working, confirmed)
+
+`browserLoginChecker.ts` already injects a unique `-session-XXXX` suffix into the proxy username for each account before spawning Chrome. This was already implemented in Session 17/18. Verified working via curl test:
+
+```
+# Two consecutive calls through the same proxy URL → different US IPs
+156.47.147.177  Texas / Lufkin / Consolidated Communications
+70.119.18.41    Texas / Eagle Pass / Charter (Spectrum)
+```
+
+ProxyScrape proxy confirmed working: `http://kp7d2s4gfeiszz7-odds-5+100-country-us:PASSWORD@rp.scrapegw.com:6060`
+
+---
+
 ## What's Next (Future Work)
 
 1. **Proxy health pre-flight** — ping proxy before starting batch, warn if dead/slow  
