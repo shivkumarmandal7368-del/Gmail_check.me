@@ -300,7 +300,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
         "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G78 MP20",
     },
     {
@@ -308,7 +308,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
         "hwConcurrency": 8, "deviceMemory": 6,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G78 MP20",
     },
     {
@@ -316,7 +316,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
         "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 730",
     },
     {
@@ -324,7 +324,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
         "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G710 MP7",
     },
     {
@@ -332,7 +332,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 915, "availH": 891, "dpr": 2.625,
         "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
     },
     {
@@ -340,7 +340,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 919, "availH": 895, "dpr": 2.625,
         "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
     },
     {
@@ -348,7 +348,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
         "hwConcurrency": 9, "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G715 MP7",
     },
     {
@@ -356,7 +356,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
         "hwConcurrency": 9, "deviceMemory": 16, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G715 MP7",
     },
     # ── Samsung Galaxy S-series ───────────────────────────────────────────────
@@ -447,7 +447,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 919, "availH": 895, "dpr": 2.625,
         "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
     },
     {
@@ -455,7 +455,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 919, "availH": 895, "dpr": 2.625,
         "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 750",
     },
     {
@@ -463,7 +463,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 919, "availH": 895, "dpr": 2.625,
         "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G710 MC10",
     },
     # ── Xiaomi / Redmi ────────────────────────────────────────────────────────
@@ -472,7 +472,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
         "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
     },
     {
@@ -480,7 +480,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
         "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 750",
     },
     {
@@ -488,7 +488,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
         "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G715 MC11",
     },
     {
@@ -496,7 +496,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
         "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G68 MC4",
     },
     # ── Others ────────────────────────────────────────────────────────────────
@@ -505,7 +505,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
         "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
     },
     {
@@ -513,7 +513,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
         "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 730",
     },
     {
@@ -521,7 +521,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
         "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G77 MC9",
     },
     {
@@ -529,7 +529,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
         "hwConcurrency": 8, "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 642L",
     },
     {
@@ -537,7 +537,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
         "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G715 MC11",
     },
     # ── Google Pixel (additional) ─────────────────────────────────────────────
@@ -546,7 +546,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 932, "availH": 908, "dpr": 2.625,
         "hwConcurrency": 9, "deviceMemory": 16, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G715 MP7",
     },
     # ── Samsung Galaxy S-series (additional) ──────────────────────────────────
@@ -589,7 +589,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 919, "availH": 895, "dpr": 2.625,
         "hwConcurrency": 8,  "deviceMemory": 16, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 830",
     },
     # ── Xiaomi / Redmi (additional) ───────────────────────────────────────────
@@ -598,7 +598,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
         "hwConcurrency": 8,  "deviceMemory": 16, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 750",
     },
     {
@@ -606,7 +606,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
         "hwConcurrency": 8,  "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Immortalis-G720 MC12",
     },
     {
@@ -614,7 +614,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
         "hwConcurrency": 8,  "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G610 MC4",
     },
     # ── Others (additional) ───────────────────────────────────────────────────
@@ -623,7 +623,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
         "hwConcurrency": 8,  "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 750",
     },
     {
@@ -631,7 +631,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
         "hwConcurrency": 8,  "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 720",
     },
     {
@@ -665,7 +665,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
         "hwConcurrency": 8,  "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 740",
     },
     # ── OnePlus (additional) ──────────────────────────────────────────────────
@@ -674,7 +674,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 919, "availH": 895, "dpr": 2.625,
         "hwConcurrency": 8,  "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 735",
     },
     # ── Xiaomi (additional) ───────────────────────────────────────────────────
@@ -683,7 +683,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
         "hwConcurrency": 8,  "deviceMemory": 16, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 830",
     },
     {
@@ -691,7 +691,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
         "hwConcurrency": 8,  "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 720",
     },
     # ── Others (additional) ───────────────────────────────────────────────────
@@ -700,7 +700,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 412, "screenH": 892, "availH": 868, "dpr": 2.625,
         "hwConcurrency": 8,  "deviceMemory": 8,  "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Mali-G610 MC4",
     },
     {
@@ -708,7 +708,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 851, "availH": 827, "dpr": 2.75,
         "hwConcurrency": 8,  "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "Qualcomm", "webglRenderer": "Adreno (TM) 735",
     },
     {
@@ -716,7 +716,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
         "hwConcurrency": 8,  "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Immortalis-G720 MC12",
     },
     {
@@ -724,7 +724,7 @@ PHONE_PROFILES = [
         "chromeVersion": "138.0.7204.100",
         "screenW": 393, "screenH": 873, "availH": 849, "dpr": 2.75,
         "hwConcurrency": 8,  "deviceMemory": 12, "maxTouchPoints": 5,
-        "platform": "Linux armv81",
+        "platform": "Linux armv8l",
         "webglVendor": "ARM", "webglRenderer": "Immortalis-G720 MC12",
     },
 ]
@@ -1107,8 +1107,8 @@ Object.defineProperty(navigator,'vendor',  {{get:()=>'Google Inc.'}});
 Object.defineProperty(navigator,'appVersion',{{get:()=>'{av_str}'}});
 try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable:true}});}}catch(e){{}}
 (function(){{
-  var d={{brands:[{{brand:'Not=A?Brand',version:'24'}},{{brand:'Chromium',version:'138'}},{{brand:'Google Chrome',version:'138'}}],mobile:true,platform:'Android',
-    getHighEntropyValues:function(h){{return Promise.resolve({{brands:this.brands,mobile:this.mobile,platform:this.platform,platformVersion:'{av}',architecture:'',bitness:'',model:'{mdl}',uaFullVersion:'{cv}',fullVersionList:[{{brand:'Not=A?Brand',version:'24.0.0.0'}},{{brand:'Chromium',version:'{cv}'}},{{brand:'Google Chrome',version:'{cv}'}}]}});}},
+  var d={{brands:[{{brand:'Not(A;Brand',version:'8'}},{{brand:'Chromium',version:'138'}},{{brand:'Google Chrome',version:'138'}}],mobile:true,platform:'Android',
+    getHighEntropyValues:function(h){{return Promise.resolve({{brands:this.brands,mobile:this.mobile,platform:this.platform,platformVersion:'{av}',architecture:'',bitness:'',model:'{mdl}',uaFullVersion:'{cv}',fullVersionList:[{{brand:'Not(A;Brand',version:'8.0.0.0'}},{{brand:'Chromium',version:'{cv}'}},{{brand:'Google Chrome',version:'{cv}'}}]}});}},
     toJSON:function(){{return{{brands:this.brands,mobile:this.mobile,platform:this.platform}};}}}};
   try{{Object.defineProperty(navigator,'userAgentData',{{get:()=>d}});}}catch(e){{}}
 }})();
@@ -1421,11 +1421,12 @@ try{{
 try{{
   if(navigator.storage&&navigator.storage.estimate){{
     var _origEst=navigator.storage.estimate.bind(navigator.storage);
+    var _storageUsage=Math.round((80+Math.random()*120)*1048576);
     navigator.storage.estimate=function(){{
       var _dMem={fp['deviceMemory']};
       return Promise.resolve({{
         quota:Math.round(_dMem*1073741824*0.6),
-        usage:Math.round((80+Math.random()*120)*1048576),
+        usage:_storageUsage,
         usageDetails:{{caches:Math.round(20*1048576),indexedDB:Math.round(5*1048576),serviceWorkerRegistrations:Math.round(1*1048576)}}
       }});
     }};
@@ -1462,7 +1463,7 @@ try{{
   if(!window.SpeechRecognition){{
     window.SpeechRecognition=function(){{
       this.start=function(){{}};this.stop=function(){{}};this.abort=function(){{}};
-      this.continuous=false;this.interimResults=false;this.lang='en-IN';
+      this.continuous=false;this.interimResults=false;this.lang='{lg}';
       this.addEventListener=function(){{}};this.removeEventListener=function(){{}};
     }};
   }}
@@ -1934,7 +1935,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             "platform": fp["platform"],
             "userAgentMetadata": {
                 "brands": [
-                    {"brand": "Not=A?Brand",   "version": "24"},
+                    {"brand": "Not(A;Brand",   "version": "8"},
                     {"brand": "Chromium",       "version": "138"},
                     {"brand": "Google Chrome",  "version": "138"},
                 ],

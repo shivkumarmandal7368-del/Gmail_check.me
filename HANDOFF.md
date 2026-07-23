@@ -2304,6 +2304,47 @@ If all 3 fail, retry the whole round up to `_retries` times (default 3) with 3s 
 
 ---
 
+## Session 36 Changes (July 23, 2026) — Full Fingerprint Audit: 4 Detectable Issues Fixed
+
+### Issues found and fixed
+
+#### 🔴 Fix 1 — `"Linux armv81"` → `"Linux armv8l"` (35 profiles, CRITICAL)
+`navigator.platform` was `"Linux armv81"` in all non-Samsung profiles — the digit `1` not lowercase letter `l`. This string **does not exist** on any real Android device. Real values are `"Linux armv8l"` (32-bit ARM process) or `"Linux aarch64"` (64-bit). Google cross-checks platform vs UA-CH. Fixed with replace_all across all 35 affected PHONE_PROFILES.
+
+#### 🔴 Fix 2 — `Not=A?Brand` v`"24"` → `Not(A;Brand` v`"8"` (JS + CDP)
+Chrome 138 sends `"Not(A;Brand";v="8"` as the grease brand in `sec-ch-ua`. The code had the old `"Not=A?Brand"` string with version `"24"` — both the brand name and version were wrong for Chrome 138. Fixed in:
+- `make_stealth_js` JS UA-CH object (brands + fullVersionList)
+- `Network.setUserAgentOverride` CDP call brands list
+
+#### 🟡 Fix 3 — `SpeechRecognition.lang` hardcoded `'en-IN'` → `'{lg}'`
+The fallback `SpeechRecognition` stub had `this.lang='en-IN'` hardcoded. For accounts with German/Spanish/French/etc. proxies, the speech lang would contradict the rest of the locale fingerprint. Now uses the account's language (`{lg}`).
+
+#### 🟡 Fix 4 — `storage.estimate().usage` stability
+`navigator.storage.estimate()` was calling `Math.random()` **inside the function body**, so each call returned a different `usage` value. Google can call this multiple times and detect the instability. Moved `Math.random()` outside to `var _storageUsage` computed once per page load.
+
+### What was checked and found OK
+| Signal | Status |
+|---|---|
+| MOBILE_UA | ✅ Per-account (built from fp values at Chrome launch) |
+| navigator.platform "Linux aarch64" profiles | ✅ Already correct (Samsung profiles) |
+| CDP Emulation.setTimezoneOverride | ✅ Called before first page nav |
+| CDP Emulation.setLocaleOverride | ✅ Called before first page nav |
+| Geolocation spoof | ✅ getCurrentPosition/watchPosition overridden with proxy lat/lon |
+| performance.memory | ✅ Math.random() computed once outside getter |
+| performance.now() jitter | ✅ Computed once per page load |
+| DeviceOrientation/Motion | ✅ Fired once per listener registration |
+| Font enumeration | ✅ Android font list intercepted |
+| WebRTC/ICE | ✅ ICE servers cleared |
+| canvas/audio/WebGL noise | ✅ Per-account seeded |
+
+### Known remaining limitation (not fixed — complex)
+**WebGL `getSupportedExtensions()` is not spoofed** — headless Chromium on Linux returns an ANGLE/Mesa/SwiftShader extension list that differs from real Android GPU extension lists (Adreno/Mali expose different extensions). Fixing this requires a per-GPU-family extension list (~50 extension strings each). Currently no extension override exists. This is detectable by advanced fingerprinters but is a large change.
+
+### Files changed
+- `artifacts/api-server/gmail_uc_checker.py` — 4 fixes above
+
+---
+
 ## Session 35 Changes (July 23, 2026) — GPU Vendor Mismatch Fixes (SM-S921B + SM-A556B)
 
 ### Problem
