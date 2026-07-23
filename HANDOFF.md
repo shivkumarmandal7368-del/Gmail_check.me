@@ -84,24 +84,42 @@ User clicks "OPEN BROWSER & CHECK" in home.tsx
 Each account gets a **unique persistent fingerprint** saved to:
 `/tmp/gmail_checker_profiles/<safe_email>/fingerprint.json`
 
-**What is spoofed per account (all reset on fresh profile):**
+**What is spoofed per account (all reset on fresh profile) — Session 26 current state:**
 - `navigator.userAgent` + `Sec-CH-UA` headers (CDP `Network.setUserAgentOverride` with full `userAgentMetadata`)
-- `navigator.userAgentData` — brands, model, Android version, mobile: true
-- `screen.width/height/availWidth/availHeight/colorDepth/pixelDepth`
-- `window.devicePixelRatio`
-- `navigator.hardwareConcurrency`, `navigator.deviceMemory`
-- `navigator.maxTouchPoints`, `navigator.platform`, `navigator.vendor`
-- `window.chrome.runtime` — fully mocked (connect, sendMessage, onMessage, onConnect, PlatformOs, id)
-- `window.chrome.loadTimes` + `window.chrome.csi` — mocked (Google checks these)
-- `WebGL UNMASKED_VENDOR_WEBGL` + `UNMASKED_RENDERER_WEBGL`
-- **Canvas fingerprint** — unique XOR seed (1–254) per account
-- **AudioContext fingerprint** — unique noise float per account
-- `navigator.connection` — `{effectiveType:'4g', type:'cellular', rtt: 40–100, downlink: 8–14}`
-- `screen.orientation` — portrait-primary
-- `navigator.webdriver` → undefined
+- `navigator.userAgentData` — brands, model, Android version, mobile: true, getHighEntropyValues()
+- `navigator.appVersion` — derived from UA string (was missing before S26)
+- `navigator.platform` → `'Linux armv81'` or `'Linux aarch64'` (matches phone profile)
+- `navigator.vendor` → `'Google Inc.'`
+- `navigator.hardwareConcurrency`, `navigator.deviceMemory`, `navigator.maxTouchPoints`
+- `navigator.plugins` — `Object.create(PluginArray.prototype)` with length 0 (was plain Array before S26)
+- `navigator.languages` — per-account language e.g. `['en-IN','en']`
+- `navigator.appVersion` — matches UA string
+- `navigator.cookieEnabled` → true
+- `navigator.doNotTrack` — weighted random: null/`"1"`/`"unspecified"`
+- `navigator.globalPrivacyControl` → undefined
 - `navigator.keyboard` → undefined
-- Battery: charging=false, level=0.72
-- Notification.permission → 'default'
+- `navigator.webdriver` → undefined
+- `navigator.connection` — `{effectiveType:'4g', type:'cellular', rtt, downlink, downlinkMax}` stable per account
+- `navigator.vibrate()` → always returns `true` (S26 — Linux Chrome returns false)
+- `navigator.mediaDevices.enumerateDevices()` — fake rear cam + front cam + mic, stable IDs per account (S26)
+- `screen.width/height/availWidth/availHeight/colorDepth/pixelDepth/isExtended/orientation`
+- `window.devicePixelRatio`, `window.innerWidth/innerHeight`, `window.outerWidth/outerHeight` (S26)
+- `window.chrome.runtime` — connect/sendMessage throw proper "Could not establish connection" error; onMessage/onConnect with hasListener(); id=undefined. **No PlatformOs** (extension-only API, removed S26)
+- `window.chrome.loadTimes` + `window.chrome.csi` — mocked (Google checks these)
+- `window.chrome.app` — deleted
+- `window.history.length` — per-account value 3–14 (try/catch; non-configurable so may silently fail)
+- `window.speechSynthesis.getVoices()` — fake Android TTS voices matching account language (S26)
+- **WebGL** — vendor + renderer spoofed; numeric params get per-parameter noise via `_phash(paramId)` (S26 — was same offset for all)
+- **Canvas** — `toDataURL`, `toBlob` (S26), `getImageData` all patched; unique XOR seed per account; 3 bytes modified
+- **AudioContext** — `getChannelData()` patched; samples 0, 1, 3 shifted with different multipliers (S26 — was sample 0 only)
+- **Timezone** — proxy exit IP geo-lookup → real timezone (e.g. `Asia/Kolkata`); fallback random (S26)
+- **Language** — proxy exit IP country → real Accept-Language (e.g. `en-IN`); `geoLocked: true` in fingerprint.json (S26)
+- Battery: `charging=false`, `level=0.15–0.94` (random per account), `dischargingTime` stable per account (S26 — was Math.random() each call)
+- `Notification.permission` → `'default'`; `navigator.permissions.query('notifications')` patched
+- `screen.isExtended` → false
+- **RTCPeerConnection** — iceServers cleared; webkit/mozRTC → undefined (prevents local IP leak)
+- **Intl.DateTimeFormat** — wrapped to force per-account timezone
+- Chrome flags: `--force-device-scale-factor={dpr}`, `--lang={fp.language}`, `--touch-events=enabled`, `--disable-blink-features=AutomationControlled`
 
 ### Fresh Device Per Run Toggle
 UI toggle (default ON). When ON:
