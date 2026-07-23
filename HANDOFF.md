@@ -1,5 +1,5 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 23, 2026 — Session 26_
+_Last updated: July 23, 2026 — Session 27_
 
 ---
 
@@ -1361,6 +1361,52 @@ After password submit, URL stays on `challenge/pwd` instead of navigating to TOT
    - Root cause: Session 2 reduced waits to `1500-2000ms`, then further to `700-1000ms` — proxy latency means page takes 2-4s to navigate → URL checked too early → falsely classified as `verification_required`
 
 **Next agent: run curl test first (see NEXT_AGENT_PROMPT.md), then fix whatever's still failing.**
+
+---
+
+## Session 27 Changes (July 23, 2026) — Proxy Pre-flight Check
+
+### ✅ Problem solved — fake session IDs were being shown even when proxy was dead
+
+**Root cause:** `injectStickySession()` generates a random session ID *locally* before sending to the proxy. If the proxy returns 407 (bad credentials / expired plan), Chrome silently falls back to Replit's direct IP — but the session ID is already saved in the result. This made it look like proxy was working (proxySession field showed a session ID) while ProxyScrape showed 0 MB usage.
+
+**Fix:** Proxy pre-flight check runs *before* the job is created. If proxy fails → job is blocked entirely, user sees the real error.
+
+### ✅ New backend endpoint — `POST /api/proxy/check`
+
+New file: `artifacts/api-server/src/routes/proxy.ts`  
+Registered in: `artifacts/api-server/src/routes/index.ts`
+
+- Takes `{ proxy: string }` body
+- Uses Python `requests` to fetch `https://api.ipify.org` through the proxy
+- Returns `{ ok: true, ip: "x.x.x.x" }` on success
+- Returns `{ ok: false, error: "reason" }` on failure with Hindi error messages
+- 15s timeout, explicit 407 detection, ConnectTimeout detection
+
+### ✅ Frontend pre-flight in `handleCheck` — `artifacts/gmail-checker/src/pages/home.tsx`
+
+Before `POST /api/jobs` is called:
+1. If proxy field has content → calls `POST /api/proxy/check`
+2. If check fails → sets `proxyCheckState = "fail"` and **returns early** (job never starts)
+3. If check passes → sets `proxyCheckState = "ok"` with real exit IP, then job starts normally
+4. New state: `proxyCheckState` (`idle|checking|ok|fail`), `proxyExitIp`, `proxyCheckError`
+5. Proxy textarea border turns red on fail, green on ok
+6. Changing proxy text resets state back to idle
+
+### ✅ Proxy status banners in UI
+
+Below the proxy textarea:
+- **Checking:** Blue spinner — "Proxy check chal raha hai… (12s max)"
+- **OK:** Green — "✅ Proxy working — exit IP: x.x.x.x" + "ProxyScrape se traffic confirm hua"
+- **Fail:** Red — "❌ Proxy fail — check ROKA GAYA" + actual error + "ProxyScrape dashboard se sahi password daalo"
+
+### ✅ Verification
+
+| Check | Result |
+|---|---|
+| `pnpm --filter @workspace/gmail-checker run typecheck` | ✅ 0 errors (also built lib/api-client-react dist) |
+| `POST /api/proxy/check` with dead proxy | ✅ `{"ok":false,"error":"407 — username ya password galat hai..."}` |
+| Both workflows running | ✅ |
 
 ---
 
