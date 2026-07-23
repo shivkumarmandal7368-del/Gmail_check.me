@@ -814,7 +814,7 @@ try{{
 window.ontouchstart=function(){{}};
 try{{Object.defineProperty(screen,'orientation',{{get:()=>({{{{'type':'portrait-primary','angle':0}}}})}}); }}catch(e){{}}
 try{{
-  var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'saveData':false,'type':'cellular','onchange':null}};
+  var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'saveData':false,'type':'wifi','onchange':null}};
   Object.defineProperty(navigator,'connection',{{get:()=>conn}});
   Object.defineProperty(navigator,'mozConnection',{{get:()=>undefined}});
   Object.defineProperty(navigator,'webkitConnection',{{get:()=>undefined}});
@@ -1152,7 +1152,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         _disp_num = _find_free_display()
         try:
             _xvfb_proc = subprocess.Popen(
-                ["Xvfb", f":{_disp_num}", "-screen", "0", "1366x768x24", "-ac"],
+                ["Xvfb", f":{_disp_num}", "-screen", "0", "1440x1024x24", "-ac"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             os.environ["DISPLAY"] = f":{_disp_num}"
