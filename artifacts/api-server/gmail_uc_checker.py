@@ -238,6 +238,59 @@ def move_to_element(driver, element):
     natural_mouse_move(driver, element)
 
 
+def touch_click(driver, element):
+    """Simulate a real finger tap via JS TouchEvent — critical for Android UA.
+    When Chrome's UA is Android mobile, mouse events look robotic. Real phones
+    fire touchstart → touchend → click. This replaces ActionChains mouse clicks
+    for all login form interactions (email, password, Next buttons, TOTP).
+
+    Falls back to element.click() if JS dispatch fails."""
+    try:
+        rand_sleep(40, 100)
+        driver.execute_script("""
+            var el = arguments[0];
+            var rect = el.getBoundingClientRect();
+            // Random tap point within middle 60% of element (avoids edges)
+            var x = Math.round(rect.left + rect.width  * (0.2 + Math.random() * 0.6));
+            var y = Math.round(rect.top  + rect.height * (0.2 + Math.random() * 0.6));
+            var id = Date.now();
+            var initDict = {
+                bubbles: true, cancelable: true, composed: true,
+                touches: [], targetTouches: [], changedTouches: []
+            };
+            try {
+                var t = new Touch({
+                    identifier: id, target: el,
+                    clientX: x, clientY: y,
+                    screenX: x + window.screenX, screenY: y + window.screenY,
+                    pageX: x + window.scrollX, pageY: y + window.scrollY,
+                    radiusX: 12, radiusY: 14,
+                    rotationAngle: Math.random() * 10,
+                    force: 0.7 + Math.random() * 0.2
+                });
+                var ts = new TouchEvent('touchstart', Object.assign({}, initDict,
+                    {touches: [t], targetTouches: [t], changedTouches: [t]}));
+                var te = new TouchEvent('touchend', Object.assign({}, initDict,
+                    {changedTouches: [t]}));
+                el.dispatchEvent(ts);
+                el.dispatchEvent(te);
+            } catch(touchErr) {
+                // TouchEvent constructor not supported (older Chromium) — fire click only
+            }
+            // Always fire click so the form actually submits
+            el.dispatchEvent(new MouseEvent('click', {
+                bubbles: true, cancelable: true, composed: true,
+                clientX: x, clientY: y
+            }));
+        """, element)
+        rand_sleep(40, 90)
+    except Exception:
+        try:
+            element.click()
+        except Exception:
+            pass
+
+
 # ── Phone device profiles — each account gets one assigned randomly ───────────
 # Modelled on real flagship Android phones; covers different GPU, screen, memory.
 PHONE_PROFILES = [
@@ -746,6 +799,10 @@ def make_stealth_js(fp: dict) -> str:
 Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
 Object.defineProperty(navigator,'plugins',{{get:()=>{{var p=[];p.length=0;return p;}}}});
 Object.defineProperty(navigator,'languages',{{get:()=>['en-IN','en-GB','en','hi']}});
+try{{Object.defineProperty(navigator,'language',{{get:()=>'en-IN'}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'userLanguage',{{get:()=>'en-IN'}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'browserLanguage',{{get:()=>'en-IN'}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'systemLanguage',{{get:()=>'en-IN'}});}}catch(e){{}} 
 Object.defineProperty(navigator,'hardwareConcurrency',{{get:()=>{fp['hwConcurrency']}}});
 Object.defineProperty(navigator,'deviceMemory',{{get:()=>{fp['deviceMemory']}}});
 Object.defineProperty(navigator,'cookieEnabled',{{get:()=>true}});
@@ -983,6 +1040,119 @@ try{{
 }})();
 try{{
   Date.prototype.getTimezoneOffset=function(){{return -330;}};
+}}catch(e){{}}
+try{{delete window.chrome.webstore;}}catch(e){{}}
+try{{delete window.chrome.cast;}}catch(e){{}}
+try{{
+  if(window.speechSynthesis){{
+    var _origGV=window.speechSynthesis.getVoices.bind(window.speechSynthesis);
+    window.speechSynthesis.getVoices=function(){{
+      var existing=_origGV();
+      if(existing&&existing.length>0)return existing;
+      function _v(n,l,d){{return{{name:n,lang:l,default:d,localService:false,voiceURI:n,
+        toString:function(){{return'[object SpeechSynthesisVoice]';}}}};}}
+      return[
+        _v('Google हिन्दी','hi-IN',false),
+        _v('Google US English','en-US',false),
+        _v('Google UK English Female','en-GB',false),
+        _v('Google हिंदी','hi',false),
+        _v('Microsoft Heera - English (India)','en-IN',true),
+      ];
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  function _makeSensor(name){{
+    if(!window[name]){{
+      window[name]=function(opts){{
+        this.start=function(){{}};this.stop=function(){{}};
+        this.addEventListener=function(){{}};this.removeEventListener=function(){{}};
+        this.x=0;this.y=0;this.z=0;this.quaternion=null;
+        this.timestamp=performance.now();this.activated=false;this.hasReading=false;
+      }};
+      window[name].prototype=Object.create(EventTarget.prototype);
+    }}
+  }}
+  _makeSensor('Accelerometer');_makeSensor('Gyroscope');
+  _makeSensor('LinearAccelerationSensor');_makeSensor('GravitySensor');
+  _makeSensor('AbsoluteOrientationSensor');_makeSensor('RelativeOrientationSensor');
+  _makeSensor('Magnetometer');_makeSensor('AmbientLightSensor');
+}}catch(e){{}}
+try{{
+  if(!navigator.bluetooth){{
+    Object.defineProperty(navigator,'bluetooth',{{
+      get:function(){{return{{
+        requestDevice:function(){{return Promise.reject(new DOMException('No device selected','NotFoundError'));}},
+        getAvailability:function(){{return Promise.resolve(true);}},
+        addEventListener:function(){{}},removeEventListener:function(){{}}
+      }}}},configurable:true
+    }});
+  }}
+}}catch(e){{}}
+try{{
+  if(!navigator.contacts){{
+    Object.defineProperty(navigator,'contacts',{{
+      get:function(){{return{{
+        select:function(){{return Promise.reject(new DOMException('Not allowed','SecurityError'));}},
+        getProperties:function(){{return Promise.resolve(['name','email','tel']);}},
+      }}}},configurable:true
+    }});
+  }}
+}}catch(e){{}}
+try{{
+  if(!navigator.mediaSession){{
+    Object.defineProperty(navigator,'mediaSession',{{
+      get:function(){{return{{
+        metadata:null,playbackState:'none',
+        setActionHandler:function(){{}},setPositionState:function(){{}},
+        setMicrophoneActive:function(){{}},setCameraActive:function(){{}}
+      }}}},configurable:true
+    }});
+  }}
+}}catch(e){{}}
+try{{
+  if(navigator.storage&&navigator.storage.estimate){{
+    var _origEst=navigator.storage.estimate.bind(navigator.storage);
+    navigator.storage.estimate=function(){{
+      var _dMem={fp['deviceMemory']};
+      return Promise.resolve({{
+        quota:Math.round(_dMem*1073741824*0.6),
+        usage:Math.round((80+Math.random()*120)*1048576),
+        usageDetails:{{caches:Math.round(20*1048576),indexedDB:Math.round(5*1048576),serviceWorkerRegistrations:Math.round(1*1048576)}}
+      }});
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  if(navigator.mediaCapabilities&&navigator.mediaCapabilities.decodingInfo){{
+    var _origDI=navigator.mediaCapabilities.decodingInfo.bind(navigator.mediaCapabilities);
+    navigator.mediaCapabilities.decodingInfo=function(cfg){{
+      return _origDI(cfg).then(function(r){{
+        return{{supported:true,smooth:true,powerEfficient:true}};
+      }}).catch(function(){{
+        return{{supported:true,smooth:true,powerEfficient:true}};
+      }});
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  if(!window.SpeechRecognition&&window.webkitSpeechRecognition){{
+    window.SpeechRecognition=window.webkitSpeechRecognition;
+  }}
+  if(!window.SpeechRecognition){{
+    window.SpeechRecognition=function(){{
+      this.start=function(){{}};this.stop=function(){{}};this.abort=function(){{}};
+      this.continuous=false;this.interimResults=false;this.lang='en-IN';
+      this.addEventListener=function(){{}};this.removeEventListener=function(){{}};
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  if(!navigator.scheduling){{
+    Object.defineProperty(navigator,'scheduling',{{
+      get:function(){{return{{isInputPending:function(){{return false;}}}}}},configurable:true
+    }});
+  }}
 }}catch(e){{}}
 """
 
@@ -1830,9 +2000,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     # click with stale-element retry (proxy extension can cause brief page reload)
     for _attempt in range(3):
         try:
-            natural_mouse_move(driver, email_field)
-            rand_sleep(60, 130)
-            email_field.click()
+            touch_click(driver, email_field)   # TouchEvent — real phone fires touch not mouse
             break
         except Exception:
             rand_sleep(200, 400)
@@ -1841,16 +2009,14 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     rand_sleep(80, 160)
     clipboard_type(driver, email_field, email)   # instant paste — xdotool clipboard
     rand_sleep(100, 200)
-    # Click the "Next" button — more human than Keys.ENTER (which is detectable as Selenium)
+    # Click the "Next" button via touch — more human than Keys.ENTER (detectable as Selenium)
     _email_next = wait_for_any([
         '#identifierNext button', '#identifierNext', '[jsname="LgbsSe"]',
         'button[type="button"]', 'div[role="button"]',
     ], timeout=4)
     if _email_next:
         try:
-            natural_mouse_move(driver, _email_next)
-            rand_sleep(80, 150)
-            _email_next.click()
+            touch_click(driver, _email_next)   # TouchEvent tap on Next
         except Exception:
             email_field.send_keys(Keys.ENTER)
     else:
@@ -1945,22 +2111,18 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             "debugScreenshot": shot,
         }
 
-    natural_mouse_move(driver, pw_field)
-    rand_sleep(60, 130)
-    pw_field.click()
+    touch_click(driver, pw_field)    # TouchEvent — real phone fires touch not mouse
     rand_sleep(80, 160)
     clipboard_type(driver, pw_field, password)   # instant paste — xdotool clipboard
     rand_sleep(100, 180)
-    # Click the "Next" button — more human than Keys.ENTER (detectable as Selenium)
+    # Click the "Next" button via touch — more human than Keys.ENTER (detectable as Selenium)
     _pw_next = wait_for_any([
         '#passwordNext button', '#passwordNext', '[jsname="LgbsSe"]',
         'button[type="button"]', 'div[role="button"]',
     ], timeout=4)
     if _pw_next:
         try:
-            natural_mouse_move(driver, _pw_next)
-            rand_sleep(80, 160)
-            _pw_next.click()
+            touch_click(driver, _pw_next)    # TouchEvent tap on Next
         except Exception:
             pw_field.send_keys(Keys.ENTER)
     else:
@@ -2171,7 +2333,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
         log(f"{email} — Entering TOTP code: {totp_code}")
         try:
-            natural_mouse_move(driver, totp_field)
+            touch_click(driver, totp_field)   # TouchEvent tap to focus field
             rand_sleep(60, 120)
             totp_field.clear()
             rand_sleep(40, 80)
