@@ -776,22 +776,24 @@ _RANDOM_TIMEZONES = [
 
 
 def geo_lookup_proxy(proxy_url: str) -> dict | None:
-    """Hit ip-api.com through the proxy to get exit IP's country + timezone.
-    Returns {"timezone": "...", "language": "..."} or None on any failure."""
+    """Hit ip-api.com through the proxy to get exit IP's country + timezone + coordinates.
+    Returns {"timezone": "...", "language": "...", "countryCode": "...", "lat": float, "lon": float} or None."""
     try:
         import requests as req
         proxies = {"http": proxy_url, "https": proxy_url}
         r = req.get(
-            "http://ip-api.com/json?fields=status,countryCode,timezone",
+            "http://ip-api.com/json?fields=status,countryCode,timezone,lat,lon",
             proxies=proxies, timeout=10
         )
         data = r.json()
         if data.get("status") != "success":
             return None
-        cc = data.get("countryCode", "US")
-        tz = data.get("timezone") or random.choice(_RANDOM_TIMEZONES)
-        lg = _COUNTRY_LANG.get(cc, "en-US")
-        return {"timezone": tz, "language": lg, "countryCode": cc}
+        cc  = data.get("countryCode", "US")
+        tz  = data.get("timezone") or random.choice(_RANDOM_TIMEZONES)
+        lg  = _COUNTRY_LANG.get(cc, "en-US")
+        lat = float(data.get("lat", 39.8283))
+        lon = float(data.get("lon", -98.5795))
+        return {"timezone": tz, "language": lg, "countryCode": cc, "lat": lat, "lon": lon}
     except Exception:
         return None
 
@@ -836,9 +838,13 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
         fp["timezone"]    = geo["timezone"]
         fp["language"]    = geo["language"]
         fp["countryCode"] = geo["countryCode"]
+        fp["lat"]         = geo.get("lat", 39.8283)
+        fp["lon"]         = geo.get("lon", -98.5795)
         fp["geoLocked"]   = True
     else:
         fp["geoLocked"] = False
+        fp["lat"]       = 37.7749   # San Francisco fallback
+        fp["lon"]       = -122.4194
         fp["timezone"] = random.choice(_RANDOM_TIMEZONES)
         # Per-account language — varies the Accept-Language header and navigator.languages
         fp["language"] = random.choice([
@@ -911,6 +917,15 @@ def make_stealth_js(fp: dict) -> str:
     sw   = fp["screenW"]
     sh   = fp["screenH"]
     ah   = fp["availH"]
+    lat  = fp.get("lat", 39.8283)
+    lon  = fp.get("lon", -98.5795)
+    # Compute real timezone offset in minutes (positive = west of UTC, e.g. EST=300)
+    try:
+        from zoneinfo import ZoneInfo as _ZI
+        from datetime import datetime as _dt2
+        _tz_offset = int(-_dt2.now(_ZI(fp.get("timezone", "America/New_York"))).utcoffset().total_seconds() / 60)
+    except Exception:
+        _tz_offset = 300   # CDT fallback
     return f"""
 Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
 Object.defineProperty(navigator,'plugins',{{get:()=>{{var p=[];p.length=0;return p;}}}});
@@ -1180,7 +1195,7 @@ try{{
   }}catch(e){{}}
 }})();
 try{{
-  Date.prototype.getTimezoneOffset=function(){{return -330;}};
+  Date.prototype.getTimezoneOffset=function(){{return {_tz_offset};}};
 }}catch(e){{}}
 try{{delete window.chrome.webstore;}}catch(e){{}}
 try{{delete window.chrome.cast;}}catch(e){{}}
@@ -1193,11 +1208,11 @@ try{{
       function _v(n,l,d){{return{{name:n,lang:l,default:d,localService:false,voiceURI:n,
         toString:function(){{return'[object SpeechSynthesisVoice]';}}}};}}
       return[
-        _v('Google हिन्दी','hi-IN',false),
-        _v('Google US English','en-US',false),
+        _v('Google US English','en-US',true),
         _v('Google UK English Female','en-GB',false),
-        _v('Google हिंदी','hi',false),
-        _v('Microsoft Heera - English (India)','en-IN',true),
+        _v('Google UK English Male','en-GB',false),
+        _v('Google Deutsch','de-DE',false),
+        _v('Google español','es-ES',false),
       ];
     }};
   }}
@@ -1267,12 +1282,16 @@ try{{
 try{{
   if(window.speechSynthesis){{
     var _fv=[
-      {{default:true,lang:'{lg}',name:'{lg}-default',localService:false,voiceURI:'{lg}-default'}},
-      {{default:false,lang:'en-US',name:'en-US-default',localService:false,voiceURI:'en-US-default'}},
+      {{default:true,lang:'{lg}',name:'Google US English',localService:false,voiceURI:'Google US English'}},
+      {{default:false,lang:'en-GB',name:'Google UK English Female',localService:false,voiceURI:'Google UK English Female'}},
+      {{default:false,lang:'en-GB',name:'Google UK English Male',localService:false,voiceURI:'Google UK English Male'}},
     ];
     Object.defineProperty(window.speechSynthesis,'onvoiceschanged',{{get:()=>null,set:function(fn){{if(fn)setTimeout(fn,0);}}}});
     var _ogv=window.speechSynthesis.getVoices.bind(window.speechSynthesis);
     window.speechSynthesis.getVoices=function(){{var r=_ogv();return(r&&r.length)?r:_fv;}};
+  }}
+}}catch(e){{}}
+try{{
   if(navigator.mediaCapabilities&&navigator.mediaCapabilities.decodingInfo){{
     var _origDI=navigator.mediaCapabilities.decodingInfo.bind(navigator.mediaCapabilities);
     navigator.mediaCapabilities.decodingInfo=function(cfg){{
@@ -1301,6 +1320,83 @@ try{{
     Object.defineProperty(navigator,'scheduling',{{
       get:function(){{return{{isInputPending:function(){{return false;}}}}}},configurable:true
     }});
+  }}
+}}catch(e){{}}
+try{{
+  if(!navigator.devicePosture){{
+    Object.defineProperty(navigator,'devicePosture',{{
+      get:function(){{return{{type:'continuous',
+        addEventListener:function(){{}},removeEventListener:function(){{}},dispatchEvent:function(){{return true;}}}}}},
+      configurable:true
+    }});
+  }}
+}}catch(e){{}}
+try{{
+  var _pnBase=performance.now.bind(performance);
+  var _pnJ=(Math.random()-0.5)*0.4;
+  performance.now=function(){{return _pnBase()+_pnJ;}};
+}}catch(e){{}}
+try{{
+  var _geoLat={lat};var _geoLon={lon};
+  var _geoAcc=Math.round(10+Math.random()*25);
+  var _geoAlt=Math.round(20+Math.random()*80);
+  if(navigator.geolocation){{
+    var _origGeo=navigator.geolocation.getCurrentPosition.bind(navigator.geolocation);
+    var _origGeoW=navigator.geolocation.watchPosition.bind(navigator.geolocation);
+    function _mkPos(){{
+      var coords={{latitude:_geoLat,longitude:_geoLon,accuracy:_geoAcc,altitude:_geoAlt,
+        altitudeAccuracy:Math.round(3+Math.random()*7),heading:null,speed:null,
+        toJSON:function(){{return{{latitude:_geoLat,longitude:_geoLon,accuracy:_geoAcc}};}}}};
+      return{{coords:coords,timestamp:Date.now(),toJSON:function(){{return{{coords:coords,timestamp:this.timestamp}};}}}};
+    }}
+    navigator.geolocation.getCurrentPosition=function(ok,err,opts){{
+      try{{ok(_mkPos());}}catch(e){{if(err)err(e);}}
+    }};
+    navigator.geolocation.watchPosition=function(ok,err,opts){{
+      try{{ok(_mkPos());}}catch(e){{if(err)err(e);}}
+      return Math.floor(Math.random()*1000)+1;
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  var _dmAlpha=Math.random()*0.3-0.15;
+  var _dmBeta= Math.random()*0.4-0.2;
+  var _dmGamma=Math.random()*0.2-0.1;
+  var _origAEL=window.addEventListener.bind(window);
+  window.addEventListener=function(type,fn,opts){{
+    _origAEL(type,fn,opts);
+    if(type==='deviceorientation'&&fn){{
+      setTimeout(function(){{
+        try{{fn(new DeviceOrientationEvent('deviceorientation',
+          {{alpha:_dmAlpha,beta:_dmBeta,gamma:_dmGamma,absolute:false}}));}}catch(e){{}}
+      }},50);
+    }}
+    if(type==='devicemotion'&&fn){{
+      setTimeout(function(){{
+        try{{
+          var _evt=new DeviceMotionEvent('devicemotion',{{
+            accelerationIncludingGravity:{{x:_dmGamma*9.8,y:_dmBeta*9.8,z:9.8+_dmAlpha}},
+            acceleration:{{x:_dmGamma*0.1,y:_dmBeta*0.1,z:_dmAlpha*0.05}},
+            rotationRate:{{alpha:_dmAlpha*10,beta:_dmBeta*8,gamma:_dmGamma*5}},
+            interval:16
+          }});
+          fn(_evt);
+        }}catch(e){{}}
+      }},60);
+    }}
+  }};
+}}catch(e){{}}
+try{{
+  var _androidFonts=['Roboto','Noto Sans','Noto Serif','Droid Sans','Droid Serif',
+    'Droid Sans Mono','Cutive Mono','Coming Soon','Dancing Script','Carrois Gothic SC',
+    'Noto Color Emoji','Android Emoji','sans-serif','serif','monospace','cursive'];
+  if(document.fonts&&document.fonts.check){{
+    var _origFCheck=document.fonts.check.bind(document.fonts);
+    document.fonts.check=function(font,text){{
+      var _f=(font||'').replace(/[0-9]+px\s*/,'').replace(/["']/g,'').trim();
+      if(_androidFonts.indexOf(_f)!==-1)return true;
+      return _origFCheck(font,text);
+    }};
   }}
 }}catch(e){{}}
 """
