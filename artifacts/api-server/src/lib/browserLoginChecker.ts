@@ -20,6 +20,17 @@ export type BrowserLoginStatus =
 
 export type BrowserResultCategory = "open" | "not_open" | "delete" | "unknown";
 
+export interface IpInfo {
+  ip?: string;
+  city?: string;
+  region?: string;
+  country?: string;
+  countryCode?: string;
+  isp?: string;
+  org?: string;
+  as?: string;
+}
+
 export interface BrowserLoginResult {
   email: string;
   status: BrowserLoginStatus;
@@ -28,6 +39,7 @@ export interface BrowserLoginResult {
   totpCode: string | null;
   debugScreenshot?: string;
   exitIp?: string;
+  ipInfo?: IpInfo;
   fingerprint?: string;
   proxySession?: string;   // unique sticky-session ID → proof of different IP per account
   durationMs?: number;     // how long this account took end-to-end (ms)
@@ -145,6 +157,7 @@ async function checkOneAccount(
           totpCode: parsed.totpCode ?? totpCode,
           debugScreenshot: parsed.debugScreenshot ?? undefined,
           exitIp: parsed.exitIp ?? undefined,
+          ipInfo: parsed.ipInfo ?? undefined,
           fingerprint: parsed.fingerprint ?? undefined,
           durationMs: typeof parsed.durationMs === "number" ? parsed.durationMs : undefined,
         });

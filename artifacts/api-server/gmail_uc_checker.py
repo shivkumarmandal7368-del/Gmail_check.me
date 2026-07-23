@@ -776,13 +776,13 @@ _RANDOM_TIMEZONES = [
 
 
 def geo_lookup_proxy(proxy_url: str) -> dict | None:
-    """Hit ip-api.com through the proxy to get exit IP's country + timezone + coordinates.
-    Returns {"timezone": "...", "language": "...", "countryCode": "...", "lat": float, "lon": float} or None."""
+    """Hit ip-api.com through the proxy to get exit IP's full details.
+    Returns timezone/language/geo fields (for fingerprint) + full IP info (for display)."""
     try:
         import requests as req
         proxies = {"http": proxy_url, "https": proxy_url}
         r = req.get(
-            "http://ip-api.com/json?fields=status,countryCode,timezone,lat,lon",
+            "http://ip-api.com/json?fields=status,query,country,countryCode,regionName,city,isp,org,as,timezone,lat,lon",
             proxies=proxies, timeout=10
         )
         data = r.json()
@@ -793,7 +793,18 @@ def geo_lookup_proxy(proxy_url: str) -> dict | None:
         lg  = _COUNTRY_LANG.get(cc, "en-US")
         lat = float(data.get("lat", 39.8283))
         lon = float(data.get("lon", -98.5795))
-        return {"timezone": tz, "language": lg, "countryCode": cc, "lat": lat, "lon": lon}
+        return {
+            # Fingerprint fields (timezone, language, geo)
+            "timezone": tz, "language": lg, "countryCode": cc, "lat": lat, "lon": lon,
+            # Full IP display info
+            "ip":      data.get("query"),
+            "city":    data.get("city"),
+            "region":  data.get("regionName"),
+            "country": data.get("country"),
+            "isp":     data.get("isp"),
+            "org":     data.get("org"),
+            "as":      data.get("as"),
+        }
     except Exception:
         return None
 
@@ -818,6 +829,9 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
                         existing["language"]    = geo["language"]
                         existing["countryCode"] = geo["countryCode"]
                         existing["geoLocked"]   = True
+                        for _k in ("ip", "city", "region", "country", "isp", "org", "as"):
+                            if geo.get(_k):
+                                existing[_k] = geo[_k]
                         try:
                             with open(fp_path, "w") as f:
                                 json.dump(existing, f, indent=2)
@@ -841,6 +855,9 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
         fp["lat"]         = geo.get("lat", 39.8283)
         fp["lon"]         = geo.get("lon", -98.5795)
         fp["geoLocked"]   = True
+        for _k in ("ip", "city", "region", "country", "isp", "org", "as"):
+            if geo.get(_k):
+                fp[_k] = geo[_k]
     else:
         fp["geoLocked"] = False
         fp["lat"]       = 37.7749   # San Francisco fallback
@@ -1824,6 +1841,12 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             pass
     _login_result["exitIp"] = exit_ip
     _login_result["fingerprint"] = fp_summary
+    # Full IP details from fingerprint geo-lock (no extra network call)
+    if fp.get("ip"):
+        _login_result["ipInfo"] = {k: fp.get(k) for k in ("ip", "city", "region", "country", "countryCode", "isp", "org", "as") if fp.get(k)}
+        log(f"Exit IP: {fp.get('ip')} | {fp.get('city')}, {fp.get('countryCode')} | {fp.get('isp')}")
+    else:
+        _login_result["ipInfo"] = None
     return _login_result
 
 

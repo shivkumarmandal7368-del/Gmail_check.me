@@ -1240,6 +1240,9 @@ function BrowserChecker() {
                     {displayed.some(r => (r as any).proxySession) && (
                       <TableHead className="font-mono text-xs w-[130px]">PROXY SESSION</TableHead>
                     )}
+                    {displayed.some(r => (r as any).ipInfo) && (
+                      <TableHead className="font-mono text-xs min-w-[180px]">EXIT IP</TableHead>
+                    )}
                     {displayed.some(r => (r as any).fingerprint) && (
                       <TableHead className="font-mono text-xs min-w-[200px]">FINGERPRINT</TableHead>
                     )}
@@ -1294,6 +1297,17 @@ function BrowserChecker() {
                       {displayed.some(x => (x as any).proxySession) && (
                         <TableCell className="text-[11px] font-mono text-cyan-400/80 tabular-nums">
                           <span className="text-muted-foreground/50 text-[9px]">session-</span>{(r as any).proxySession ?? "—"}
+                        </TableCell>
+                      )}
+                      {displayed.some(x => (x as any).ipInfo) && (
+                        <TableCell className="text-[10px] font-mono leading-relaxed">
+                          {(r as any).ipInfo ? (
+                            <div className="space-y-0.5">
+                              <div className="text-green-400/90 font-bold tracking-wider">{(r as any).ipInfo.ip ?? "—"}</div>
+                              <div className="text-muted-foreground/70">{[(r as any).ipInfo.city, (r as any).ipInfo.region, (r as any).ipInfo.countryCode].filter(Boolean).join(", ")}</div>
+                              <div className="text-blue-400/70 truncate max-w-[170px]" title={(r as any).ipInfo.isp}>{(r as any).ipInfo.isp ?? ""}</div>
+                            </div>
+                          ) : "—"}
                         </TableCell>
                       )}
                       {displayed.some(x => (x as any).fingerprint) && (
