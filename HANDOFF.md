@@ -2232,6 +2232,27 @@ ProxyScrape proxy confirmed working: `http://kp7d2s4gfeiszz7-odds-5+100-country-
 
 ---
 
+## Session 32 Changes (July 23, 2026) — Task Merge + Workflow Restart
+
+### ✅ Task #1 merged & workflows restarted
+- Task #1 ("Set up the imported project") was marked complete and merged
+- Both workflows stopped after merge; restarted manually:
+  - `artifacts/api-server: API Server` ✅
+  - `artifacts/gmail-checker: web` ✅
+
+### ✅ Follow-up tasks proposed (in queue for next agents)
+| Task | Category | Description |
+|------|----------|-------------|
+| #2 | incomplete_scope | Add FINGERPRINT count card to sidebar grid |
+| #3 | tech_debt | Automate lib dist rebuild so typecheck doesn't fail after fresh import |
+| #4 | next_steps | Auto-repeat/scheduled checking — run same accounts every N minutes |
+
+### Current state
+- Both workflows running clean ✅
+- No code changes this session — admin/ops only
+
+---
+
 ## What's Next (Future Work)
 
 1. **Proxy health pre-flight** — ping proxy before starting batch, warn if dead/slow  
