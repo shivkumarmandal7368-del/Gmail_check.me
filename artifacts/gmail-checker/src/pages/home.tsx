@@ -447,6 +447,11 @@ function BrowserChecker() {
     return saved.length > 0 && at ? at : null;
   });
 
+  // Proxy pre-flight check state
+  const [proxyCheckState, setProxyCheckState] = useState<"idle"|"checking"|"ok"|"fail">("idle");
+  const [proxyExitIp,     setProxyExitIp]     = useState<string>("");
+  const [proxyCheckError, setProxyCheckError] = useState<string>("");
+
   // refs
   const sseAbortRef      = useRef<AbortController | null>(null);
   const reconnectTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -677,6 +682,37 @@ function BrowserChecker() {
   const handleCheck = async () => {
     const credentials = parseCredentials(inputText);
     if (credentials.length === 0) return;
+
+    // ── Proxy pre-flight check ──────────────────────────────────────────────
+    // Run BEFORE starting the job so fake sessions are never created when
+    // the proxy is dead.  Blocks the check and shows the real error to the user.
+    const proxies = parseProxies(proxyText);
+    if (proxies.length > 0) {
+      setProxyCheckState("checking");
+      setProxyExitIp("");
+      setProxyCheckError("");
+      try {
+        const pRes = await fetch("/api/proxy/check", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ proxy: proxies[0] }),
+        });
+        const pData = await pRes.json() as { ok: boolean; ip?: string; error?: string };
+        if (!pData.ok) {
+          setProxyCheckState("fail");
+          setProxyCheckError(pData.error ?? "Proxy check failed");
+          return; // ← BLOCK: do not start the job
+        }
+        setProxyCheckState("ok");
+        setProxyExitIp(pData.ip ?? "");
+      } catch {
+        setProxyCheckState("fail");
+        setProxyCheckError("Proxy check endpoint unreachable");
+        return; // ← BLOCK
+      }
+    }
+    // ── End proxy pre-flight ────────────────────────────────────────────────
+
     // Build and persist credential map so exports survive page refresh
     const newCredsMap: Record<string, { password: string; totpSecret?: string }> = {};
     for (const c of credentials) newCredsMap[c.email] = { password: c.password, totpSecret: c.totp };
@@ -937,12 +973,35 @@ function BrowserChecker() {
                 placeholder={"http://user:pass@host1:port\nhttp://user:pass@host2:port\nhttp://user:pass@host3:port"}
                 className={cn(
                   "min-h-[80px] resize-y bg-background/50 font-mono text-xs leading-relaxed",
+                  proxyCheckState === "fail" ? "border-red-500/60" :
+                  proxyCheckState === "ok"   ? "border-green-500/60" :
                   parseProxies(proxyText).length > 0 ? "border-green-500/50" : "border-yellow-500/40"
                 )}
                 value={proxyText}
-                onChange={e => setProxyText(e.target.value)}
+                onChange={e => { setProxyText(e.target.value); setProxyCheckState("idle"); setProxyCheckError(""); setProxyExitIp(""); }}
                 disabled={isChecking}
               />
+
+              {/* Proxy pre-flight result banner */}
+              {proxyCheckState === "checking" && (
+                <div className="rounded-md border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-[11px] font-mono text-blue-300 flex items-center gap-2">
+                  <span className="animate-spin inline-block">⟳</span>
+                  Proxy check chal raha hai… (12s max)
+                </div>
+              )}
+              {proxyCheckState === "ok" && (
+                <div className="rounded-md border border-green-500/40 bg-green-500/5 px-3 py-2 text-[11px] font-mono text-green-300 space-y-0.5">
+                  <p className="font-semibold">✅ Proxy working — exit IP: <span className="text-green-200">{proxyExitIp}</span></p>
+                  <p className="text-green-400/60">ProxyScrape se traffic confirm hua — check shuru ho raha hai</p>
+                </div>
+              )}
+              {proxyCheckState === "fail" && (
+                <div className="rounded-md border border-red-500/40 bg-red-500/5 px-3 py-2 text-[11px] font-mono text-red-300 space-y-1">
+                  <p className="font-semibold">❌ Proxy fail — check ROKA GAYA</p>
+                  <p className="text-red-300/70 break-all">{proxyCheckError}</p>
+                  <p className="text-red-400/50 mt-1">ProxyScrape dashboard se sahi password daalo, phir dobara try karo</p>
+                </div>
+              )}
             </div>
 
             {/* Concurrency */}

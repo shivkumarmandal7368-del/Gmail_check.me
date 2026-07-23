@@ -1,5 +1,6 @@
 {pkgs}: {
   deps = [
+    pkgs.nano
     pkgs.xorg.xorgserver
     pkgs.xvfb-run
     pkgs.dbus

@@ -238,6 +238,59 @@ def move_to_element(driver, element):
     natural_mouse_move(driver, element)
 
 
+def touch_click(driver, element):
+    """Simulate a real finger tap via JS TouchEvent — critical for Android UA.
+    When Chrome's UA is Android mobile, mouse events look robotic. Real phones
+    fire touchstart → touchend → click. This replaces ActionChains mouse clicks
+    for all login form interactions (email, password, Next buttons, TOTP).
+
+    Falls back to element.click() if JS dispatch fails."""
+    try:
+        rand_sleep(40, 100)
+        driver.execute_script("""
+            var el = arguments[0];
+            var rect = el.getBoundingClientRect();
+            // Random tap point within middle 60% of element (avoids edges)
+            var x = Math.round(rect.left + rect.width  * (0.2 + Math.random() * 0.6));
+            var y = Math.round(rect.top  + rect.height * (0.2 + Math.random() * 0.6));
+            var id = Date.now();
+            var initDict = {
+                bubbles: true, cancelable: true, composed: true,
+                touches: [], targetTouches: [], changedTouches: []
+            };
+            try {
+                var t = new Touch({
+                    identifier: id, target: el,
+                    clientX: x, clientY: y,
+                    screenX: x + window.screenX, screenY: y + window.screenY,
+                    pageX: x + window.scrollX, pageY: y + window.scrollY,
+                    radiusX: 12, radiusY: 14,
+                    rotationAngle: Math.random() * 10,
+                    force: 0.7 + Math.random() * 0.2
+                });
+                var ts = new TouchEvent('touchstart', Object.assign({}, initDict,
+                    {touches: [t], targetTouches: [t], changedTouches: [t]}));
+                var te = new TouchEvent('touchend', Object.assign({}, initDict,
+                    {changedTouches: [t]}));
+                el.dispatchEvent(ts);
+                el.dispatchEvent(te);
+            } catch(touchErr) {
+                // TouchEvent constructor not supported (older Chromium) — fire click only
+            }
+            // Always fire click so the form actually submits
+            el.dispatchEvent(new MouseEvent('click', {
+                bubbles: true, cancelable: true, composed: true,
+                clientX: x, clientY: y
+            }));
+        """, element)
+        rand_sleep(40, 90)
+    except Exception:
+        try:
+            element.click()
+        except Exception:
+            pass
+
+
 # ── Phone device profiles — each account gets one assigned randomly ───────────
 # Modelled on real flagship Android phones; covers different GPU, screen, memory.
 PHONE_PROFILES = [
@@ -792,6 +845,10 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
             "en-US", "en-US", "en-US", "en-US",  # weighted — most users are en-US
             "en-GB", "en-CA", "en-AU", "en-IN",
         ])
+    # Fixed India timezone — all accounts use IST (matches Indian mobile proxy)
+    fp["timezone"] = "Asia/Kolkata"
+    # Fixed India language — matches Jio/Airtel mobile carrier locale
+    fp["language"] = "en-IN"
     # ── App-cloner style: every account has its own unique device identity ────
     # Battery — real phones vary; always discharging (mobile check, plugged-in is rare)
     fp["batteryLevel"]    = round(random.uniform(0.15, 0.94), 2)
@@ -866,6 +923,17 @@ Object.defineProperty(navigator,'plugins',{{get:()=>{{
   }}catch(e){{var p=[];p.length=0;return p;}}
 }}}});
 Object.defineProperty(navigator,'languages',{{get:()=>['{lg}','en']}});
+    sw   = fp["screenW"]
+    sh   = fp["screenH"]
+    ah   = fp["availH"]
+    return f"""
+Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
+Object.defineProperty(navigator,'plugins',{{get:()=>{{var p=[];p.length=0;return p;}}}});
+Object.defineProperty(navigator,'languages',{{get:()=>['en-IN','en-GB','en','hi']}});
+try{{Object.defineProperty(navigator,'language',{{get:()=>'en-IN'}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'userLanguage',{{get:()=>'en-IN'}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'browserLanguage',{{get:()=>'en-IN'}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'systemLanguage',{{get:()=>'en-IN'}});}}catch(e){{}} 
 Object.defineProperty(navigator,'hardwareConcurrency',{{get:()=>{fp['hwConcurrency']}}});
 Object.defineProperty(navigator,'deviceMemory',{{get:()=>{fp['deviceMemory']}}});
 Object.defineProperty(navigator,'cookieEnabled',{{get:()=>true}});
@@ -937,11 +1005,16 @@ try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e
 (function(){{
   var _ws={wn};
   function _phash(p){{var h=p^0xDEAD;h=((h>>16)^h)*0x45d9f3b|0;h=((h>>16)^h)*0x45d9f3b|0;return(h^(h>>16))&0xFFFF;}}
+  var _wn={wn};var _wv='{wv}';var _wr='{wr}';
   function patch(ctx){{
     var gp=ctx.prototype.getParameter;
     ctx.prototype.getParameter=function(p){{
-      if(p===37445)return'{wv}';
-      if(p===37446)return'{wr}';
+      if(p===37445)return _wv;          // UNMASKED_VENDOR_WEBGL
+      if(p===37446)return _wr;          // UNMASKED_RENDERER_WEBGL
+      if(p===7936) return _wv;          // GL_VENDOR  (basic — reveals server GPU on headless)
+      if(p===7937) return _wr;          // GL_RENDERER (basic — reveals "ANGLE (Intel, Mesa...)")
+      if(p===7938) return 'OpenGL ES 3.2 v1.r47p0-01eac0';  // GL_VERSION
+      if(p===35724)return 'OpenGL ES GLSL ES 3.20';          // SHADING_LANGUAGE_VERSION
       var v=gp.call(this,p);
       if(typeof v==='number'){{var n=(_phash(p)/65535)*_ws*4-_ws*2;return v+n*Math.sign(v||1);}}
       return v;
@@ -1002,6 +1075,206 @@ try{{
           {{deviceId:'{cam_front_id}',groupId:'{cam_group}',kind:'videoinput',label:'camera2 1, facing front'}},
           {{deviceId:'{mic_id}',groupId:'{mic_group}',kind:'audioinput',label:'Default'}},
         ];
+try{{Object.defineProperty(window,'outerWidth',{{get:()=>{sw}}});}}catch(e){{}}
+try{{Object.defineProperty(window,'outerHeight',{{get:()=>{sh}}});}}catch(e){{}}
+try{{
+  var _vvp=window.visualViewport;
+  if(_vvp){{
+    try{{Object.defineProperty(_vvp,'width',{{get:()=>{sw}}});}}catch(e){{}}
+    try{{Object.defineProperty(_vvp,'height',{{get:()=>{ah}}});}}catch(e){{}}
+    try{{Object.defineProperty(_vvp,'offsetLeft',{{get:()=>0}});}}catch(e){{}}
+    try{{Object.defineProperty(_vvp,'offsetTop',{{get:()=>0}});}}catch(e){{}}
+    try{{Object.defineProperty(_vvp,'pageLeft',{{get:()=>0}});}}catch(e){{}}
+    try{{Object.defineProperty(_vvp,'pageTop',{{get:()=>0}});}}catch(e){{}}
+    try{{Object.defineProperty(_vvp,'scale',{{get:()=>1}});}}catch(e){{}}
+  }}
+}}catch(e){{}}
+try{{Object.defineProperty(navigator,'appVersion',{{get:()=>'5.0 (Linux; Android {av}; {mdl}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{cv} Mobile Safari/537.36'}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'onLine',{{get:()=>true}});}}catch(e){{}}
+try{{
+  if(navigator.permissions&&navigator.permissions.query){{
+    var _origPQ2=navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query=function(p){{
+      if(p&&(p.name==='camera'||p.name==='microphone'||p.name==='geolocation'))
+        return Promise.resolve({{state:'prompt',onchange:null}});
+      if(p&&(p.name==='accelerometer'||p.name==='gyroscope'||p.name==='magnetometer'||p.name==='ambient-light-sensor'))
+        return Promise.resolve({{state:'granted',onchange:null}});
+      return _origPQ2(p);
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  if(navigator.mediaDevices){{
+    navigator.mediaDevices.enumerateDevices=function(){{
+      return Promise.resolve([
+        {{kind:'audioinput',deviceId:'',groupId:'',label:'',toJSON:function(){{return {{kind:'audioinput',deviceId:'',groupId:'',label:''}};}} }},
+        {{kind:'videoinput',deviceId:'',groupId:'',label:'',toJSON:function(){{return {{kind:'videoinput',deviceId:'',groupId:'',label:''}};}} }},
+        {{kind:'audiooutput',deviceId:'default',groupId:'default',label:'',toJSON:function(){{return {{kind:'audiooutput',deviceId:'default',groupId:'default',label:''}};}} }}
+      ]);
+    }};
+  }}
+}}catch(e){{}}
+try{{Object.defineProperty(screen,'availLeft',{{get:()=>0}});}}catch(e){{}}
+try{{Object.defineProperty(screen,'availTop',{{get:()=>0}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'javaEnabled',{{value:function(){{return false;}},writable:false,configurable:true}});}}catch(e){{}}
+try{{
+  var _origMimeTypes=navigator.mimeTypes;
+  Object.defineProperty(navigator,'mimeTypes',{{get:()=>{{var m=Object.create(MimeTypeArray.prototype);Object.defineProperty(m,'length',{{value:0}});m.item=function(){{return null;}};m.namedItem=function(){{return null;}};return m;}}}});
+}}catch(e){{}}
+try{{document.hasFocus=function(){{return true;}};}}catch(e){{}}
+try{{
+  var _obTblob=HTMLCanvasElement.prototype.toBlob;
+  if(_obTblob){{
+    var _bseed={cs};
+    HTMLCanvasElement.prototype.toBlob=function(cb,t,q){{
+      try{{var c=this.getContext('2d');if(c){{var d=c.getImageData(0,0,this.width||1,this.height||1);d.data[0]=d.data[0]^_bseed;c.putImageData(d,0,0);}}}}catch(e){{}}
+      _obTblob.call(this,cb,t,q);
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  Object.defineProperty(navigator,'share',{{value:function(data){{return Promise.resolve();}},writable:false,configurable:true}});
+}}catch(e){{}}
+try{{
+  if(!navigator.getInstalledRelatedApps){{
+    Object.defineProperty(navigator,'getInstalledRelatedApps',{{value:function(){{return Promise.resolve([]);}},writable:false,configurable:true}});
+  }}
+}}catch(e){{}}
+try{{
+  if(!navigator.wakeLock){{
+    Object.defineProperty(navigator,'wakeLock',{{get:function(){{return{{request:function(t){{return Promise.resolve({{type:t,released:false,release:function(){{return Promise.resolve();}},addEventListener:function(){{}},removeEventListener:function(){{}}}});}}}}}},configurable:true}});
+  }}
+}}catch(e){{}}
+try{{
+  if(!navigator.virtualKeyboard){{
+    Object.defineProperty(navigator,'virtualKeyboard',{{get:function(){{return{{show:function(){{}},hide:function(){{}},overlaysContent:false,boundingRect:{{x:0,y:0,width:0,height:0,top:0,right:0,bottom:0,left:0}},addEventListener:function(){{}},removeEventListener:function(){{}}}}}},configurable:true}});
+  }}
+}}catch(e){{}}
+try{{
+  var _dMem={fp['deviceMemory']};
+  var _heapLim=Math.round(_dMem*268435456);
+  var _heapTot=Math.round((45+Math.random()*35)*1048576);
+  var _heapUsd=Math.round((25+Math.random()*25)*1048576);
+  if(window.performance&&!Object.getOwnPropertyDescriptor(performance,'memory')){{
+    Object.defineProperty(performance,'memory',{{get:function(){{return{{jsHeapSizeLimit:_heapLim,totalJSHeapSize:_heapTot,usedJSHeapSize:_heapUsd}}}},configurable:true}});
+  }}
+}}catch(e){{}}
+try{{
+  if(typeof DeviceMotionEvent!=='undefined'&&!DeviceMotionEvent.requestPermission){{
+    DeviceMotionEvent.requestPermission=function(){{return Promise.resolve('granted');}};
+  }}
+  if(typeof DeviceOrientationEvent!=='undefined'&&!DeviceOrientationEvent.requestPermission){{
+    DeviceOrientationEvent.requestPermission=function(){{return Promise.resolve('granted');}};
+  }}
+}}catch(e){{}}
+(function(){{
+  try{{
+    var _omm=window.matchMedia&&window.matchMedia.bind(window);
+    if(!_omm)return;
+    function _mmr(q,m){{return{{matches:m,media:q,onchange:null,addListener:function(){{}},removeListener:function(){{}},addEventListener:function(){{}},removeEventListener:function(){{}},dispatchEvent:function(){{return true;}}}};}}
+    window.matchMedia=function(q){{
+      var s=(q||'').replace(/\s+/g,'').toLowerCase();
+      if(s==='(pointer:coarse)')return _mmr(q,true);
+      if(s==='(pointer:fine)')return _mmr(q,false);
+      if(s==='(hover:none)')return _mmr(q,true);
+      if(s==='(hover:hover)')return _mmr(q,false);
+      if(s==='(any-pointer:coarse)')return _mmr(q,true);
+      if(s==='(any-pointer:fine)')return _mmr(q,false);
+      if(s==='(any-hover:hover)')return _mmr(q,false);
+      if(s==='(any-hover:none)')return _mmr(q,true);
+      if(s==='(prefers-color-scheme:dark)')return _mmr(q,true);
+      if(s==='(prefers-color-scheme:light)')return _mmr(q,false);
+      if(s==='(orientation:portrait)')return _mmr(q,true);
+      if(s==='(orientation:landscape)')return _mmr(q,false);
+      if(s==='(display-mode:browser)')return _mmr(q,true);
+      if(s==='(display-mode:standalone)')return _mmr(q,false);
+      if(s==='(prefers-reduced-motion:reduce)')return _mmr(q,false);
+      if(s==='(prefers-reduced-motion:no-preference)')return _mmr(q,true);
+      return _omm(q);
+    }};
+  }}catch(e){{}}
+}})();
+try{{
+  Date.prototype.getTimezoneOffset=function(){{return -330;}};
+}}catch(e){{}}
+try{{delete window.chrome.webstore;}}catch(e){{}}
+try{{delete window.chrome.cast;}}catch(e){{}}
+try{{
+  if(window.speechSynthesis){{
+    var _origGV=window.speechSynthesis.getVoices.bind(window.speechSynthesis);
+    window.speechSynthesis.getVoices=function(){{
+      var existing=_origGV();
+      if(existing&&existing.length>0)return existing;
+      function _v(n,l,d){{return{{name:n,lang:l,default:d,localService:false,voiceURI:n,
+        toString:function(){{return'[object SpeechSynthesisVoice]';}}}};}}
+      return[
+        _v('Google हिन्दी','hi-IN',false),
+        _v('Google US English','en-US',false),
+        _v('Google UK English Female','en-GB',false),
+        _v('Google हिंदी','hi',false),
+        _v('Microsoft Heera - English (India)','en-IN',true),
+      ];
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  function _makeSensor(name){{
+    if(!window[name]){{
+      window[name]=function(opts){{
+        this.start=function(){{}};this.stop=function(){{}};
+        this.addEventListener=function(){{}};this.removeEventListener=function(){{}};
+        this.x=0;this.y=0;this.z=0;this.quaternion=null;
+        this.timestamp=performance.now();this.activated=false;this.hasReading=false;
+      }};
+      window[name].prototype=Object.create(EventTarget.prototype);
+    }}
+  }}
+  _makeSensor('Accelerometer');_makeSensor('Gyroscope');
+  _makeSensor('LinearAccelerationSensor');_makeSensor('GravitySensor');
+  _makeSensor('AbsoluteOrientationSensor');_makeSensor('RelativeOrientationSensor');
+  _makeSensor('Magnetometer');_makeSensor('AmbientLightSensor');
+}}catch(e){{}}
+try{{
+  if(!navigator.bluetooth){{
+    Object.defineProperty(navigator,'bluetooth',{{
+      get:function(){{return{{
+        requestDevice:function(){{return Promise.reject(new DOMException('No device selected','NotFoundError'));}},
+        getAvailability:function(){{return Promise.resolve(true);}},
+        addEventListener:function(){{}},removeEventListener:function(){{}}
+      }}}},configurable:true
+    }});
+  }}
+}}catch(e){{}}
+try{{
+  if(!navigator.contacts){{
+    Object.defineProperty(navigator,'contacts',{{
+      get:function(){{return{{
+        select:function(){{return Promise.reject(new DOMException('Not allowed','SecurityError'));}},
+        getProperties:function(){{return Promise.resolve(['name','email','tel']);}},
+      }}}},configurable:true
+    }});
+  }}
+}}catch(e){{}}
+try{{
+  if(!navigator.mediaSession){{
+    Object.defineProperty(navigator,'mediaSession',{{
+      get:function(){{return{{
+        metadata:null,playbackState:'none',
+        setActionHandler:function(){{}},setPositionState:function(){{}},
+        setMicrophoneActive:function(){{}},setCameraActive:function(){{}}
+      }}}},configurable:true
+    }});
+  }}
+}}catch(e){{}}
+try{{
+  if(navigator.storage&&navigator.storage.estimate){{
+    var _origEst=navigator.storage.estimate.bind(navigator.storage);
+    navigator.storage.estimate=function(){{
+      var _dMem={fp['deviceMemory']};
+      return Promise.resolve({{
+        quota:Math.round(_dMem*1073741824*0.6),
+        usage:Math.round((80+Math.random()*120)*1048576),
+        usageDetails:{{caches:Math.round(20*1048576),indexedDB:Math.round(5*1048576),serviceWorkerRegistrations:Math.round(1*1048576)}}
       }});
     }};
   }}
@@ -1015,6 +1288,34 @@ try{{
     Object.defineProperty(window.speechSynthesis,'onvoiceschanged',{{get:()=>null,set:function(fn){{if(fn)setTimeout(fn,0);}}}});
     var _ogv=window.speechSynthesis.getVoices.bind(window.speechSynthesis);
     window.speechSynthesis.getVoices=function(){{var r=_ogv();return(r&&r.length)?r:_fv;}};
+  if(navigator.mediaCapabilities&&navigator.mediaCapabilities.decodingInfo){{
+    var _origDI=navigator.mediaCapabilities.decodingInfo.bind(navigator.mediaCapabilities);
+    navigator.mediaCapabilities.decodingInfo=function(cfg){{
+      return _origDI(cfg).then(function(r){{
+        return{{supported:true,smooth:true,powerEfficient:true}};
+      }}).catch(function(){{
+        return{{supported:true,smooth:true,powerEfficient:true}};
+      }});
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  if(!window.SpeechRecognition&&window.webkitSpeechRecognition){{
+    window.SpeechRecognition=window.webkitSpeechRecognition;
+  }}
+  if(!window.SpeechRecognition){{
+    window.SpeechRecognition=function(){{
+      this.start=function(){{}};this.stop=function(){{}};this.abort=function(){{}};
+      this.continuous=false;this.interimResults=false;this.lang='en-IN';
+      this.addEventListener=function(){{}};this.removeEventListener=function(){{}};
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  if(!navigator.scheduling){{
+    Object.defineProperty(navigator,'scheduling',{{
+      get:function(){{return{{isInputPending:function(){{return false;}}}}}},configurable:true
+    }});
   }}
 }}catch(e){{}}
 """
@@ -1271,6 +1572,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument(f"--window-size={fp['screenW']},{fp['screenH']}")
+    options.add_argument("--lang=en-IN,en-GB;q=0.9,en;q=0.8,hi;q=0.7")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-save-password-bubble")
@@ -1279,13 +1581,21 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-features=ChromeWhatsNewUI,ChromeReporting,EnablePasswordsAccountStorage")
+    options.add_argument("--disable-features=ChromeWhatsNewUI,ChromeReporting,EnablePasswordsAccountStorage,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,MediaRouter")
+    options.add_argument("--disable-sync")
+    options.add_argument("--no-pings")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-client-side-phishing-detection")
+    options.add_argument("--disable-component-update")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--disable-domain-reliability")
+    options.add_argument("--disable-hang-monitor")
+    options.add_argument("--disable-prompt-on-repost")
+    options.add_argument("--mute-audio")
     options.add_argument(f"--user-agent={MOBILE_UA}")
     options.add_argument("--touch-events=enabled")
     # Match the fingerprint DPR so window.devicePixelRatio equals screen.dpr
     options.add_argument(f"--force-device-scale-factor={fp['dpr']}")
-    # Use fingerprint language for Accept-Language Chrome header
-    options.add_argument(f"--lang={fp.get('language', 'en-US')}")
     if headless:
         options.add_argument("--disable-gpu")
 
@@ -1305,7 +1615,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         _disp_num = _find_free_display()
         try:
             _xvfb_proc = subprocess.Popen(
-                ["Xvfb", f":{_disp_num}", "-screen", "0", "1366x768x24", "-ac"],
+                ["Xvfb", f":{_disp_num}", "-screen", "0", "1440x1024x24", "-ac"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             os.environ["DISPLAY"] = f":{_disp_num}"
@@ -1387,7 +1697,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         driver.execute_cdp_cmd("Network.enable", {})
         driver.execute_cdp_cmd("Network.setUserAgentOverride", {
             "userAgent": MOBILE_UA,
-            "acceptLanguage": f"{fp.get('language', 'en-US')},en;q=0.9",
+            "acceptLanguage": "en-IN,en-GB;q=0.9,en;q=0.8,hi;q=0.7",
             "platform": fp["platform"],
             "userAgentMetadata": {
                 "brands": [
@@ -1650,11 +1960,10 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     # 800–1200ms was too short over proxy — page incomplete → Google detects
     # automation → bounces back to challenge/pwd → wrongly tagged wrong_password.
     try:
-        log(f"{email} — Step 0: warmup visit to google.com")
+        log(f"{email} — Step 0: warmup — building Google session cookies")
         driver.get("https://www.google.com")
-        # Wait for page to be fully interactive (document.readyState = complete)
-        # Proxy latency means this can take 2–4s — don't skip ahead early.
-        _w_deadline = time.time() + 6
+        # Wait for page fully interactive — proxy latency can take 2-5s
+        _w_deadline = time.time() + 8
         while time.time() < _w_deadline:
             try:
                 if driver.execute_script("return document.readyState") == "complete":
@@ -1662,15 +1971,42 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             except Exception:
                 pass
             time.sleep(0.35)
-        # Simulate minimal human interaction: scroll down, pause, scroll back up
+        rand_sleep(800, 1300)
+        # Accept cookie/privacy consent if Google shows it (common outside US)
         try:
-            driver.execute_script("window.scrollTo({top: 250, behavior: 'smooth'});")
-            rand_sleep(300, 500)
-            driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
+            for _btn_sel in [
+                "#L2AGLb", "button.tHlp8d", "[jsname='b3VHJd']",
+                "button[aria-label*='Accept all']", "button[aria-label*='accept']",
+            ]:
+                _btns = driver.find_elements(By.CSS_SELECTOR, _btn_sel)
+                if _btns and _btns[0].is_displayed():
+                    _btns[0].click()
+                    rand_sleep(600, 900)
+                    break
         except Exception:
             pass
-        # Let JS fingerprint hooks execute fully before leaving the page
-        rand_sleep(1000, 1500)
+        # Real Google search — builds NID, 1P_JAR, SOCS, AEC cookies that
+        # make the subsequent login session look organic, not bot-fresh.
+        try:
+            _search_terms = ["gmail login", "google account", "inbox email", "google news", "youtube"]
+            _term = random.choice(_search_terms)
+            _sbox = driver.find_elements(By.NAME, "q")
+            if _sbox and _sbox[0].is_displayed():
+                for _c in _term:
+                    _sbox[0].send_keys(_c)
+                    time.sleep(random.uniform(0.07, 0.19))
+                rand_sleep(450, 750)
+                _sbox[0].send_keys(Keys.RETURN)
+                rand_sleep(1800, 2800)
+                # Scroll through results like a real user
+                driver.execute_script("window.scrollTo({top: 350, behavior: 'smooth'});")
+                rand_sleep(600, 1000)
+                driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
+                rand_sleep(400, 700)
+                log(f"{email} — Step 0: searched '{_term}', session cookies built")
+        except Exception:
+            pass
+        rand_sleep(700, 1100)
         log(f"{email} — Step 0: warmup complete")
     except Exception:
         pass  # warmup failure is non-fatal — continue anyway
@@ -1831,9 +2167,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     # click with stale-element retry (proxy extension can cause brief page reload)
     for _attempt in range(3):
         try:
-            natural_mouse_move(driver, email_field)
-            rand_sleep(60, 130)
-            email_field.click()
+            touch_click(driver, email_field)   # TouchEvent — real phone fires touch not mouse
             break
         except Exception:
             rand_sleep(200, 400)
@@ -1842,16 +2176,14 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     rand_sleep(80, 160)
     clipboard_type(driver, email_field, email)   # instant paste — xdotool clipboard
     rand_sleep(100, 200)
-    # Click the "Next" button — more human than Keys.ENTER (which is detectable as Selenium)
+    # Click the "Next" button via touch — more human than Keys.ENTER (detectable as Selenium)
     _email_next = wait_for_any([
         '#identifierNext button', '#identifierNext', '[jsname="LgbsSe"]',
         'button[type="button"]', 'div[role="button"]',
     ], timeout=4)
     if _email_next:
         try:
-            natural_mouse_move(driver, _email_next)
-            rand_sleep(80, 150)
-            _email_next.click()
+            touch_click(driver, _email_next)   # TouchEvent tap on Next
         except Exception:
             email_field.send_keys(Keys.ENTER)
     else:
@@ -1946,22 +2278,18 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             "debugScreenshot": shot,
         }
 
-    natural_mouse_move(driver, pw_field)
-    rand_sleep(60, 130)
-    pw_field.click()
+    touch_click(driver, pw_field)    # TouchEvent — real phone fires touch not mouse
     rand_sleep(80, 160)
     clipboard_type(driver, pw_field, password)   # instant paste — xdotool clipboard
     rand_sleep(100, 180)
-    # Click the "Next" button — more human than Keys.ENTER (detectable as Selenium)
+    # Click the "Next" button via touch — more human than Keys.ENTER (detectable as Selenium)
     _pw_next = wait_for_any([
         '#passwordNext button', '#passwordNext', '[jsname="LgbsSe"]',
         'button[type="button"]', 'div[role="button"]',
     ], timeout=4)
     if _pw_next:
         try:
-            natural_mouse_move(driver, _pw_next)
-            rand_sleep(80, 160)
-            _pw_next.click()
+            touch_click(driver, _pw_next)    # TouchEvent tap on Next
         except Exception:
             pw_field.send_keys(Keys.ENTER)
     else:
@@ -2172,7 +2500,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
         log(f"{email} — Entering TOTP code: {totp_code}")
         try:
-            natural_mouse_move(driver, totp_field)
+            touch_click(driver, totp_field)   # TouchEvent tap to focus field
             rand_sleep(60, 120)
             totp_field.clear()
             rand_sleep(40, 80)
