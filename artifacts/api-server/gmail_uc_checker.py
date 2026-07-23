@@ -750,6 +750,9 @@ def make_stealth_js(fp: dict) -> str:
     dl   = fp.get("connectionDownlink", 10.5)
     hist = fp.get("historyLength", 5)
     wn   = fp.get("webglNoise", 0.000002)
+    sw   = fp["screenW"]
+    sh   = fp["screenH"]
+    ah   = fp["availH"]
     return f"""
 Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
 Object.defineProperty(navigator,'plugins',{{get:()=>{{var p=[];p.length=0;return p;}}}});
@@ -866,6 +869,43 @@ try{{var _tz='{tz}';var _dto=Intl.DateTimeFormat;function _dtow(l,o){{o=o||{{}};
     window.mozRTCPeerConnection=undefined;
   }}catch(e){{}}
 }})();
+try{{Object.defineProperty(window,'outerWidth',{{get:()=>{sw}}});}}catch(e){{}}
+try{{Object.defineProperty(window,'outerHeight',{{get:()=>{sh}}});}}catch(e){{}}
+try{{
+  var _vvp=window.visualViewport;
+  if(_vvp){{
+    try{{Object.defineProperty(_vvp,'width',{{get:()=>{sw}}});}}catch(e){{}}
+    try{{Object.defineProperty(_vvp,'height',{{get:()=>{ah}}});}}catch(e){{}}
+    try{{Object.defineProperty(_vvp,'offsetLeft',{{get:()=>0}});}}catch(e){{}}
+    try{{Object.defineProperty(_vvp,'offsetTop',{{get:()=>0}});}}catch(e){{}}
+    try{{Object.defineProperty(_vvp,'pageLeft',{{get:()=>0}});}}catch(e){{}}
+    try{{Object.defineProperty(_vvp,'pageTop',{{get:()=>0}});}}catch(e){{}}
+    try{{Object.defineProperty(_vvp,'scale',{{get:()=>1}});}}catch(e){{}}
+  }}
+}}catch(e){{}}
+try{{Object.defineProperty(navigator,'appVersion',{{get:()=>'5.0 (Linux; Android {av}; {mdl}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{cv} Mobile Safari/537.36'}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'onLine',{{get:()=>true}});}}catch(e){{}}
+try{{
+  if(navigator.permissions&&navigator.permissions.query){{
+    var _origPQ2=navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query=function(p){{
+      if(p&&(p.name==='camera'||p.name==='microphone'||p.name==='geolocation'))
+        return Promise.resolve({{state:'prompt',onchange:null}});
+      return _origPQ2(p);
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  if(navigator.mediaDevices){{
+    navigator.mediaDevices.enumerateDevices=function(){{
+      return Promise.resolve([
+        {{kind:'audioinput',deviceId:'',groupId:'',label:'',toJSON:function(){{return {{kind:'audioinput',deviceId:'',groupId:'',label:''}};}} }},
+        {{kind:'videoinput',deviceId:'',groupId:'',label:'',toJSON:function(){{return {{kind:'videoinput',deviceId:'',groupId:'',label:''}};}} }},
+        {{kind:'audiooutput',deviceId:'default',groupId:'default',label:'',toJSON:function(){{return {{kind:'audiooutput',deviceId:'default',groupId:'default',label:''}};}} }}
+      ]);
+    }};
+  }}
+}}catch(e){{}}
 """
 
 
@@ -1126,7 +1166,17 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-features=ChromeWhatsNewUI,ChromeReporting,EnablePasswordsAccountStorage")
+    options.add_argument("--disable-features=ChromeWhatsNewUI,ChromeReporting,EnablePasswordsAccountStorage,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,MediaRouter")
+    options.add_argument("--disable-sync")
+    options.add_argument("--no-pings")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-client-side-phishing-detection")
+    options.add_argument("--disable-component-update")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--disable-domain-reliability")
+    options.add_argument("--disable-hang-monitor")
+    options.add_argument("--disable-prompt-on-repost")
+    options.add_argument("--mute-audio")
     options.add_argument(f"--user-agent={MOBILE_UA}")
     options.add_argument("--touch-events=enabled")
     # Match the fingerprint DPR so window.devicePixelRatio equals screen.dpr
@@ -1497,11 +1547,10 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     # 800–1200ms was too short over proxy — page incomplete → Google detects
     # automation → bounces back to challenge/pwd → wrongly tagged wrong_password.
     try:
-        log(f"{email} — Step 0: warmup visit to google.com")
+        log(f"{email} — Step 0: warmup — building Google session cookies")
         driver.get("https://www.google.com")
-        # Wait for page to be fully interactive (document.readyState = complete)
-        # Proxy latency means this can take 2–4s — don't skip ahead early.
-        _w_deadline = time.time() + 6
+        # Wait for page fully interactive — proxy latency can take 2-5s
+        _w_deadline = time.time() + 8
         while time.time() < _w_deadline:
             try:
                 if driver.execute_script("return document.readyState") == "complete":
@@ -1509,15 +1558,42 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             except Exception:
                 pass
             time.sleep(0.35)
-        # Simulate minimal human interaction: scroll down, pause, scroll back up
+        rand_sleep(800, 1300)
+        # Accept cookie/privacy consent if Google shows it (common outside US)
         try:
-            driver.execute_script("window.scrollTo({top: 250, behavior: 'smooth'});")
-            rand_sleep(300, 500)
-            driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
+            for _btn_sel in [
+                "#L2AGLb", "button.tHlp8d", "[jsname='b3VHJd']",
+                "button[aria-label*='Accept all']", "button[aria-label*='accept']",
+            ]:
+                _btns = driver.find_elements(By.CSS_SELECTOR, _btn_sel)
+                if _btns and _btns[0].is_displayed():
+                    _btns[0].click()
+                    rand_sleep(600, 900)
+                    break
         except Exception:
             pass
-        # Let JS fingerprint hooks execute fully before leaving the page
-        rand_sleep(1000, 1500)
+        # Real Google search — builds NID, 1P_JAR, SOCS, AEC cookies that
+        # make the subsequent login session look organic, not bot-fresh.
+        try:
+            _search_terms = ["gmail login", "google account", "inbox email", "google news", "youtube"]
+            _term = random.choice(_search_terms)
+            _sbox = driver.find_elements(By.NAME, "q")
+            if _sbox and _sbox[0].is_displayed():
+                for _c in _term:
+                    _sbox[0].send_keys(_c)
+                    time.sleep(random.uniform(0.07, 0.19))
+                rand_sleep(450, 750)
+                _sbox[0].send_keys(Keys.RETURN)
+                rand_sleep(1800, 2800)
+                # Scroll through results like a real user
+                driver.execute_script("window.scrollTo({top: 350, behavior: 'smooth'});")
+                rand_sleep(600, 1000)
+                driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
+                rand_sleep(400, 700)
+                log(f"{email} — Step 0: searched '{_term}', session cookies built")
+        except Exception:
+            pass
+        rand_sleep(700, 1100)
         log(f"{email} — Step 0: warmup complete")
     except Exception:
         pass  # warmup failure is non-fatal — continue anyway
