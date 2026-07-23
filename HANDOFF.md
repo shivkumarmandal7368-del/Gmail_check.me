@@ -3,6 +3,7 @@ _Last updated: July 23, 2026 — Session 26_
 _Last updated: July 23, 2026 — Session 27_
 _Last updated: July 23, 2026 — Session 28_
 _Last updated: July 23, 2026 — Session 29_
+_Last updated: July 23, 2026 — Session 30_
 
 ---
 
@@ -1804,6 +1805,50 @@ Added a third **UNKNOWN** bucket, moving ambiguous statuses out of "Not Opened":
 - `pnpm --filter @workspace/gmail-checker run typecheck`: **0 errors**
 - App loads clean, no browser console errors
 - All three workflows running
+
+---
+
+## Session 30 Changes (July 23, 2026) — Project Setup + Exit IP Post-Login Fallback
+
+### ✅ Fresh import setup
+- `pnpm install` — all Node.js dependencies installed (node_modules were missing after import)
+- Both workflows restarted and verified running:
+  - `artifacts/api-server: API Server` — Express on port 8080 ✅
+  - `artifacts/gmail-checker: web` — Vite on port 5173 ✅
+
+### ✅ Exit IP post-login fallback added (`gmail_uc_checker.py`)
+
+**Problem:** `ipInfo` was `null` for every account. Root cause: `geo_lookup_proxy()` sometimes fails during `get_or_create_fingerprint()` (at fingerprint creation time, before Chrome even launches). When it fails, `fp["geoLocked"] = False` and `fp` has no `"ip"` key. The existing code at line 1880 — `if fp.get("ip")` — went straight to `ipInfo = None` with no second attempt.
+
+**What the previous agent did:** Diagnosed the issue and applied the URL encoding fix (`quote(_parsed.username, safe="")` to handle `+` in proxy usernames). BUT ran out of quota before adding the post-login fallback.
+
+**Fix added** (`artifacts/api-server/gmail_uc_checker.py` — lines ~1877–1898):
+
+After `_do_login()` returns and Chrome session lock is released, but BEFORE assembling `ipInfo`:
+```python
+if not fp.get("ip") and (proxy_for_ip_check or proxy):
+    _fb_proxy = proxy_for_ip_check or proxy
+    log("Post-login geo fallback: fingerprint has no IP, retrying geo lookup now…")
+    _fallback_geo = geo_lookup_proxy(_fb_proxy, _label="post-login")
+    if _fallback_geo:
+        for _k, _v in _fallback_geo.items():
+            if _v is not None:
+                fp[_k] = _v
+        fp["geoLocked"] = True
+        # Persist back to fingerprint.json — next check reads cached IP
+        _fp_path = os.path.join(profile_dir, "fingerprint.json")
+        with open(_fp_path, "w") as _fpf:
+            json.dump(fp, _fpf, indent=2)
+```
+
+**Why this works:** Chrome just successfully used the proxy to sign into Gmail — the proxy is confirmed alive. The post-login geo call reuses `proxy_for_ip_check` (base URL without sticky session suffix). The result is persisted to `fingerprint.json` so the NEXT check reads it instantly with no extra request.
+
+### ✅ Verification
+| Check | Result |
+|---|---|
+| `python3 -c "import ast; ast.parse(...)"` | ✅ Syntax OK |
+| `GET /api/healthz` | ✅ `{"status":"ok"}` |
+| Both workflows running | ✅ |
 
 ---
 

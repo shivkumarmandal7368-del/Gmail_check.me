@@ -1876,12 +1876,36 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             pass
     _login_result["exitIp"] = exit_ip
     _login_result["fingerprint"] = fp_summary
-    # Full IP details from fingerprint geo-lock (no extra network call)
+
+    # ── Post-login geo fallback ──────────────────────────────────────────────
+    # If geo lookup failed at fingerprint time (fp has no "ip"), try ONCE MORE
+    # now that Chrome has confirmed the proxy is alive and working.
+    # Use proxy_for_ip_check (base URL, no sticky suffix) for this request.
+    if not fp.get("ip") and (proxy_for_ip_check or proxy):
+        _fb_proxy = proxy_for_ip_check or proxy
+        log("Post-login geo fallback: fingerprint has no IP, retrying geo lookup now…")
+        _fallback_geo = geo_lookup_proxy(_fb_proxy, _label="post-login")
+        if _fallback_geo:
+            for _k, _v in _fallback_geo.items():
+                if _v is not None:
+                    fp[_k] = _v
+            fp["geoLocked"] = True
+            # Persist back so next check reads cached IP instantly
+            _fp_path = os.path.join(profile_dir, "fingerprint.json")
+            try:
+                with open(_fp_path, "w") as _fpf:
+                    json.dump(fp, _fpf, indent=2)
+                log(f"Post-login geo saved → {fp.get('ip')} | {fp.get('city')}, {fp.get('countryCode')}")
+            except Exception as _fpe:
+                log(f"Post-login geo fingerprint save failed: {_fpe}")
+
+    # Full IP details from fingerprint (now includes post-login fallback result if applicable)
     if fp.get("ip"):
         _login_result["ipInfo"] = {k: fp.get(k) for k in ("ip","city","district","zip","region","country","continent","continentCode","countryCode","isp","org","as","asname","reverse","currency","offset","mobile","proxy","hosting") if fp.get(k) is not None}
         log(f"Exit IP: {fp.get('ip')} | {fp.get('city')}, {fp.get('countryCode')} | {fp.get('isp')}")
     else:
         _login_result["ipInfo"] = None
+        log("Exit IP: unavailable (geo lookup failed at fingerprint time and post-login fallback)")
     return _login_result
 
 
