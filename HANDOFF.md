@@ -2,6 +2,7 @@
 _Last updated: July 23, 2026 — Session 26_
 _Last updated: July 23, 2026 — Session 27_
 _Last updated: July 23, 2026 — Session 28_
+_Last updated: July 23, 2026 — Session 29_
 
 ---
 
@@ -125,13 +126,16 @@ Each account gets a **unique persistent fingerprint** saved to:
 - Chrome flags: `--force-device-scale-factor={dpr}`, `--lang={fp.language}`, `--touch-events=enabled`, `--disable-blink-features=AutomationControlled`
 
 ### Fresh Device Per Run Toggle
-UI toggle (default ON). When ON:
+UI toggle (default **OFF** — changed in Session 28). When ON:
 - Deletes entire Chrome profile directory before check
 - `/tmp/gmail_checker_profiles/<safe_email>/` wiped → fingerprint.json deleted → new phone picked
 - Google sees a completely new device every run
+- ⚠️ Using this repeatedly on the same account causes Google to flag it after 2-3 days (looks like account compromise — new device every login)
 
-When OFF:
-- Same fingerprint reused — Chrome cookies/session retained → faster `signin/continue` shortcut
+When OFF (default):
+- Same fingerprint reused — same "known device" returning → Google does not flag
+- No logout after check — session cookie stays alive (natural phone behaviour)
+- Auto-retry on automation detection still uses `fresh_profile=True` for retry attempt only
 
 ### Chrome Launch Lock (Cross-Process Serialization)
 **CRITICAL** — `/tmp/gmail_checker_chrome_launch.lock`
@@ -250,9 +254,20 @@ Cancels the SSE stream mid-run via `AbortController`.
   "totpCode": "123456 or null",
   "debugScreenshot": "data:image/jpeg;base64,... or null",
   "fingerprint": "Pixel 7 | Adreno (TM) 730 | 412x892 dpr=2.625 | canvas=47",
-  "exitIp": null
+  "exitIp": null,
+  "ipInfo": {
+    "ip": "1.2.3.4",
+    "city": "Dallas", "district": "Oak Lawn", "zip": "75201",
+    "region": "Texas", "country": "United States", "countryCode": "US",
+    "continent": "North America", "continentCode": "NA",
+    "isp": "Comcast Cable", "org": "AS7922 Comcast", "as": "AS7922 Comcast",
+    "asname": "COMCAST-7922", "reverse": "ptr.example.net",
+    "currency": "USD", "offset": -21600,
+    "mobile": true, "proxy": false, "hosting": false
+  }
 }
 ```
+`ipInfo` is `null` if no proxy was provided or geo-lookup failed. All fields cached in `fingerprint.json` — no extra network call on repeat checks.
 
 **stderr:** `[UC] ...` progress lines forwarded to Node stdout by browserLoginChecker.ts
 
@@ -1789,6 +1804,61 @@ Added a third **UNKNOWN** bucket, moving ambiguous statuses out of "Not Opened":
 - `pnpm --filter @workspace/gmail-checker run typecheck`: **0 errors**
 - App loads clean, no browser console errors
 - All three workflows running
+
+---
+
+## Session 29 Changes (July 23, 2026) — Full Exit IP Details in Results Table
+
+### ✅ Feature: EXIT IP column in Browser Check results
+
+Every checked account now shows a full EXIT IP details card in the results table, sourced from ip-api.com through the same proxy Chrome uses.
+
+#### All fields fetched (single HTTP request — no delay added)
+
+| Field | Description |
+|---|---|
+| `ip` | Exit IP address |
+| `city` | City |
+| `district` | District / neighbourhood |
+| `zip` | ZIP / postal code |
+| `region` | State / region name |
+| `country` / `countryCode` | Country name + ISO code |
+| `continent` / `continentCode` | Continent name + code |
+| `isp` | ISP name |
+| `org` | Organisation |
+| `as` | AS number + name |
+| `asname` | AS name only |
+| `reverse` | Reverse DNS hostname |
+| `currency` | Currency code (e.g. USD) |
+| `offset` | UTC offset in seconds |
+| `mobile` | Mobile/cellular IP? (bool) |
+| `proxy` | Proxy/VPN detected? (bool) |
+| `hosting` | Datacenter IP? (bool) |
+
+#### UI display (EXIT IP column)
+
+```
+1.2.3.4  📱 MOBILE
+Dallas, Oak Lawn, 75201, Texas, United States
+North America · USD · UTC-6
+Comcast Cable Communications
+AS7922 COMCAST-7922
+ptr-1-2-3-4.example.net
+```
+
+Badges: `📱 MOBILE` (green) / `🔀 PROXY` (yellow) / `🖥 DC` (red) — only shown when true.
+
+#### Caching — zero extra network calls
+
+IP info is saved into `fingerprint.json` alongside timezone/language during the geo-lock step (already happened during fingerprint creation). Subsequent checks read from the cached file — no duplicate requests.
+
+#### Files changed
+
+| File | Change |
+|---|---|
+| `artifacts/api-server/gmail_uc_checker.py` | `geo_lookup_proxy()` — expanded ip-api.com fields from 5 to 22; both `for _k in` loops in `get_or_create_fingerprint()` updated; `ipInfo` dict built from `fp` and added to result |
+| `artifacts/api-server/src/lib/browserLoginChecker.ts` | Added `IpInfo` interface (18 fields); `ipInfo?: IpInfo` added to `BrowserLoginResult`; passed through from Python parsed output |
+| `artifacts/gmail-checker/src/pages/home.tsx` | EXIT IP `<TableHead>` + `<TableCell>` added; renders all fields with badges |
 
 ---
 
