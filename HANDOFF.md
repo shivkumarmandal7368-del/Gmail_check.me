@@ -1419,6 +1419,14 @@ User asked: "Aur aise chije aur apni finger print main hai lekin fake lag rha ho
 - **Call site updated:** `get_or_create_fingerprint(profile_dir, proxy=proxy)` at line ~1193
 - **Log output:** `Geo fingerprint: tz=Asia/Kolkata lang=en-IN cc=IN geoLocked=True`
 
+### ✅ `chrome.runtime` Play Services Bug Fixed
+
+**`chrome.runtime.PlatformOs: {ANDROID:'android'}`** — yeh GALAT tha. `PlatformOs` sirf Chrome Extension context mein available hota hai, regular web pages pe real Android Chrome mein bhi nahi hota. Iska hona humein scripted setup expose karta tha. **Remove kar diya.**
+
+**`connect()` / `sendMessage()` silent stubs** — real Chrome (kisi bhi platform pe) web page se `chrome.runtime.connect()` call karo toh `"Could not establish connection. Receiving end does not exist."` error aata hai. Humara stub silently kuch nahi karta tha — fingerprinting tools ye detect kar sakti thi. **Ab proper error throw karta hai.**
+
+**`hasListener()` method add kiya** — `onMessage` aur `onConnect` pe `hasListener: () => false` add kiya jo real Chrome runtime behavior match karta hai.
+
 ### ⚠️ Remaining fingerprint concerns (lower priority, not fixed this session)
 - All 40+ phone profiles share identical `chromeVersion: "138.0.7204.100"` — no version variation across profiles (fixing this risks UA/ChromeDriver version mismatch)
 - `screen.orientation` is a plain object, not a `ScreenOrientation` instance — `instanceof` check would fail (low risk)

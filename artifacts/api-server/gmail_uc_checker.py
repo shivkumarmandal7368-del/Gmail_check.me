@@ -896,10 +896,11 @@ try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable
   if(!window.chrome)window.chrome={{}};
   if(!window.chrome.runtime){{
     window.chrome.runtime={{
-      connect:function(){{}},sendMessage:function(){{}},
-      onMessage:{{addListener:function(){{}},removeListener:function(){{}}}},
-      onConnect:{{addListener:function(){{}},removeListener:function(){{}}}},
-      PlatformOs:{{ANDROID:'android'}},id:undefined
+      connect:function(){{throw new Error('Could not establish connection. Receiving end does not exist.');}},
+      sendMessage:function(){{throw new Error('Could not establish connection. Receiving end does not exist.');}},
+      onMessage:{{addListener:function(){{}},removeListener:function(){{}},hasListener:function(){{return false;}}}},
+      onConnect:{{addListener:function(){{}},removeListener:function(){{}},hasListener:function(){{return false;}}}},
+      id:undefined
     }};
   }}
   try{{delete window.chrome.app;}}catch(e){{}}
