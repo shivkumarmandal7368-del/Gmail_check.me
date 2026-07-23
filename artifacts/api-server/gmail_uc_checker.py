@@ -1834,7 +1834,8 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         # "challenge" NOT in url ensures we never trigger on v3/signin/challenge/dp.
         # Google showed this page AFTER accepting the password → password is correct.
         # The TOTP entry path (Step 4 / _on_totp_url) should have handled this already,
-        # but if it falls through here, mark as opened per user confirmation.
+        # but if it falls through here attempt to enter the TOTP, reach the inbox,
+        # then logout cleanly before returning opened.
         _low = text.lower()
         if (
             "v3/signin" in url
@@ -1847,6 +1848,63 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 "verify that it's you",
             ])
         ):
+            log(f"{email} — v3/signin Google Authenticator page in classify() — attempting TOTP entry")
+            _totp_selectors_fb = [
+                'input[name="totpPin"]', 'input[name="Pin"]', 'input[id="totpPin"]',
+                'input[autocomplete="one-time-code"]', 'input[type="tel"]',
+                'input[aria-label*="code"]', 'input[aria-label*="Code"]',
+                'input[placeholder*="code"]', 'input[placeholder*="Code"]',
+                'input[type="number"]',
+            ]
+            if totp_secret:
+                _fb_field = wait_for_any(_totp_selectors_fb, timeout=8)
+                if _fb_field:
+                    # Regenerate TOTP — original code may be 60 s+ old
+                    _fb_code = generate_totp(totp_secret)
+                    if _fb_code:
+                        _secs_left = 30 - (int(time.time()) % 30)
+                        if _secs_left <= 4:
+                            log(f"{email} — TOTP window ending in {_secs_left}s, waiting for next window…")
+                            time.sleep(_secs_left + 1)
+                            _fb_code = generate_totp(totp_secret)
+                        log(f"{email} — Entering TOTP on second challenge page: {_fb_code}")
+                        try:
+                            touch_click(driver, _fb_field)
+                            rand_sleep(60, 120)
+                            _fb_field.clear()
+                            rand_sleep(40, 80)
+                            clipboard_type(driver, _fb_field, _fb_code)
+                            rand_sleep(100, 200)
+                            _fb_field.send_keys(Keys.ENTER)
+                            rand_sleep(700, 1200)
+                            # Wait up to 25 s for Gmail to load
+                            _fb_deadline = time.time() + 25
+                            while time.time() < _fb_deadline:
+                                _fb_url = driver.current_url
+                                if "mail.google.com" in _fb_url:
+                                    break
+                                time.sleep(0.5)
+                            _fb_url, _fb_text = page_state()
+                            log(f"{email} — After second TOTP submit: {_fb_url[:70]}")
+                            shot = screenshot_b64()
+                            # Logout so Google doesn't flag a suspicious active session
+                            if get_hostname(_fb_url) == "mail.google.com" or "mail.google.com" in _fb_url:
+                                try:
+                                    log(f"{email} — Gmail reached after second TOTP — logging out")
+                                    driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
+                                    rand_sleep(700, 1200)
+                                    log(f"{email} — Logout complete")
+                                except Exception as _fble:
+                                    log(f"Logout warning (non-fatal): {_fble}")
+                            return {
+                                "status": "opened",
+                                "reason": "Mailbox opened successfully ✅",
+                                "totpCode": _fb_code,
+                                "debugScreenshot": shot,
+                            }
+                        except Exception as _fbe:
+                            log(f"{email} — Second TOTP entry error: {_fbe}")
+            # Fallback: no secret, no field, or entry error — still opened per user rule
             log(f"{email} — v3/signin Google Authenticator page in classify() → opened (account confirmed accessible)")
             shot = screenshot_b64()
             return {
