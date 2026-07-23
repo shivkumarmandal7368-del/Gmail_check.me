@@ -775,24 +775,42 @@ _RANDOM_TIMEZONES = [
 ]
 
 
-def geo_lookup_proxy(proxy_url: str) -> dict | None:
+def geo_lookup_proxy(proxy_url: str, _label: str = "") -> dict | None:
     """Hit ip-api.com through the proxy to get exit IP's full details.
     Returns timezone/language/geo fields (for fingerprint) + full IP info (for display)."""
+    tag = f"[geo{(' ' + _label) if _label else ''}]"
     try:
         import requests as req
-        proxies = {"http": proxy_url, "https": proxy_url}
+        from urllib.parse import urlparse, quote
+
+        # Re-encode proxy URL — proxy usernames can contain + and other special chars
+        # that Python's urllib mis-handles. We parse manually and re-encode each part.
+        _parsed = urlparse(proxy_url)
+        _user   = quote(_parsed.username or "", safe="")
+        _pass   = quote(_parsed.password or "", safe="")
+        _host   = _parsed.hostname or ""
+        _port   = _parsed.port or 6060
+        _scheme = _parsed.scheme or "http"
+        _safe_proxy = f"{_scheme}://{_user}:{_pass}@{_host}:{_port}"
+
+        proxies = {"http": _safe_proxy, "https": _safe_proxy}
+        log(f"{tag} Fetching ip-api.com via proxy {_host}:{_port}")
         r = req.get(
-            "http://ip-api.com/json?fields=status,query,country,countryCode,continent,continentCode,regionName,city,district,zip,isp,org,as,asname,mobile,proxy,hosting,reverse,currency,offset,timezone,lat,lon",
-            proxies=proxies, timeout=10
+            "http://ip-api.com/json?fields=status,query,country,countryCode,continent,"
+            "continentCode,regionName,city,district,zip,isp,org,as,asname,mobile,proxy,"
+            "hosting,reverse,currency,offset,timezone,lat,lon",
+            proxies=proxies, timeout=15
         )
         data = r.json()
         if data.get("status") != "success":
+            log(f"{tag} ip-api.com returned non-success: {data.get('message', data)}")
             return None
         cc  = data.get("countryCode", "US")
         tz  = data.get("timezone") or random.choice(_RANDOM_TIMEZONES)
         lg  = _COUNTRY_LANG.get(cc, "en-US")
         lat = float(data.get("lat", 39.8283))
         lon = float(data.get("lon", -98.5795))
+        log(f"{tag} Got IP {data.get('query')} — {data.get('city')}, {cc} / {data.get('isp')}")
         return {
             # Fingerprint fields (timezone, language, geo)
             "timezone": tz, "language": lg, "countryCode": cc, "lat": lat, "lon": lon,
@@ -816,7 +834,8 @@ def geo_lookup_proxy(proxy_url: str) -> dict | None:
             "proxy":         data.get("proxy"),
             "hosting":       data.get("hosting"),
         }
-    except Exception:
+    except Exception as _geo_err:
+        log(f"{tag} geo_lookup_proxy failed: {_geo_err}")
         return None
 
 
@@ -832,9 +851,14 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
             with open(fp_path, "r") as f:
                 existing = json.load(f)
             if all(k in existing for k in ("model", "screenW", "canvasSeed")):
-                # If proxy is provided and geo hasn't been locked yet, do it now
-                if proxy and not existing.get("geoLocked"):
-                    geo = geo_lookup_proxy(proxy)
+                # If proxy is provided and geo hasn't been locked yet — OR geo was locked
+                # but ip field is missing (old fingerprint from before Session 29) — do it now
+                _needs_geo = proxy and (
+                    not existing.get("geoLocked")
+                    or (existing.get("geoLocked") and not existing.get("ip"))
+                )
+                if _needs_geo:
+                    geo = geo_lookup_proxy(proxy, _label="fingerprint-update")
                     if geo:
                         existing["timezone"]    = geo["timezone"]
                         existing["language"]    = geo["language"]
