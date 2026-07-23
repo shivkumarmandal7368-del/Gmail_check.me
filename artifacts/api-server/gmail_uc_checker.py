@@ -1138,6 +1138,7 @@ def make_stealth_js(fp: dict) -> str:
     except Exception:
         _tz_offset = 300   # CDT fallback
     return f"""
+(function(){{var _nts=Function.prototype.toString,_ntm=new WeakMap();Function.prototype.toString=function(){{return _ntm.has(this)?_ntm.get(this):_nts.call(this);}};_ntm.set(Function.prototype.toString,'function toString() {{ [native code] }}');Object.defineProperty(window,'__nr',{{value:function(fn,n,g){{if(fn&&typeof fn==='function')_ntm.set(fn,'function '+(g?'get ':'')+n+'() {{ [native code] }}');}},configurable:true,enumerable:false,writable:false}});}})();
 Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
 Object.defineProperty(navigator,'plugins',{{get:()=>{{var p=[];p.length=0;return p;}}}});
 Object.defineProperty(navigator,'languages',{{get:()=>['{lg}','en']}});
