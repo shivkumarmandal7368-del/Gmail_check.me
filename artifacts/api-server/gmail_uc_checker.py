@@ -1184,7 +1184,7 @@ try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable
     }};
   }}
   try{{delete window.chrome.app;}}catch(e){{}}
-  if(!window.chrome.loadTimes)window.chrome.loadTimes=function(){{return{{requestTime:Date.now()/1000-0.5,startLoadTime:Date.now()/1000-0.5,commitLoadTime:Date.now()/1000-0.3,finishDocumentLoadTime:Date.now()/1000-0.1,finishLoadTime:Date.now()/1000,firstPaintTime:0,firstPaintAfterLoadTime:0,navigationType:'Other',wasFetchedViaSpdy:false,wasNpnNegotiated:false,npnNegotiatedProtocol:'',wasAlternateProtocolAvailable:false,connectionInfo:''}}}};
+  if(!window.chrome.loadTimes){{var _lt=Date.now()/1000;window.chrome.loadTimes=function(){{var _t=Date.now()/1000;return{{requestTime:_t-0.5,startLoadTime:_t-0.5,commitLoadTime:_t-0.3,finishDocumentLoadTime:_t-0.1,finishLoadTime:_t,firstPaintTime:_lt-0.25,firstPaintAfterLoadTime:_lt-0.18,navigationType:'Other',wasFetchedViaSpdy:false,wasNpnNegotiated:false,npnNegotiatedProtocol:'',wasAlternateProtocolAvailable:false,connectionInfo:''}}}};if(window.__nr)window.__nr(window.chrome.loadTimes,'loadTimes');}}
   if(!window.chrome.csi)window.chrome.csi=function(){{return{{startE:Date.now()-1000,onloadT:Date.now()-500,pageT:500,tran:15}}}};
 }})();
 if(window.Notification){{Object.defineProperty(Notification,'permission',{{get:()=>'default'}});}}
@@ -1195,6 +1195,7 @@ try{{
       if(p&&p.name==='notifications')return Promise.resolve({{state:Notification.permission,onchange:null}});
       return _origPQ(p);
     }};
+    if(window.__nr)window.__nr(navigator.permissions.query,'query');
   }}
 }}catch(e){{}}
 try{{
@@ -1214,6 +1215,7 @@ try{{
   Object.defineProperty(navigator,'webkitConnection',{{get:()=>undefined}});
 }}catch(e){{}}
 try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'pdfViewerEnabled',{{get:()=>true}});}}catch(e){{}}
 (function(){{
   var _ws={wn};
   function _phash(p){{var h=p^0xDEAD;h=((h>>16)^h)*0x45d9f3b|0;h=((h>>16)^h)*0x45d9f3b|0;return(h^(h>>16))&0xFFFF;}}
@@ -1242,6 +1244,7 @@ try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e
       if(extList.indexOf(name)===-1)return null;
       return _origGE.call(this,name);
     }};
+    if(window.__nr){{window.__nr(ctx.prototype.getParameter,'getParameter');window.__nr(ctx.prototype.getSupportedExtensions,'getSupportedExtensions');window.__nr(ctx.prototype.getExtension,'getExtension');}}
   }}
   patch(WebGLRenderingContext,_e1);
   if(window.WebGL2RenderingContext)patch(WebGL2RenderingContext,_e2);
@@ -1255,6 +1258,7 @@ try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e
   if(ob)HTMLCanvasElement.prototype.toBlob=function(cb,t,q){{var c=this.getContext('2d');if(c){{var d=c.getImageData(0,0,this.width||1,this.height||1);_xc(d);c.putImageData(d,0,0);}}return ob.call(this,cb,t,q);}};
   var og=CanvasRenderingContext2D.prototype.getImageData;
   CanvasRenderingContext2D.prototype.getImageData=function(){{var d=og.apply(this,arguments);_xc(d);return d;}};
+  if(window.__nr){{window.__nr(HTMLCanvasElement.prototype.toDataURL,'toDataURL');if(HTMLCanvasElement.prototype.toBlob)window.__nr(HTMLCanvasElement.prototype.toBlob,'toBlob');window.__nr(CanvasRenderingContext2D.prototype.getImageData,'getImageData');}}
 }})();
 (function(){{
   var noise={an};
@@ -1268,6 +1272,7 @@ try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e
     }}
     return d;
   }};
+  if(window.__nr&&AudioBuffer&&AudioBuffer.prototype.getChannelData)window.__nr(AudioBuffer.prototype.getChannelData,'getChannelData');
 }})();
 try{{var _tz='{tz}';var _dto=Intl.DateTimeFormat;function _dtow(l,o){{o=o||{{}};if(!o.timeZone)o.timeZone=_tz;return new _dto(l,o);}}try{{Object.keys(_dto).forEach(function(k){{_dtow[k]=_dto[k];}});}}catch(e2){{}}try{{_dtow.prototype=_dto.prototype;}}catch(e3){{}}Intl.DateTimeFormat=_dtow;}}catch(e){{}}
 (function(){{
@@ -1413,8 +1418,28 @@ try{{
       if(s==='(display-mode:standalone)')return _mmr(q,false);
       if(s==='(prefers-reduced-motion:reduce)')return _mmr(q,false);
       if(s==='(prefers-reduced-motion:no-preference)')return _mmr(q,true);
+      if(s==='(color-gamut:srgb)')return _mmr(q,true);
+      if(s==='(color-gamut:p3)')return _mmr(q,false);
+      if(s==='(color-gamut:rec2020)')return _mmr(q,false);
+      if(s==='(prefers-contrast:no-preference)')return _mmr(q,true);
+      if(s==='(prefers-contrast:more)')return _mmr(q,false);
+      if(s==='(prefers-contrast:less)')return _mmr(q,false);
+      if(s==='(prefers-contrast:forced)')return _mmr(q,false);
+      if(s==='(forced-colors:none)')return _mmr(q,true);
+      if(s==='(forced-colors:active)')return _mmr(q,false);
+      if(s==='(inverted-colors:none)')return _mmr(q,true);
+      if(s==='(inverted-colors:inverted)')return _mmr(q,false);
+      if(s==='(update:fast)')return _mmr(q,true);
+      if(s==='(update:slow)')return _mmr(q,false);
+      if(s==='(update:none)')return _mmr(q,false);
+      if(s==='(dynamic-range:standard)')return _mmr(q,true);
+      if(s==='(dynamic-range:high)')return _mmr(q,false);
+      if(s==='(overflow-block:scroll)')return _mmr(q,true);
+      if(s==='(overflow-block:optional-paged)')return _mmr(q,false);
+      if(s==='(overflow-inline:scroll)')return _mmr(q,true);
       return _omm(q);
     }};
+    if(window.__nr)window.__nr(window.matchMedia,'matchMedia');
   }}catch(e){{}}
 }})();
 try{{
@@ -1438,6 +1463,7 @@ try{{
         _v('Google español','es-ES',false),
       ];
     }};
+    if(window.__nr)window.__nr(window.speechSynthesis.getVoices,'getVoices');
   }}
 }}catch(e){{}}
 try{{
@@ -1513,6 +1539,7 @@ try{{
     Object.defineProperty(window.speechSynthesis,'onvoiceschanged',{{get:()=>null,set:function(fn){{if(fn)setTimeout(fn,0);}}}});
     var _ogv=window.speechSynthesis.getVoices.bind(window.speechSynthesis);
     window.speechSynthesis.getVoices=function(){{var r=_ogv();return(r&&r.length)?r:_fv;}};
+    if(window.__nr)window.__nr(window.speechSynthesis.getVoices,'getVoices');
   }}
 }}catch(e){{}}
 try{{
