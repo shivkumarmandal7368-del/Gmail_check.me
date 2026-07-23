@@ -1932,6 +1932,41 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     _login_result: dict = {}
     try:
         _login_result = _do_login(driver, email, password, totp_code, totp_secret, fresh_profile)
+
+        # ── Post-login geo fallback (driver still open here!) ──────────────────
+        # If geo lookup failed at fingerprint time (fp has no "ip"), try now —
+        # Chrome just proved the proxy works. Driver is still open so CDP re-injection
+        # actually takes effect for this session (not after quit like before).
+        # Use _retries=1: one round tries all 3 services — no need for more.
+        if not fp.get("ip") and (proxy_for_ip_check or proxy):
+            _fb_proxy = proxy_for_ip_check or proxy
+            log("Post-login geo fallback: fingerprint has no IP, retrying geo lookup now…")
+            _fallback_geo = geo_lookup_proxy(_fb_proxy, _label="post-login", _retries=1)
+            if _fallback_geo:
+                for _k, _v in _fallback_geo.items():
+                    if _v is not None:
+                        fp[_k] = _v
+                fp["geoLocked"] = True
+                # Persist so next check reads cached geo instantly
+                _fp_path = os.path.join(profile_dir, "fingerprint.json")
+                try:
+                    with open(_fp_path, "w") as _fpf:
+                        json.dump(fp, _fpf, indent=2)
+                    log(f"Post-login geo saved → {fp.get('ip')} | {fp.get('city')}, {fp.get('countryCode')}")
+                except Exception as _fpe:
+                    log(f"Post-login geo fingerprint save failed: {_fpe}")
+                # Re-inject correct timezone + language into the STILL-OPEN Chrome via CDP
+                try:
+                    driver.execute_cdp_cmd("Emulation.setTimezoneOverride",
+                                           {"timezoneId": fp["timezone"]})
+                    driver.execute_cdp_cmd("Emulation.setLocaleOverride",
+                                           {"locale": fp["language"]})
+                    log(f"Post-login CDP tz/lang re-applied → {fp['timezone']} / {fp['language']}")
+                except Exception as _cdp_tz:
+                    log(f"Post-login CDP re-apply skipped (non-fatal): {_cdp_tz}")
+            else:
+                log("⚠️ Post-login geo fallback also failed — fingerprint timezone may not match exit IP.")
+
     except Exception as e:
         log(f"Login exception: {e}")
         _login_result = {"status": "unknown", "reason": f"Login error: {str(e)[:300]}", "totpCode": totp_code}
@@ -1948,9 +1983,11 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             log("Chrome session slot released")
         except Exception:
             pass
+
     _login_result["exitIp"] = exit_ip
     _login_result["fingerprint"] = fp_summary
-    # Full fingerprint dict for UI display (exclude geo/IP fields — those are in ipInfo)
+    # Build fingerprintData AFTER post-login geo fallback so it shows the updated
+    # timezone + geoLocked=True (not the stale random values from before fallback)
     _FP_DISPLAY_KEYS = (
         "model", "androidVersion", "chromeVersion", "platform",
         "screenW", "screenH", "dpr",
@@ -1963,43 +2000,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     )
     _login_result["fingerprintData"] = {k: fp[k] for k in _FP_DISPLAY_KEYS if k in fp}
 
-    # ── Post-login geo fallback ──────────────────────────────────────────────
-    # If geo lookup failed at fingerprint time (fp has no "ip"), try ONCE MORE
-    # now that Chrome has confirmed the proxy is alive and working.
-    # Use proxy_for_ip_check (base URL, no sticky suffix) for this request.
-    if not fp.get("ip") and (proxy_for_ip_check or proxy):
-        _fb_proxy = proxy_for_ip_check or proxy
-        log("Post-login geo fallback: fingerprint has no IP, retrying geo lookup now…")
-        _fallback_geo = geo_lookup_proxy(_fb_proxy, _label="post-login")
-        if _fallback_geo:
-            for _k, _v in _fallback_geo.items():
-                if _v is not None:
-                    fp[_k] = _v
-            fp["geoLocked"] = True
-            # Persist back so next check reads cached IP instantly
-            _fp_path = os.path.join(profile_dir, "fingerprint.json")
-            try:
-                with open(_fp_path, "w") as _fpf:
-                    json.dump(fp, _fpf, indent=2)
-                log(f"Post-login geo saved → {fp.get('ip')} | {fp.get('city')}, {fp.get('countryCode')}")
-            except Exception as _fpe:
-                log(f"Post-login geo fingerprint save failed: {_fpe}")
-            # Re-inject correct timezone + language into the running Chrome session via CDP.
-            # Chrome was launched with the wrong (random) timezone — fix it live so any
-            # subsequent page loads in this session reflect the correct proxy location.
-            try:
-                driver.execute_cdp_cmd("Emulation.setTimezoneOverride",
-                                       {"timezoneId": fp["timezone"]})
-                driver.execute_cdp_cmd("Emulation.setLocaleOverride",
-                                       {"locale": fp["language"]})
-                log(f"Post-login CDP tz/lang re-applied → {fp['timezone']} / {fp['language']}")
-            except Exception as _cdp_tz:
-                log(f"Post-login CDP re-apply skipped (non-fatal): {_cdp_tz}")
-        else:
-            log("⚠️ Post-login geo fallback also failed — fingerprint timezone may not match exit IP."
-                " Account risk: medium. Delete profile to force fresh geo-lock on next run.")
-
-    # Full IP details from fingerprint (now includes post-login fallback result if applicable)
+    # Full IP details from fingerprint (includes post-login fallback result if applicable)
     if fp.get("ip"):
         _login_result["ipInfo"] = {k: fp.get(k) for k in ("ip","city","district","zip","region","country","continent","continentCode","countryCode","isp","org","as","asname","reverse","currency","offset","mobile","proxy","hosting") if fp.get(k) is not None}
         log(f"Exit IP: {fp.get('ip')} | {fp.get('city')}, {fp.get('countryCode')} | {fp.get('isp')}")

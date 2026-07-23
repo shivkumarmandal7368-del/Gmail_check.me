@@ -2275,9 +2275,32 @@ If all 3 fail, retry the whole round up to `_retries` times (default 3) with 3s 
 |---|---|
 | `artifacts/api-server/gmail_uc_checker.py` | (1) Added `Emulation.setTimezoneOverride` + `Emulation.setLocaleOverride` at Chrome startup; (2) `geo_lookup_proxy()` rewritten to try ip-api.com → ipwho.is → ipinfo.io per attempt |
 
+### Fix 3 — Post-login geo fallback moved before `driver.quit()` + `fingerprintData` stale display fix
+
+**Problem from screenshots:** Even though IP column showed USA IP (Texas, Kentucky, New Jersey), fingerprint tab still showed `Europe/Paris` / `Europe/Berlin` / `Not geo-locked`. Two bugs:
+
+1. `fingerprintData` was built at line ~1964 **before** the post-login geo fallback at line ~1966. So the fingerprint tab always showed the pre-fallback stale state (wrong random timezone, `geoLocked=False`).
+2. Post-login CDP re-injection (`Emulation.setTimezoneOverride`) was called **after** `driver.quit()` in the `finally` block — the driver was already closed so the call silently failed every time.
+
+**Fix:**
+- Moved the entire post-login geo fallback block **inside the `try` block**, after `_do_login()` returns but before the `finally` (driver still open). CDP re-injection now actually reaches Chrome.
+- Moved `fingerprintData` build to **after** the `try/finally` block — after geo fallback has updated `fp` — so the tab shows the correct timezone and `geoLocked=True`.
+- Used `_retries=1` for post-login geo_lookup_proxy (one round tries all 3 services; driver should stay open the minimum necessary time).
+
+**Result:** When geo-lock fails at fingerprint creation time:
+- Post-login fallback runs, gets real USA timezone/IP
+- CDP re-injected while Chrome still open → THIS run has correct timezone ✅
+- Fingerprint tab shows correct timezone + `Geo-locked ✅` ✅
+- Fingerprint saved so next run skips geo lookup entirely ✅
+
+### Files changed
+| File | Change |
+|---|---|
+| `artifacts/api-server/gmail_uc_checker.py` | (1) CDP timezone/locale at Chrome startup; (2) 3-service geo fallback; (3) Post-login fallback moved before driver.quit(); (4) fingerprintData built after fallback |
+
 ### Verification
 - API server restarted clean: `Server listening port: 8080` ✅
-- Both workflows running ✅
+- All 3 workflows running ✅
 
 ---
 
