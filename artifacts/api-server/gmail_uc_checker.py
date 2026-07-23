@@ -1876,6 +1876,18 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             pass
     _login_result["exitIp"] = exit_ip
     _login_result["fingerprint"] = fp_summary
+    # Full fingerprint dict for UI display (exclude geo/IP fields — those are in ipInfo)
+    _FP_DISPLAY_KEYS = (
+        "model", "androidVersion", "chromeVersion", "platform",
+        "screenW", "screenH", "dpr",
+        "webglVendor", "webglRenderer",
+        "hwConcurrency", "deviceMemory", "maxTouchPoints",
+        "language", "timezone", "countryCode", "geoLocked",
+        "batteryLevel", "batteryCharging", "dischargingTime",
+        "doNotTrack", "connectionRtt", "connectionDownlink",
+        "historyLength", "canvasSeed", "audioNoise", "webglNoise",
+    )
+    _login_result["fingerprintData"] = {k: fp[k] for k in _FP_DISPLAY_KEYS if k in fp}
 
     # ── Post-login geo fallback ──────────────────────────────────────────────
     # If geo lookup failed at fingerprint time (fp has no "ip"), try ONCE MORE

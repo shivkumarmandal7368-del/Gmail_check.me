@@ -1243,8 +1243,8 @@ function BrowserChecker() {
                     {displayed.some(r => (r as any).ipInfo) && (
                       <TableHead className="font-mono text-xs min-w-[180px]">EXIT IP</TableHead>
                     )}
-                    {displayed.some(r => (r as any).fingerprint) && (
-                      <TableHead className="font-mono text-xs min-w-[200px]">FINGERPRINT</TableHead>
+                    {displayed.some(r => (r as any).fingerprint || (r as any).fingerprintData) && (
+                      <TableHead className="font-mono text-xs min-w-[220px]">FINGERPRINT</TableHead>
                     )}
                     {displayed.some(r => r.totpCode) && (
                       <TableHead className="font-mono text-xs w-[100px]">TOTP</TableHead>
@@ -1329,9 +1329,40 @@ function BrowserChecker() {
                           })() : "—"}
                         </TableCell>
                       )}
-                      {displayed.some(x => (x as any).fingerprint) && (
-                        <TableCell className="text-[10px] font-mono text-purple-400/80 leading-relaxed">
-                          {(r as any).fingerprint ?? "—"}
+                      {displayed.some(x => (x as any).fingerprint || (x as any).fingerprintData) && (
+                        <TableCell className="text-[10px] font-mono leading-relaxed min-w-[220px]">
+                          {(() => {
+                            const fd = (r as any).fingerprintData;
+                            if (!fd) return <span className="text-muted-foreground">{(r as any).fingerprint ?? "—"}</span>;
+                            const bat = fd.batteryLevel != null ? `${Math.round(fd.batteryLevel * 100)}%${fd.batteryCharging ? "⚡" : "🔋"}` : null;
+                            const dtH = fd.dischargingTime != null ? `${Math.round(fd.dischargingTime / 60)}min` : null;
+                            const dnt = fd.doNotTrack === "1" ? "on" : fd.doNotTrack === "unspecified" ? "unspec" : fd.doNotTrack == null ? "off" : fd.doNotTrack;
+                            return (
+                              <div className="space-y-1">
+                                {/* Device */}
+                                <div className="text-purple-300 font-bold">{fd.model ?? "—"}</div>
+                                <div className="text-purple-400/70">Android {fd.androidVersion} · Chrome {fd.chromeVersion}</div>
+                                <div className="text-purple-400/50 text-[9px]">{fd.platform}</div>
+                                {/* Screen */}
+                                <div className="text-cyan-400/80">{fd.screenW}×{fd.screenH} dpr={fd.dpr}</div>
+                                {/* GPU */}
+                                <div className="text-blue-400/70">{fd.webglVendor}</div>
+                                <div className="text-blue-400/50 break-words">{fd.webglRenderer}</div>
+                                {/* Hardware */}
+                                <div className="text-green-400/70">CPU {fd.hwConcurrency}c · RAM {fd.deviceMemory}GB · Touch {fd.maxTouchPoints}pt</div>
+                                {/* Locale */}
+                                <div className="text-yellow-400/70">{fd.language} · {fd.timezone}</div>
+                                {/* Battery + Network */}
+                                <div className="text-orange-400/70">
+                                  {bat}{dtH ? ` (${dtH} left)` : ""} · {fd.connectionDownlink}Mbps {fd.connectionRtt}ms
+                                </div>
+                                {/* Browser misc */}
+                                <div className="text-muted-foreground/60">History {fd.historyLength} · DNT:{dnt}</div>
+                                {/* Noise seeds */}
+                                <div className="text-muted-foreground/40 text-[9px]">canvas={fd.canvasSeed} · audio={fd.audioNoise} · wgl={fd.webglNoise}</div>
+                              </div>
+                            );
+                          })()}
                         </TableCell>
                       )}
                       {displayed.some(x => x.totpCode) && (

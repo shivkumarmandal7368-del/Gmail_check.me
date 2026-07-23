@@ -42,6 +42,35 @@ export interface IpInfo {
   hosting?: boolean;
 }
 
+export interface FingerprintData {
+  model?: string;
+  androidVersion?: string;
+  chromeVersion?: string;
+  platform?: string;
+  screenW?: number;
+  screenH?: number;
+  dpr?: number;
+  webglVendor?: string;
+  webglRenderer?: string;
+  hwConcurrency?: number;
+  deviceMemory?: number;
+  maxTouchPoints?: number;
+  language?: string;
+  timezone?: string;
+  countryCode?: string;
+  geoLocked?: boolean;
+  batteryLevel?: number;
+  batteryCharging?: boolean;
+  dischargingTime?: number;
+  doNotTrack?: string | null;
+  connectionRtt?: number;
+  connectionDownlink?: number;
+  historyLength?: number;
+  canvasSeed?: number;
+  audioNoise?: number;
+  webglNoise?: number;
+}
+
 export interface BrowserLoginResult {
   email: string;
   status: BrowserLoginStatus;
@@ -52,6 +81,7 @@ export interface BrowserLoginResult {
   exitIp?: string;
   ipInfo?: IpInfo;
   fingerprint?: string;
+  fingerprintData?: FingerprintData;
   proxySession?: string;   // unique sticky-session ID → proof of different IP per account
   durationMs?: number;     // how long this account took end-to-end (ms)
 }
@@ -170,6 +200,7 @@ async function checkOneAccount(
           exitIp: parsed.exitIp ?? undefined,
           ipInfo: parsed.ipInfo ?? undefined,
           fingerprint: parsed.fingerprint ?? undefined,
+          fingerprintData: parsed.fingerprintData ?? undefined,
           durationMs: typeof parsed.durationMs === "number" ? parsed.durationMs : undefined,
         });
       } catch {
