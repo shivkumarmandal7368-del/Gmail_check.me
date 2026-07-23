@@ -837,6 +837,15 @@ def make_stealth_js(fp: dict) -> str:
     hist = fp.get("historyLength", 5)
     wn   = fp.get("webglNoise", 0.000002)
     dt   = fp.get("dischargingTime", 14400)
+    # Stable media device IDs derived from canvas seed (no extra fingerprint fields)
+    import hashlib as _hl
+    _h = lambda s: _hl.sha256(s.encode()).hexdigest()
+    _cs = str(fp["canvasSeed"])
+    cam_rear_id  = _h(_cs + "cr")[:32]
+    cam_front_id = _h(_cs + "cf")[:32]
+    mic_id       = _h(_cs + "mc")[:32]
+    cam_group    = _h(_cs + "cg")[:32]
+    mic_group    = _h(_cs + "mg")[:32]
     # appVersion = UA minus "Mozilla/" prefix
     av_str = (
         f"5.0 (Linux; Android {fp['androidVersion']}; {fp['model']}) "
@@ -978,6 +987,35 @@ try{{var _tz='{tz}';var _dto=Intl.DateTimeFormat;function _dtow(l,o){{o=o||{{}};
     window.mozRTCPeerConnection=undefined;
   }}catch(e){{}}
 }})();
+Object.defineProperty(window,'outerWidth',{{get:()=>{fp['screenW']}}});
+Object.defineProperty(window,'outerHeight',{{get:()=>{fp['screenH']}}});
+try{{navigator.vibrate=function(){{return true;}};}}catch(e){{}}
+try{{
+  if(navigator.mediaDevices&&navigator.mediaDevices.enumerateDevices){{
+    var _oED=navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
+    navigator.mediaDevices.enumerateDevices=function(){{
+      return _oED().then(function(r){{
+        if(r&&r.length>0)return r;
+        return[
+          {{deviceId:'{cam_rear_id}',groupId:'{cam_group}',kind:'videoinput',label:'camera2 0, facing back'}},
+          {{deviceId:'{cam_front_id}',groupId:'{cam_group}',kind:'videoinput',label:'camera2 1, facing front'}},
+          {{deviceId:'{mic_id}',groupId:'{mic_group}',kind:'audioinput',label:'Default'}},
+        ];
+      }});
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  if(window.speechSynthesis){{
+    var _fv=[
+      {{default:true,lang:'{lg}',name:'{lg}-default',localService:false,voiceURI:'{lg}-default'}},
+      {{default:false,lang:'en-US',name:'en-US-default',localService:false,voiceURI:'en-US-default'}},
+    ];
+    Object.defineProperty(window.speechSynthesis,'onvoiceschanged',{{get:()=>null,set:function(fn){{if(fn)setTimeout(fn,0);}}}});
+    var _ogv=window.speechSynthesis.getVoices.bind(window.speechSynthesis);
+    window.speechSynthesis.getVoices=function(){{var r=_ogv();return(r&&r.length)?r:_fv;}};
+  }}
+}}catch(e){{}}
 """
 
 
@@ -1232,7 +1270,6 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument(f"--window-size={fp['screenW']},{fp['screenH']}")
-    options.add_argument("--lang=en-US,en")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-save-password-bubble")
