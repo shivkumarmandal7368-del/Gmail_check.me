@@ -29,7 +29,7 @@ import {
 
 type SmtpFilter = "all" | "valid" | "invalid" | "disabled" | "catch_all" | "unknown";
 type Mode = "smtp" | "login" | "browser";
-type LoginList = "opened" | "not_opened" | "delete" | "unknown";
+type LoginList = "opened" | "not_opened" | "delete" | "unknown" | "fingerprint";
 
 export default function Home() {
   const [mode, setMode] = useState<Mode>("smtp");
@@ -864,12 +864,14 @@ function BrowserChecker() {
   const opened        = results.filter(r => getBrowserResultCategory(r) === "open");
   const deleteList    = results.filter(r => getBrowserResultCategory(r) === "delete");
   const notOpened     = results.filter(r => getBrowserResultCategory(r) === "not_open");
-  const unknownList   = results.filter(r => getBrowserResultCategory(r) === "unknown" && r.status !== "checking");
+  const unknownList     = results.filter(r => getBrowserResultCategory(r) === "unknown" && r.status !== "checking");
+  const fingerprintList = results.filter(r => r.status !== "checking" && !!(r as any).fingerprintData);
   const unknownRetryCount = unknownList.filter(r => !!credsMapRef.current[r.email]).length;
   const completedCount = results.filter(r => r.status !== "checking").length;
   const displayed = activeList === "opened" ? opened
     : activeList === "not_opened" ? notOpened
     : activeList === "delete" ? deleteList
+    : activeList === "fingerprint" ? fingerprintList
     : [...inFlight, ...unknownList];
   const progress = total > 0 ? Math.round((completedCount / total) * 100) : 0;
 
@@ -1170,6 +1172,11 @@ function BrowserChecker() {
                   activeList === "unknown" ? "bg-yellow-500/10 text-yellow-400 border-yellow-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
                 <HelpCircle className="w-3.5 h-3.5" />UNKNOWN ({unknownList.length + inFlight.length})
               </button>
+              <button onClick={() => setActiveList("fingerprint")}
+                className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
+                  activeList === "fingerprint" ? "bg-purple-500/10 text-purple-400 border-purple-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
+                <ShieldAlert className="w-3.5 h-3.5" />FINGERPRINT ({fingerprintList.length})
+              </button>
             </div>
             <div className="flex gap-1.5 flex-wrap">
               {activeList === "unknown" && selectedUnknown.size > 0 && !isChecking && (
@@ -1184,30 +1191,140 @@ function BrowserChecker() {
                   <RefreshCw className="w-3 h-3 mr-1" />RETRY ALL UNKNOWN ({unknownRetryCount})
                 </Button>
               )}
-              <Button variant="outline" size="sm"
-                onClick={() => download(
-                  displayed.filter(r => r.status !== "checking").map(r =>
-                    [r.email, r.password ?? "", r.totpSecret ?? "", statusLabel(r.status)].join(":")
-                  ).join("\n"),
-                  `gmail_${activeList}.txt`, "text/plain")}
-                disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
-                <Download className="w-3 h-3 mr-1" />.TXT
-              </Button>
-              <Button variant="outline" size="sm"
-                onClick={() => downloadCSV(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
-                disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
-                <Download className="w-3 h-3 mr-1" />.CSV
-              </Button>
-              <Button variant="outline" size="sm"
-                onClick={() => downloadJSON(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
-                disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
-                <Download className="w-3 h-3 mr-1" />.JSON
-              </Button>
+              {activeList !== "fingerprint" && <>
+                <Button variant="outline" size="sm"
+                  onClick={() => download(
+                    displayed.filter(r => r.status !== "checking").map(r =>
+                      [r.email, r.password ?? "", r.totpSecret ?? "", statusLabel(r.status)].join(":")
+                    ).join("\n"),
+                    `gmail_${activeList}.txt`, "text/plain")}
+                  disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
+                  <Download className="w-3 h-3 mr-1" />.TXT
+                </Button>
+                <Button variant="outline" size="sm"
+                  onClick={() => downloadCSV(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
+                  disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
+                  <Download className="w-3 h-3 mr-1" />.CSV
+                </Button>
+                <Button variant="outline" size="sm"
+                  onClick={() => downloadJSON(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
+                  disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
+                  <Download className="w-3 h-3 mr-1" />.JSON
+                </Button>
+              </>}
             </div>
           </div>
 
           <div className="flex-1 overflow-auto">
-            {results.length === 0 && !isChecking ? (
+            {activeList === "fingerprint" ? (
+              /* ── Fingerprint grid view ── */
+              <div className="p-3 space-y-3">
+                {fingerprintList.length === 0 ? (
+                  <EmptyState icon={<ShieldAlert className="w-8 h-8 mb-3 opacity-50" />} label="NO FINGERPRINT DATA — RUN A CHECK FIRST" />
+                ) : fingerprintList.map((r) => {
+                  const fd = (r as any).fingerprintData as {
+                    model?: string; androidVersion?: string; chromeVersion?: string; platform?: string;
+                    screenW?: number; screenH?: number; dpr?: number;
+                    webglVendor?: string; webglRenderer?: string;
+                    hwConcurrency?: number; deviceMemory?: number; maxTouchPoints?: number;
+                    language?: string; timezone?: string; countryCode?: string; geoLocked?: boolean;
+                    batteryLevel?: number; batteryCharging?: boolean; dischargingTime?: number;
+                    doNotTrack?: string | null; connectionRtt?: number; connectionDownlink?: number;
+                    historyLength?: number; canvasSeed?: number; audioNoise?: number; webglNoise?: number;
+                  };
+                  if (!fd) return null;
+                  const bat = fd.batteryLevel != null ? `${Math.round(fd.batteryLevel * 100)}%` : "—";
+                  const batIcon = fd.batteryCharging ? "⚡" : "🔋";
+                  const dtH = fd.dischargingTime != null
+                    ? `${Math.floor(fd.dischargingTime / 3600)}h ${Math.round((fd.dischargingTime % 3600) / 60)}m left`
+                    : "—";
+                  const dnt = fd.doNotTrack === "1" ? "ON" : fd.doNotTrack === "unspecified" ? "Unspecified" : fd.doNotTrack == null ? "OFF" : String(fd.doNotTrack);
+                  return (
+                    <div key={r.email} className="rounded-lg border border-border bg-card/60 p-3 space-y-3">
+                      {/* Header */}
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div className="flex items-center gap-2">
+                          <ShieldAlert className="w-3.5 h-3.5 text-purple-400" />
+                          <span className="font-mono text-sm text-foreground font-medium">{r.email}</span>
+                          {r.durationMs != null && (
+                            <span className={cn("text-[10px] font-mono", r.durationMs < 60000 ? "text-green-400/70" : "text-yellow-400/70")}>
+                              {Math.round(r.durationMs / 1000)}s
+                            </span>
+                          )}
+                        </div>
+                        <BrowserStatusBadge status={r.status} />
+                      </div>
+
+                      {/* 6-section grid */}
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-[10px] font-mono">
+
+                        {/* Device Identity */}
+                        <div className="rounded border border-purple-500/20 bg-purple-500/5 p-2 space-y-1">
+                          <p className="text-[9px] uppercase tracking-widest text-purple-400/70 font-bold mb-1">📱 Device</p>
+                          <p className="text-purple-300 font-bold text-[11px]">{fd.model ?? "—"}</p>
+                          <p className="text-purple-400/80">Android <span className="text-purple-300">{fd.androidVersion ?? "—"}</span></p>
+                          <p className="text-purple-400/80">Chrome <span className="text-purple-300">{fd.chromeVersion ?? "—"}</span></p>
+                          <p className="text-purple-400/50 text-[9px] break-words">{fd.platform ?? "—"}</p>
+                        </div>
+
+                        {/* Screen + GPU */}
+                        <div className="rounded border border-cyan-500/20 bg-cyan-500/5 p-2 space-y-1">
+                          <p className="text-[9px] uppercase tracking-widest text-cyan-400/70 font-bold mb-1">🖥 Screen / GPU</p>
+                          <p className="text-cyan-300 font-bold">{fd.screenW ?? "—"}×{fd.screenH ?? "—"}</p>
+                          <p className="text-cyan-400/80">DPR <span className="text-cyan-300">{fd.dpr ?? "—"}</span></p>
+                          <p className="text-cyan-400/60 text-[9px] break-words mt-1">{fd.webglVendor ?? "—"}</p>
+                          <p className="text-cyan-400/50 text-[9px] break-words">{fd.webglRenderer ?? "—"}</p>
+                        </div>
+
+                        {/* Hardware */}
+                        <div className="rounded border border-green-500/20 bg-green-500/5 p-2 space-y-1">
+                          <p className="text-[9px] uppercase tracking-widest text-green-400/70 font-bold mb-1">⚙️ Hardware</p>
+                          <p className="text-green-400/80">CPU <span className="text-green-300">{fd.hwConcurrency ?? "—"} cores</span></p>
+                          <p className="text-green-400/80">RAM <span className="text-green-300">{fd.deviceMemory ?? "—"} GB</span></p>
+                          <p className="text-green-400/80">Touch <span className="text-green-300">{fd.maxTouchPoints ?? "—"} pts</span></p>
+                        </div>
+
+                        {/* Locale / Geo */}
+                        <div className="rounded border border-yellow-500/20 bg-yellow-500/5 p-2 space-y-1">
+                          <p className="text-[9px] uppercase tracking-widest text-yellow-400/70 font-bold mb-1">🌐 Locale</p>
+                          <p className="text-yellow-400/70">Lang <span className="text-yellow-300">{fd.language ?? "—"}</span></p>
+                          <p className="text-yellow-400/70">TZ <span className="text-yellow-300 break-words">{fd.timezone ?? "—"}</span></p>
+                          <p className="text-yellow-400/70">CC <span className="text-yellow-300">{fd.countryCode ?? "—"}</span></p>
+                          <p className={cn("text-[9px] mt-1", fd.geoLocked ? "text-green-400/80" : "text-yellow-400/50")}>
+                            {fd.geoLocked ? "🔒 Geo-locked" : "⚠ Not geo-locked"}
+                          </p>
+                        </div>
+
+                        {/* Battery */}
+                        <div className="rounded border border-orange-500/20 bg-orange-500/5 p-2 space-y-1">
+                          <p className="text-[9px] uppercase tracking-widest text-orange-400/70 font-bold mb-1">🔋 Battery</p>
+                          <p className="text-orange-300 font-bold">{bat} {batIcon}</p>
+                          <p className="text-orange-400/70">{fd.batteryCharging ? "Charging" : "Discharging"}</p>
+                          <p className="text-orange-400/60 text-[9px]">{dtH}</p>
+                        </div>
+
+                        {/* Connection + Browser */}
+                        <div className="rounded border border-blue-500/20 bg-blue-500/5 p-2 space-y-1">
+                          <p className="text-[9px] uppercase tracking-widest text-blue-400/70 font-bold mb-1">📶 Connection</p>
+                          <p className="text-blue-400/80">DL <span className="text-blue-300">{fd.connectionDownlink ?? "—"} Mbps</span></p>
+                          <p className="text-blue-400/80">RTT <span className="text-blue-300">{fd.connectionRtt ?? "—"} ms</span></p>
+                          <p className="text-blue-400/80 mt-1">History <span className="text-blue-300">{fd.historyLength ?? "—"}</span></p>
+                          <p className="text-blue-400/80">DNT <span className="text-blue-300">{dnt}</span></p>
+                        </div>
+
+                      </div>
+
+                      {/* Noise seeds footer */}
+                      <div className="flex flex-wrap gap-3 text-[9px] font-mono text-muted-foreground/40 border-t border-border/40 pt-2">
+                        <span>canvas_seed=<span className="text-muted-foreground/60">{fd.canvasSeed ?? "—"}</span></span>
+                        <span>audio_noise=<span className="text-muted-foreground/60">{fd.audioNoise ?? "—"}</span></span>
+                        <span>webgl_noise=<span className="text-muted-foreground/60">{fd.webglNoise ?? "—"}</span></span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : results.length === 0 && !isChecking ? (
               <EmptyState icon={<Globe className="w-8 h-8 mb-3 opacity-50" />} label="AWAITING CREDENTIALS" />
             ) : displayed.length === 0 && !isChecking ? (
               <EmptyState label={`NO ${activeList === "opened" ? "OPEN" : activeList === "not_opened" ? "NOT OPEN" : activeList === "delete" ? "DELETE" : "UNKNOWN"} ACCOUNTS`} />

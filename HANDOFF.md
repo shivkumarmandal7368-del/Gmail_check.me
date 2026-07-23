@@ -2178,6 +2178,60 @@ ProxyScrape proxy confirmed working: `http://kp7d2s4gfeiszz7-odds-5+100-country-
 
 ---
 
+## Session 31 Changes (July 23, 2026) — Full Fingerprint Tab + Project Setup
+
+### ✅ Fresh import setup
+- `pnpm install` — all Node.js dependencies installed (node_modules missing after import)
+- Built lib packages for typecheck (required after fresh import):
+  ```bash
+  cd lib/api-client-react && npx tsc -p tsconfig.json
+  cd lib/api-zod && npx tsc -p tsconfig.json
+  ```
+- Both workflows restarted and verified running:
+  - `artifacts/api-server: API Server` — Express on port 8080 ✅
+  - `artifacts/gmail-checker: web` — Vite on port 5173 ✅
+
+### ✅ FINGERPRINT Tab — Full Fingerprint View in Browser Checker
+
+**File changed:** `artifacts/gmail-checker/src/pages/home.tsx`
+
+**User request:** Show ALL fingerprint data (device + browser + all fields) in a dedicated "FINGERPRINT" tab in the Browser Check mode.
+
+**What was already in place (previous sessions):**
+- Python sends full `fingerprintData` dict (27 fields) at line ~1890 of `gmail_uc_checker.py`
+- TypeScript `FingerprintData` interface in `browserLoginChecker.ts`
+- Compact fingerprint display already existed in the FINGERPRINT table column
+
+**Changes made this session:**
+
+1. `LoginList` type extended: `"fingerprint"` added
+2. `fingerprintList` computed variable: `results.filter(r => r.status !== "checking" && !!r.fingerprintData)`
+3. `displayed` updated: `activeList === "fingerprint" ? fingerprintList : ...`
+4. **FINGERPRINT tab button** added (purple, ShieldAlert icon) next to UNKNOWN in card header
+5. **Full fingerprint card grid view** — when FINGERPRINT tab active, shows one card per account with 6 colored sections:
+
+| Section | Color | Fields shown |
+|---------|-------|-------------|
+| 📱 Device | Purple | model, androidVersion, chromeVersion, platform |
+| 🖥 Screen/GPU | Cyan | screenW, screenH, dpr, webglVendor, webglRenderer |
+| ⚙️ Hardware | Green | hwConcurrency, deviceMemory, maxTouchPoints |
+| 🌐 Locale | Yellow | language, timezone, countryCode, geoLocked |
+| 🔋 Battery | Orange | batteryLevel, batteryCharging, dischargingTime |
+| 📶 Connection | Blue | connectionDownlink, connectionRtt, historyLength, doNotTrack |
+| Noise footer | Gray | canvasSeed, audioNoise, webglNoise |
+
+6. Download buttons (TXT/CSV/JSON) hidden when FINGERPRINT tab active
+
+### ✅ Verification
+| Check | Result |
+|---|---|
+| `pnpm --filter @workspace/gmail-checker run typecheck` | ✅ 0 errors |
+| `GET /api/healthz` | ✅ `{"status":"ok"}` |
+| Frontend Vite dev server at port 5173 | ✅ |
+| Both workflows running | ✅ |
+
+---
+
 ## What's Next (Future Work)
 
 1. **Proxy health pre-flight** — ping proxy before starting batch, warn if dead/slow  
