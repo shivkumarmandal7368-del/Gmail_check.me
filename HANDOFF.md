@@ -1,6 +1,7 @@
 # Vanguard MX — Agent Handoff Document
 _Last updated: July 23, 2026 — Session 26_
 _Last updated: July 23, 2026 — Session 27_
+_Last updated: July 23, 2026 — Session 28_
 
 ---
 
@@ -1788,6 +1789,47 @@ Added a third **UNKNOWN** bucket, moving ambiguous statuses out of "Not Opened":
 - `pnpm --filter @workspace/gmail-checker run typecheck`: **0 errors**
 - App loads clean, no browser console errors
 - All three workflows running
+
+---
+
+## Session 28 Changes (July 23, 2026) — Account Corruption Fix (freshProfile + Logout)
+
+### Problem
+Gmail accounts were getting flagged/locked after 2-3 days of use with the browser checker. Mobile clone tools (IMAP-based) did not cause this issue.
+
+### Root Cause (Two Issues)
+
+**Issue 1 — `freshProfile=true` was the default**
+Every check wiped the Chrome profile and generated a brand-new device fingerprint. From Google's perspective:
+- Day 1: Pixel 7 (US IP X) logged in
+- Day 2: Samsung S24 (US IP Y) logged in — different device!
+- Day 3: OnePlus 12 (US IP Z) logged in — yet another new device!
+
+This is exactly what a compromised account looks like to Google's security system → account flagged/locked after 2-3 days.
+
+**Issue 2 — Immediate logout after login (all modes)**
+Code did: login → 500ms delay → `accounts.google.com/Logout`. No real human logs into Gmail and immediately logs out. This bot-like pattern compounded the "new device" signal.
+
+**Why mobile clone doesn't corrupt:** IMAP auth doesn't create "new sign-in from new device" events in Google's security log. Browser login does.
+
+### Fix Applied
+
+**1. `freshProfile` default changed to `false`** (`artifacts/gmail-checker/src/pages/home.tsx` line ~426)
+- Was: `lsGet(LS.fresh, true)` → Now: `lsGet(LS.fresh, false)`
+- Same device fingerprint reused per account → Google sees a "known device" returning
+
+**2. Logout skipped when `freshProfile=false`** (`artifacts/api-server/gmail_uc_checker.py` — 3 locations)
+- Main Gmail reached block (~line 1896)
+- Second TOTP path (~line 1971)
+- HTML Gmail fallback (~line 2957)
+- When `fresh_profile=False`: session cookie kept alive → next check uses `signin/continue` shortcut (faster + less suspicious)
+- When `fresh_profile=True`: logout still happens (profile gets wiped anyway, session irrelevant)
+
+**3. UI tooltip updated** to warn that Fresh Device mode can cause account corruption.
+
+### Behavior After Fix
+- `freshProfile=OFF` (default): Same phone fingerprint every check. Session stays active. Second check uses `signin/continue` shortcut. Account looks like a normal returning device.
+- `freshProfile=ON`: New device + full login + logout (unchanged). Use only when you want a clean slate; expect more account flags.
 
 ---
 

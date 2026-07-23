@@ -423,7 +423,7 @@ function BrowserChecker() {
   const [inputText,    setInputText]    = useState<string>(() => lsGet(LS.input, ""));
   const [proxyText,    setProxyText]    = useState<string>(() => lsGet(LS.proxy, ""));
   const [concurrency,  setConcurrency]  = useState<number>(() => lsGet(LS.concurrency, 3));
-  const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, true));
+  const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, false));
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
   const [selectedUnknown, setSelectedUnknown] = useState<Set<string>>(new Set());
   const [total,        setTotal]        = useState<number>(() => lsGet(LS.total, 0));
@@ -1032,7 +1032,7 @@ function BrowserChecker() {
                 </div>
               </div>
               <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
-                {freshProfile ? "✓ Har run mein naya device — Chrome profile + fingerprint wipe hoga" : "Same device reuse hoga (faster second check)"}
+                {freshProfile ? "⚠️ Naya device har run — account 2-3 din mein flag ho sakta hai" : "✓ Same device reuse — account safe, faster second check"}
               </p>
             </button>
 

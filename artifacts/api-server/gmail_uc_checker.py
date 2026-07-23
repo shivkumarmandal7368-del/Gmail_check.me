@@ -1893,14 +1893,20 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         if at_mailbox and (has_compose or has_inbox_text or "mail/u/" in url or "mail/mu/" in url or "/mail/mp/" in url):
             rand_sleep(500, 800)
             shot = screenshot_b64()
-            # ── Logout immediately so Google doesn't flag a suspicious active session ──
-            try:
-                log("Mailbox opened — logging out to avoid suspicious-session flag")
-                driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
-                rand_sleep(700, 1200)
-                log("Logout complete")
-            except Exception as _le:
-                log(f"Logout warning (non-fatal): {_le}")
+            # ── Logout only on fresh_profile=True (profile gets wiped anyway) ──────
+            # When fresh_profile=False we keep the session alive so Google sees a
+            # returning known device on the next check — immediate login+logout on a
+            # "new" device every run is what triggers account flags after 2-3 days.
+            if fresh_profile:
+                try:
+                    log("Mailbox opened — logging out (fresh profile mode)")
+                    driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
+                    rand_sleep(700, 1200)
+                    log("Logout complete")
+                except Exception as _le:
+                    log(f"Logout warning (non-fatal): {_le}")
+            else:
+                log("Mailbox opened — keeping session (same-device mode, no logout)")
             return {
                 "status": "opened",
                 "reason": "Mailbox opened successfully ✅",
@@ -1968,15 +1974,17 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                             _fb_url, _fb_text = page_state()
                             log(f"{email} — After second TOTP submit: {_fb_url[:70]}")
                             shot = screenshot_b64()
-                            # Logout so Google doesn't flag a suspicious active session
                             if get_hostname(_fb_url) == "mail.google.com" or "mail.google.com" in _fb_url:
-                                try:
-                                    log(f"{email} — Gmail reached after second TOTP — logging out")
-                                    driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
-                                    rand_sleep(700, 1200)
-                                    log(f"{email} — Logout complete")
-                                except Exception as _fble:
-                                    log(f"Logout warning (non-fatal): {_fble}")
+                                if fresh_profile:
+                                    try:
+                                        log(f"{email} — Gmail reached after second TOTP — logging out (fresh profile mode)")
+                                        driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
+                                        rand_sleep(700, 1200)
+                                        log(f"{email} — Logout complete")
+                                    except Exception as _fble:
+                                        log(f"Logout warning (non-fatal): {_fble}")
+                                else:
+                                    log(f"{email} — Gmail reached after second TOTP — keeping session (same-device mode)")
                             return {
                                 "status": "opened",
                                 "reason": "Mailbox opened successfully ✅",
@@ -2954,11 +2962,14 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                         if any(x in _html_text for x in ["inbox", "compose", "sent", "drafts"]):
                             rand_sleep(400, 700)
                             shot = screenshot_b64()
-                            try:
-                                driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
-                                rand_sleep(800, 1200)
-                            except Exception:
-                                pass
+                            if fresh_profile:
+                                try:
+                                    driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
+                                    rand_sleep(800, 1200)
+                                except Exception:
+                                    pass
+                            else:
+                                log(f"{email} — HTML Gmail opened — keeping session (same-device mode)")
                             return {
                                 "status": "opened",
                                 "reason": "Mailbox opened (HTML Gmail) ✅",
