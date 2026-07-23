@@ -1364,7 +1364,7 @@ After password submit, URL stays on `challenge/pwd` instead of navigating to TOT
 
 ---
 
-## Session 27 Changes (July 23, 2026) — Proxy Pre-flight Check
+## Session 27 Changes (July 23, 2026) — Proxy Pre-flight + Fingerprint Hardening
 
 ### ✅ Problem solved — fake session IDs were being shown even when proxy was dead
 

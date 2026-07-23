@@ -813,12 +813,16 @@ try{{
 }}catch(e){{}}
 try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e){{}}
 (function(){{
-  var _wn={wn};
+  var _wn={wn};var _wv='{wv}';var _wr='{wr}';
   function patch(ctx){{
     var gp=ctx.prototype.getParameter;
     ctx.prototype.getParameter=function(p){{
-      if(p===37445)return'{wv}';
-      if(p===37446)return'{wr}';
+      if(p===37445)return _wv;          // UNMASKED_VENDOR_WEBGL
+      if(p===37446)return _wr;          // UNMASKED_RENDERER_WEBGL
+      if(p===7936) return _wv;          // GL_VENDOR  (basic — reveals server GPU on headless)
+      if(p===7937) return _wr;          // GL_RENDERER (basic — reveals "ANGLE (Intel, Mesa...)")
+      if(p===7938) return 'OpenGL ES 3.2 v1.r47p0-01eac0';  // GL_VERSION
+      if(p===35724)return 'OpenGL ES GLSL ES 3.20';          // SHADING_LANGUAGE_VERSION
       var v=gp.call(this,p);
       if(typeof v==='number')return v+_wn*Math.sign(v||1);
       return v;
@@ -880,6 +884,8 @@ try{{
     navigator.permissions.query=function(p){{
       if(p&&(p.name==='camera'||p.name==='microphone'||p.name==='geolocation'))
         return Promise.resolve({{state:'prompt',onchange:null}});
+      if(p&&(p.name==='accelerometer'||p.name==='gyroscope'||p.name==='magnetometer'||p.name==='ambient-light-sensor'))
+        return Promise.resolve({{state:'granted',onchange:null}});
       return _origPQ2(p);
     }};
   }}
@@ -894,6 +900,89 @@ try{{
       ]);
     }};
   }}
+}}catch(e){{}}
+try{{Object.defineProperty(screen,'availLeft',{{get:()=>0}});}}catch(e){{}}
+try{{Object.defineProperty(screen,'availTop',{{get:()=>0}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'javaEnabled',{{value:function(){{return false;}},writable:false,configurable:true}});}}catch(e){{}}
+try{{
+  var _origMimeTypes=navigator.mimeTypes;
+  Object.defineProperty(navigator,'mimeTypes',{{get:()=>{{var m=Object.create(MimeTypeArray.prototype);Object.defineProperty(m,'length',{{value:0}});m.item=function(){{return null;}};m.namedItem=function(){{return null;}};return m;}}}});
+}}catch(e){{}}
+try{{document.hasFocus=function(){{return true;}};}}catch(e){{}}
+try{{
+  var _obTblob=HTMLCanvasElement.prototype.toBlob;
+  if(_obTblob){{
+    var _bseed={cs};
+    HTMLCanvasElement.prototype.toBlob=function(cb,t,q){{
+      try{{var c=this.getContext('2d');if(c){{var d=c.getImageData(0,0,this.width||1,this.height||1);d.data[0]=d.data[0]^_bseed;c.putImageData(d,0,0);}}}}catch(e){{}}
+      _obTblob.call(this,cb,t,q);
+    }};
+  }}
+}}catch(e){{}}
+try{{
+  Object.defineProperty(navigator,'share',{{value:function(data){{return Promise.resolve();}},writable:false,configurable:true}});
+}}catch(e){{}}
+try{{
+  if(!navigator.getInstalledRelatedApps){{
+    Object.defineProperty(navigator,'getInstalledRelatedApps',{{value:function(){{return Promise.resolve([]);}},writable:false,configurable:true}});
+  }}
+}}catch(e){{}}
+try{{
+  if(!navigator.wakeLock){{
+    Object.defineProperty(navigator,'wakeLock',{{get:function(){{return{{request:function(t){{return Promise.resolve({{type:t,released:false,release:function(){{return Promise.resolve();}},addEventListener:function(){{}},removeEventListener:function(){{}}}});}}}}}},configurable:true}});
+  }}
+}}catch(e){{}}
+try{{
+  if(!navigator.virtualKeyboard){{
+    Object.defineProperty(navigator,'virtualKeyboard',{{get:function(){{return{{show:function(){{}},hide:function(){{}},overlaysContent:false,boundingRect:{{x:0,y:0,width:0,height:0,top:0,right:0,bottom:0,left:0}},addEventListener:function(){{}},removeEventListener:function(){{}}}}}},configurable:true}});
+  }}
+}}catch(e){{}}
+try{{
+  var _dMem={fp['deviceMemory']};
+  var _heapLim=Math.round(_dMem*268435456);
+  var _heapTot=Math.round((45+Math.random()*35)*1048576);
+  var _heapUsd=Math.round((25+Math.random()*25)*1048576);
+  if(window.performance&&!Object.getOwnPropertyDescriptor(performance,'memory')){{
+    Object.defineProperty(performance,'memory',{{get:function(){{return{{jsHeapSizeLimit:_heapLim,totalJSHeapSize:_heapTot,usedJSHeapSize:_heapUsd}}}},configurable:true}});
+  }}
+}}catch(e){{}}
+try{{
+  if(typeof DeviceMotionEvent!=='undefined'&&!DeviceMotionEvent.requestPermission){{
+    DeviceMotionEvent.requestPermission=function(){{return Promise.resolve('granted');}};
+  }}
+  if(typeof DeviceOrientationEvent!=='undefined'&&!DeviceOrientationEvent.requestPermission){{
+    DeviceOrientationEvent.requestPermission=function(){{return Promise.resolve('granted');}};
+  }}
+}}catch(e){{}}
+(function(){{
+  try{{
+    var _omm=window.matchMedia&&window.matchMedia.bind(window);
+    if(!_omm)return;
+    function _mmr(q,m){{return{{matches:m,media:q,onchange:null,addListener:function(){{}},removeListener:function(){{}},addEventListener:function(){{}},removeEventListener:function(){{}},dispatchEvent:function(){{return true;}}}};}}
+    window.matchMedia=function(q){{
+      var s=(q||'').replace(/\s+/g,'').toLowerCase();
+      if(s==='(pointer:coarse)')return _mmr(q,true);
+      if(s==='(pointer:fine)')return _mmr(q,false);
+      if(s==='(hover:none)')return _mmr(q,true);
+      if(s==='(hover:hover)')return _mmr(q,false);
+      if(s==='(any-pointer:coarse)')return _mmr(q,true);
+      if(s==='(any-pointer:fine)')return _mmr(q,false);
+      if(s==='(any-hover:hover)')return _mmr(q,false);
+      if(s==='(any-hover:none)')return _mmr(q,true);
+      if(s==='(prefers-color-scheme:dark)')return _mmr(q,true);
+      if(s==='(prefers-color-scheme:light)')return _mmr(q,false);
+      if(s==='(orientation:portrait)')return _mmr(q,true);
+      if(s==='(orientation:landscape)')return _mmr(q,false);
+      if(s==='(display-mode:browser)')return _mmr(q,true);
+      if(s==='(display-mode:standalone)')return _mmr(q,false);
+      if(s==='(prefers-reduced-motion:reduce)')return _mmr(q,false);
+      if(s==='(prefers-reduced-motion:no-preference)')return _mmr(q,true);
+      return _omm(q);
+    }};
+  }}catch(e){{}}
+}})();
+try{{
+  Date.prototype.getTimezoneOffset=function(){{return -330;}};
 }}catch(e){{}}
 """
 
