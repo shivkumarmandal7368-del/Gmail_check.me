@@ -551,12 +551,12 @@ PHONE_PROFILES = [
     },
     # ── Samsung Galaxy S-series (additional) ──────────────────────────────────
     {
-        "model": "SM-S921B",      "androidVersion": "14",   # Samsung Galaxy S24
+        "model": "SM-S921B",      "androidVersion": "14",   # Samsung Galaxy S24 (Exynos 2400)
         "chromeVersion": "138.0.7204.100",
         "screenW": 360, "screenH": 780, "availH": 756, "dpr": 3.0,
         "hwConcurrency": 10, "deviceMemory": 8,  "maxTouchPoints": 5,
         "platform": "Linux aarch64",
-        "webglVendor": "ARM", "webglRenderer": "Xclipse 940",
+        "webglVendor": "Samsung Electronics Co., Ltd.", "webglRenderer": "Xclipse 940",
     },
     {
         "model": "SM-S928B",      "androidVersion": "14",   # Samsung Galaxy S24 Ultra
@@ -576,12 +576,12 @@ PHONE_PROFILES = [
     },
     # ── Samsung Galaxy A-series (additional) ──────────────────────────────────
     {
-        "model": "SM-A556B",      "androidVersion": "14",   # Samsung Galaxy A55
+        "model": "SM-A556B",      "androidVersion": "14",   # Samsung Galaxy A55 (Exynos 1480)
         "chromeVersion": "138.0.7204.100",
         "screenW": 360, "screenH": 800, "availH": 776, "dpr": 2.625,
         "hwConcurrency": 8,  "deviceMemory": 8,  "maxTouchPoints": 5,
         "platform": "Linux aarch64",
-        "webglVendor": "AMD", "webglRenderer": "Xclipse 530",
+        "webglVendor": "Samsung Electronics Co., Ltd.", "webglRenderer": "Xclipse 530",
     },
     # ── OnePlus (additional) ──────────────────────────────────────────────────
     {

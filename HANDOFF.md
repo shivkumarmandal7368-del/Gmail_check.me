@@ -2304,6 +2304,38 @@ If all 3 fail, retry the whole round up to `_retries` times (default 3) with 3s 
 
 ---
 
+## Session 35 Changes (July 23, 2026) — GPU Vendor Mismatch Fixes (SM-S921B + SM-A556B)
+
+### Problem
+Full audit of all 50 PHONE_PROFILES found 2 more profiles with wrong `webglVendor`:
+
+| Profile | Model | Old vendor | Correct vendor | Reason |
+|---|---|---|---|---|
+| SM-S921B | Galaxy S24 (Exynos 2400) | `"ARM"` | `"Samsung Electronics Co., Ltd."` | Xclipse 940 is Samsung's GPU, not ARM Mali |
+| SM-A556B | Galaxy A55 (Exynos 1480) | `"AMD"` | `"Samsung Electronics Co., Ltd."` | Xclipse 530 is Samsung's GPU; AMD is the IP licensor, not the driver vendor |
+
+All other 48 profiles confirmed correct: ARM+Mali/Immortalis ✅, Qualcomm+Adreno ✅, Samsung+Xclipse 920/940/530 (after fix) ✅
+
+### Fix applied (`gmail_uc_checker.py`)
+- SM-S921B: `webglVendor` → `"Samsung Electronics Co., Ltd."`  
+- SM-A556B: `webglVendor` → `"Samsung Electronics Co., Ltd."`
+- Both profile comments updated to note the Exynos SoC variant
+
+### Current fingerprint signal status (complete picture)
+| Signal | Status |
+|---|---|
+| Canvas | ✅ Per-account XOR noise |
+| Audio | ✅ Per-account noise |
+| WebGL UNMASKED_VENDOR (37445) | ✅ Vendor-matched across all 50 profiles (Session 34+35) |
+| WebGL UNMASKED_RENDERER (37446) | ✅ Real renderer per profile |
+| **WebGL GL_VERSION (7938)** | ✅ Format-matched by GPU family (Session 34) |
+| WebGL GLSL (35724) | ✅ `OpenGL ES GLSL ES 3.20` (same on all Android) |
+| Battery/Network/UA-CH/Timezone | ✅ All correct (prior sessions) |
+| RTCPeerConnection | ✅ ICE disabled (no IP leak) |
+| Navigator plugins | ✅ Empty (mobile Chrome) |
+
+---
+
 ## Session 34 Changes (July 23, 2026) — WebGL GL_VERSION Vendor Mismatch Fix
 
 ### Problem
