@@ -7,6 +7,92 @@ _Last updated: July 23, 2026 — Session 30_
 _Last updated: July 23, 2026 — Session 33_
 _Last updated: July 23, 2026 — Session 38_
 _Last updated: July 23, 2026 — Session 39_
+_Last updated: July 23, 2026 — Session 40_
+
+---
+
+## Session 40 Changes (July 23, 2026) — Resume Bug Fix + Live Button + Auto-Reconnect on Tab Focus
+
+### Problem 1 — Resume button did not appear after server restart (interrupted job)
+
+**Root cause:** `connectToJobStream()` ka while loop cleanly `done=true` pe khatam hota tha jab server reconnect ke baad SSE mein "interrupted" event send karke stream close karta tha. Loop exit ke baad sirf `setConnStatus("idle"); setIsRunning(false)` call hota tha — `applyJobState()` KABHI nahi call hoti thi. Iska matlab `resumeReady` kabhi `true` nahi hoti thi, RESUME button nahi dikhta tha.
+
+Dusra path jo kaam karta tha: `scheduleReconnect()` (jab SSE ERROR throw karta hai) — woh `applyJobState()` call karta tha jo `resumeReady` set karta tha. Lekin clean close (done=true) ka path kaam nahi karta tha.
+
+**Fix** (`artifacts/gmail-checker/src/pages/home.tsx` — `connectToJobStream()`):
+After the `while (true)` loop exits, re-fetch the job state and call `applyJobState()`:
+```js
+// Stream closed normally — re-fetch final job state so resumeReady is set
+// correctly for interrupted/paused jobs (e.g. after server restart).
+try {
+  const stateRes = await fetch(`/api/jobs/${id}`);
+  if (stateRes.ok) {
+    const { job } = await stateRes.json();
+    if (job) applyJobState(job);
+  }
+} catch {}
+```
+
+**Result:** Ab jab bhi SSE stream normally close ho (server restart, job completion, etc.), frontend turant correct state fetch karta hai — RESUME button correctly dikhta hai jab job interrupted/paused hai.
+
+---
+
+### Problem 2 — Reconnect 10-15 second delay (ya kabhi nahi) jab tab 10-15 min baad khulta hai
+
+**Root cause:** `scheduleReconnect()` browser `setTimeout` use karta hai. Jab tab background mein ho ya 10-15 min baad khula ho, browsers setTimeout heavily throttle karte hain (1s floor se bhi zyada). Yeh reconnect delay 10-15s tak badh jaata tha ya kabhi fire hi nahi hota tha.
+
+**Fix 1 — `visibilitychange` listener** (`artifacts/gmail-checker/src/pages/home.tsx`):
+```js
+useEffect(() => {
+  const onVisible = () => {
+    if (document.visibilityState === "visible") {
+      const id = activeJobIdRef.current;
+      if (!id) return;
+      setConnStatus(prev => {
+        if (prev === "disconnected" || prev === "reconnecting") {
+          // Cancel stale timer and reconnect immediately
+          if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
+          handleLiveReconnect();
+        }
+        return prev;
+      });
+    }
+  };
+  document.addEventListener("visibilitychange", onVisible);
+  return () => document.removeEventListener("visibilitychange", onVisible);
+}, []);
+```
+**Effect:** Jab bhi user tab switch karke wapas aata hai, agar connection disconnected tha, TURANT reconnect ho jaata hai — koi 10-15s wait nahi.
+
+**Fix 2 — LIVE button UI:**
+Two places pe LIVE button add kiya:
+
+1. **Card header mein** — jab `connStatus === "disconnected"` ya `"reconnecting"` ho, connection status text ke saath ek clickable `⚡ LIVE` button dikhta hai.
+2. **Input card ke bottom mein** — HARD REFRESH button ke upar ek prominent `⚡ LIVE — TURANT CONNECT KRO` button (blue color), sirf tab visible jab disconnected/reconnecting ho.
+
+Dono buttons `handleLiveReconnect()` call karte hain jo already implement tha (Session 18/21 se) — sirf UI missing thi.
+
+**Auto-reconnect still works:** `scheduleReconnect()` unchanged hai — yeh tab bhi kaam karega jab tab active ho. LIVE button ek supplementary instant-reconnect mechanism hai.
+
+---
+
+### Setup performed this session
+- `pnpm install` — node_modules were missing after import (526 packages reinstalled)
+- Both workflows restarted and verified:
+  - `artifacts/api-server: API Server` — Express on port 8080 ✅
+  - `artifacts/gmail-checker: web` — Vite on port 5173 ✅
+
+### Files changed
+| File | Change |
+|---|---|
+| `artifacts/gmail-checker/src/pages/home.tsx` | (1) `connectToJobStream`: added job re-fetch after while loop exits; (2) Added `visibilitychange` listener useEffect; (3) LIVE button in card header; (4) LIVE button below input area; (5) Added `Zap` to lucide-react imports |
+
+### Verification
+| Check | Result |
+|---|---|
+| API server build + start | ✅ Running on port 8080 |
+| Frontend Vite | ✅ Running on port 5173 |
+| pnpm typecheck (expected) | Should pass — only additions, no type changes |
 
 ---
 

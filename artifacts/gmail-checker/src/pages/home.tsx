@@ -24,7 +24,7 @@ import { Progress } from "@/components/ui/progress"
 import {
   Download, Terminal, CheckCircle2, XCircle, AlertTriangle,
   HelpCircle, Activity, ShieldAlert, KeyRound, Smartphone,
-  Lock, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle
+  Lock, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle, Zap
 } from "lucide-react"
 
 type SmtpFilter = "all" | "valid" | "invalid" | "disabled" | "catch_all" | "unknown";
@@ -458,6 +458,9 @@ function BrowserChecker() {
   const pausePollTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeJobIdRef   = useRef<string | null>(jobId);
   const appendModeRef    = useRef(false);
+  // connStatusRef mirrors connStatus state — lets event handlers read the current
+  // value without stale closure issues (e.g. visibilitychange, which is mounted once).
+  const connStatusRef    = useRef<"idle"|"connecting"|"connected"|"reconnecting"|"disconnected">("idle");
   // Credential map: email → {password, totpSecret?} — persisted so exports survive page refresh
   const credsMapRef = useRef<Record<string, { password: string; totpSecret?: string }>>(
     (() => { try { const v = localStorage.getItem(LS.creds); return v ? JSON.parse(v) : {}; } catch { return {}; } })()
@@ -471,6 +474,8 @@ function BrowserChecker() {
   useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
   useEffect(() => { try { localStorage.setItem(LS.total,       JSON.stringify(total));        } catch {} }, [total]);
   useEffect(() => { try { if (jobId) localStorage.setItem(LS.jobId, jobId); else localStorage.removeItem(LS.jobId); } catch {} }, [jobId]);
+  // Keep connStatusRef in sync so event handlers (visibilitychange) read the current value.
+  useEffect(() => { connStatusRef.current = connStatus; }, [connStatus]);
   useEffect(() => {
     try {
       const toSave = results.filter(r => r.status !== "checking");
@@ -490,6 +495,48 @@ function BrowserChecker() {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       if (pausePollTimer.current) clearTimeout(pausePollTimer.current);
     };
+  }, []);
+
+  // ── Auto-reconnect on tab visibility change ───────────────────────────────
+  // When user returns to tab after 10-15 min, browser throttles setTimeout so
+  // the auto-reconnect timer may not have fired. This fires instantly on tab focus.
+  // Uses refs (activeJobIdRef, connStatusRef, reconnectTimer) — never stale closures.
+  // State setters (setConnStatus, setReconnectedAt, etc.) are stable across renders.
+  useEffect(() => {
+    const onVisible = async () => {
+      if (document.visibilityState !== "visible") return;
+      const id = activeJobIdRef.current;
+      if (!id) return;
+      // Read current status from ref — no stale closure issue
+      const status = connStatusRef.current;
+      if (status !== "disconnected" && status !== "reconnecting") return;
+      // Cancel stale backoff timer and reconnect immediately
+      if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
+      setConnStatus("connecting");
+      try {
+        const res = await fetch(`/api/jobs/${id}`);
+        if (!res.ok) { setConnStatus("disconnected"); return; }
+        const { job } = await res.json();
+        if (!job) { setConnStatus("disconnected"); return; }
+        if (job.status !== "running") {
+          // applyJobState and schedulePausedJobPoll only call stable React setters
+          // and access refs — safe to call from a mount-time closure.
+          applyJobState(job);
+          setConnStatus("idle");
+          if (job.status === "paused" && (job.checkingEmails ?? []).length > 0) schedulePausedJobPoll(id);
+          return;
+        }
+        setReconnectedAt(new Date().toLocaleTimeString());
+        connectToJobStream(id, job.eventsCount ?? 0);
+      } catch { setConnStatus("disconnected"); }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  // Mount-once: all mutable values accessed via refs (activeJobIdRef, connStatusRef,
+  // reconnectTimer). React setState setters are guaranteed stable. Functions that
+  // only call stable setters + refs (applyJobState, schedulePausedJobPoll,
+  // connectToJobStream) are safe to close over.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -597,6 +644,15 @@ function BrowserChecker() {
             try { handleJobEvent(JSON.parse(dataLine.slice(6))); } catch {}
           }
         }
+        // Stream closed normally — re-fetch final job state so resumeReady is set
+        // correctly for interrupted/paused jobs (e.g. after server restart).
+        try {
+          const stateRes = await fetch(`/api/jobs/${id}`);
+          if (stateRes.ok) {
+            const { job } = await stateRes.json();
+            if (job) applyJobState(job);
+          }
+        } catch {}
         setConnStatus("idle"); setIsRunning(false);
       } catch (err: any) {
         if (err?.name === "AbortError") return;
@@ -958,8 +1014,18 @@ function BrowserChecker() {
             <CardTitle className="text-xs font-mono uppercase tracking-wider text-muted-foreground flex items-center gap-2">
               <Globe className="w-3.5 h-3.5 text-primary" />Browser Login Check
               {connStatus !== "idle" && (
-                <span className={cn("ml-auto text-[10px] font-mono", connLabel[connStatus].cls)}>
-                  {connLabel[connStatus].text}
+                <span className={cn("ml-auto flex items-center gap-1.5")}>
+                  <span className={cn("text-[10px] font-mono", connLabel[connStatus].cls)}>
+                    {connLabel[connStatus].text}
+                  </span>
+                  {(connStatus === "disconnected" || connStatus === "reconnecting") && (
+                    <button
+                      onClick={handleLiveReconnect}
+                      title="Turant live ho jao"
+                      className="flex items-center gap-0.5 text-[10px] font-mono px-1.5 py-0.5 rounded border border-blue-500/50 text-blue-400 hover:bg-blue-500/15 hover:border-blue-500/70 transition-colors">
+                      <Zap className="w-2.5 h-2.5" />LIVE
+                    </button>
+                  )}
                 </span>
               )}
             </CardTitle>
@@ -1094,6 +1160,13 @@ function BrowserChecker() {
               <Button className="w-full font-mono font-medium tracking-wide" size="lg"
                 onClick={handleCheck} disabled={!inputText.trim()}>
                 <Globe className="w-4 h-4 mr-2" />OPEN BROWSER & CHECK
+              </Button>
+            )}
+            {/* Live reconnect — instant, bypasses browser throttle on inactive tabs */}
+            {(connStatus === "disconnected" || connStatus === "reconnecting") && (
+              <Button size="sm" onClick={handleLiveReconnect}
+                className="w-full font-mono text-xs h-8 bg-blue-600 hover:bg-blue-500 text-white border-blue-500/50 transition-colors">
+                <Zap className="w-3 h-3 mr-1.5" />LIVE — TURANT CONNECT KRO
               </Button>
             )}
             {/* Hard Refresh — always enabled; cancels running job & resets to fresh page load */}
