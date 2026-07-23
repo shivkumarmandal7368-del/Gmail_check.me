@@ -721,6 +721,8 @@ def get_or_create_fingerprint(profile_dir: str) -> dict:
     fp["historyLength"] = random.randint(3, 14)
     # Unique WebGL noise per account (shifts float precision slightly)
     fp["webglNoise"] = round(random.uniform(0.000001, 0.000009), 8)
+    # Per-account stable discharging time (seconds) — avoids Math.random() on every call
+    fp["dischargingTime"] = random.randint(2400, 28800)   # 40 min – 8 hours
     try:
         with open(fp_path, "w") as f:
             json.dump(fp, f, indent=2)
@@ -750,9 +752,26 @@ def make_stealth_js(fp: dict) -> str:
     dl   = fp.get("connectionDownlink", 10.5)
     hist = fp.get("historyLength", 5)
     wn   = fp.get("webglNoise", 0.000002)
+    dt   = fp.get("dischargingTime", 14400)
+    # appVersion = UA minus "Mozilla/" prefix
+    av_str = (
+        f"5.0 (Linux; Android {fp['androidVersion']}; {fp['model']}) "
+        f"AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{cv} Mobile Safari/537.36"
+    )
     return f"""
 Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
-Object.defineProperty(navigator,'plugins',{{get:()=>{{var p=[];p.length=0;return p;}}}});
+Object.defineProperty(navigator,'plugins',{{get:()=>{{
+  try{{
+    var pa=Object.create(PluginArray.prototype);
+    Object.defineProperty(pa,'length',{{get:()=>0,configurable:true}});
+    pa.item=function(){{return null;}};
+    pa.namedItem=function(){{return null;}};
+    pa.refresh=function(){{}};
+    pa[Symbol.iterator]=function*(){{}};
+    return pa;
+  }}catch(e){{var p=[];p.length=0;return p;}}
+}}}});
 Object.defineProperty(navigator,'languages',{{get:()=>['{lg}','en']}});
 Object.defineProperty(navigator,'hardwareConcurrency',{{get:()=>{fp['hwConcurrency']}}});
 Object.defineProperty(navigator,'deviceMemory',{{get:()=>{fp['deviceMemory']}}});
@@ -772,6 +791,7 @@ Object.defineProperty(window,'innerHeight', {{get:()=>{fp['availH']}}});
 Object.defineProperty(navigator,'maxTouchPoints',{{get:()=>{fp['maxTouchPoints']}}});
 Object.defineProperty(navigator,'platform',{{get:()=>'{fp['platform']}'}});
 Object.defineProperty(navigator,'vendor',  {{get:()=>'Google Inc.'}});
+Object.defineProperty(navigator,'appVersion',{{get:()=>'{av_str}'}});
 try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable:true}});}}catch(e){{}}
 (function(){{
   var d={{brands:[{{brand:'Not=A?Brand',version:'24'}},{{brand:'Chromium',version:'138'}},{{brand:'Google Chrome',version:'138'}}],mobile:true,platform:'Android',
@@ -808,27 +828,28 @@ try{{
     try{{Object.defineProperty(b,'charging',{{get:()=>{bchg}}});}}catch(e){{}}
     try{{Object.defineProperty(b,'level',{{get:()=>{bat}}});}}catch(e){{}}
     try{{Object.defineProperty(b,'chargingTime',{{get:()=>{bchg}?0:Infinity}});}}catch(e){{}}
-    try{{Object.defineProperty(b,'dischargingTime',{{get:()=>Math.floor(3600+Math.random()*7200)}});}}catch(e){{}}
+    try{{Object.defineProperty(b,'dischargingTime',{{get:()=>{dt}}});}}catch(e){{}}
   }});
 }}catch(e){{}}
 window.ontouchstart=function(){{}};
 try{{Object.defineProperty(screen,'orientation',{{get:()=>({{{{'type':'portrait-primary','angle':0}}}})}}); }}catch(e){{}}
 try{{
-  var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'saveData':false,'type':'cellular','onchange':null}};
+  var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'downlinkMax':{dl},'saveData':false,'type':'cellular','onchange':null}};
   Object.defineProperty(navigator,'connection',{{get:()=>conn}});
   Object.defineProperty(navigator,'mozConnection',{{get:()=>undefined}});
   Object.defineProperty(navigator,'webkitConnection',{{get:()=>undefined}});
 }}catch(e){{}}
 try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e){{}}
 (function(){{
-  var _wn={wn};
+  var _ws={wn};
+  function _phash(p){{var h=p^0xDEAD;h=((h>>16)^h)*0x45d9f3b|0;h=((h>>16)^h)*0x45d9f3b|0;return(h^(h>>16))&0xFFFF;}}
   function patch(ctx){{
     var gp=ctx.prototype.getParameter;
     ctx.prototype.getParameter=function(p){{
       if(p===37445)return'{wv}';
       if(p===37446)return'{wr}';
       var v=gp.call(this,p);
-      if(typeof v==='number')return v+_wn*Math.sign(v||1);
+      if(typeof v==='number'){{var n=(_phash(p)/65535)*_ws*4-_ws*2;return v+n*Math.sign(v||1);}}
       return v;
     }};
   }}
@@ -837,17 +858,24 @@ try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e
 }})();
 (function(){{
   var seed={cs};
+  function _xc(d){{if(!d||d.data.length<4)return;d.data[0]=d.data[0]^seed;d.data[3]=d.data[3]^((seed*7)&0xFF);if(d.data.length>8){{d.data[4]=d.data[4]^((seed*3)&0xFF);}}}}
   var o=HTMLCanvasElement.prototype.toDataURL;
-  HTMLCanvasElement.prototype.toDataURL=function(t){{var c=this.getContext('2d');if(c){{var d=c.getImageData(0,0,this.width||1,this.height||1);d.data[0]=d.data[0]^seed;c.putImageData(d,0,0);}}return o.apply(this,arguments);}};
+  HTMLCanvasElement.prototype.toDataURL=function(){{var c=this.getContext('2d');if(c){{var d=c.getImageData(0,0,this.width||1,this.height||1);_xc(d);c.putImageData(d,0,0);}}return o.apply(this,arguments);}};
+  var ob=HTMLCanvasElement.prototype.toBlob;
+  if(ob)HTMLCanvasElement.prototype.toBlob=function(cb,t,q){{var c=this.getContext('2d');if(c){{var d=c.getImageData(0,0,this.width||1,this.height||1);_xc(d);c.putImageData(d,0,0);}}return ob.call(this,cb,t,q);}};
   var og=CanvasRenderingContext2D.prototype.getImageData;
-  CanvasRenderingContext2D.prototype.getImageData=function(){{var d=og.apply(this,arguments);if(d&&d.data.length>0)d.data[0]=d.data[0]^seed;return d;}};
+  CanvasRenderingContext2D.prototype.getImageData=function(){{var d=og.apply(this,arguments);_xc(d);return d;}};
 }})();
 (function(){{
   var noise={an};
   var orig=AudioBuffer&&AudioBuffer.prototype.getChannelData;
   if(orig)AudioBuffer.prototype.getChannelData=function(){{
     var d=orig.apply(this,arguments);
-    if(d&&d.length>0){{try{{d[0]=d[0]+noise;}}catch(e){{}}}}
+    if(d&&d.length>0){{
+      try{{d[0]=d[0]+noise;}}catch(e){{}}
+      try{{if(d.length>1)d[1]=d[1]-noise*0.7;}}catch(e){{}}
+      try{{if(d.length>3)d[3]=d[3]+noise*0.4;}}catch(e){{}}
+    }}
     return d;
   }};
 }})();
