@@ -1303,16 +1303,27 @@ function BrowserChecker() {
                         <TableCell className="text-[10px] font-mono leading-relaxed">
                           {(r as any).ipInfo ? (() => {
                             const ip = (r as any).ipInfo;
+                            const utcOffset = typeof ip.offset === "number" ? `UTC${ip.offset >= 0 ? "+" : ""}${ip.offset / 3600}` : null;
                             return (
-                              <div className="space-y-0.5">
-                                <div className="flex items-center gap-1">
+                              <div className="space-y-0.5 text-[10px] font-mono">
+                                {/* IP + type badges */}
+                                <div className="flex items-center gap-1 flex-wrap">
                                   <span className="text-green-400/90 font-bold tracking-wider">{ip.ip ?? "—"}</span>
-                                  {ip.mobile === true && <span className="text-[9px] px-1 py-0.5 rounded bg-green-500/20 text-green-400 font-mono">📱 MOBILE</span>}
-                                  {ip.proxy === true && <span className="text-[9px] px-1 py-0.5 rounded bg-yellow-500/20 text-yellow-400 font-mono">🔀 PROXY</span>}
-                                  {ip.hosting === true && <span className="text-[9px] px-1 py-0.5 rounded bg-red-500/20 text-red-400 font-mono">🖥 DC</span>}
+                                  {ip.mobile === true && <span className="px-1 py-0.5 rounded bg-green-500/20 text-green-400">📱 MOBILE</span>}
+                                  {ip.proxy === true && <span className="px-1 py-0.5 rounded bg-yellow-500/20 text-yellow-400">🔀 PROXY</span>}
+                                  {ip.hosting === true && <span className="px-1 py-0.5 rounded bg-red-500/20 text-red-400">🖥 DC</span>}
                                 </div>
-                                <div className="text-muted-foreground/70">{[ip.city, ip.region, ip.countryCode].filter(Boolean).join(", ")}</div>
-                                <div className="text-blue-400/70 truncate max-w-[170px]" title={ip.isp}>{ip.isp ?? ""}</div>
+                                {/* Location */}
+                                <div className="text-muted-foreground/80">{[ip.district, ip.city, ip.zip, ip.region, ip.country].filter(Boolean).join(", ")}</div>
+                                {/* Continent + currency + UTC */}
+                                <div className="text-muted-foreground/60">{[ip.continent, ip.currency, utcOffset].filter(Boolean).join(" · ")}</div>
+                                {/* ISP / Org */}
+                                <div className="text-blue-400/70 truncate max-w-[200px]" title={ip.isp}>{ip.isp ?? ""}</div>
+                                {ip.org && ip.org !== ip.isp && <div className="text-cyan-400/60 truncate max-w-[200px]" title={ip.org}>{ip.org}</div>}
+                                {/* AS */}
+                                {ip.asname && <div className="text-purple-400/60 truncate max-w-[200px]">{ip.asname}</div>}
+                                {/* Reverse DNS */}
+                                {ip.reverse && <div className="text-muted-foreground/50 truncate max-w-[200px]" title={ip.reverse}>{ip.reverse}</div>}
                               </div>
                             );
                           })() : "—"}

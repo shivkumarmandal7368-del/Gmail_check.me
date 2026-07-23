@@ -782,7 +782,7 @@ def geo_lookup_proxy(proxy_url: str) -> dict | None:
         import requests as req
         proxies = {"http": proxy_url, "https": proxy_url}
         r = req.get(
-            "http://ip-api.com/json?fields=status,query,country,countryCode,regionName,city,isp,org,as,mobile,proxy,hosting,timezone,lat,lon",
+            "http://ip-api.com/json?fields=status,query,country,countryCode,continent,continentCode,regionName,city,district,zip,isp,org,as,asname,mobile,proxy,hosting,reverse,currency,offset,timezone,lat,lon",
             proxies=proxies, timeout=10
         )
         data = r.json()
@@ -797,16 +797,24 @@ def geo_lookup_proxy(proxy_url: str) -> dict | None:
             # Fingerprint fields (timezone, language, geo)
             "timezone": tz, "language": lg, "countryCode": cc, "lat": lat, "lon": lon,
             # Full IP display info
-            "ip":      data.get("query"),
-            "city":    data.get("city"),
-            "region":  data.get("regionName"),
-            "country": data.get("country"),
-            "isp":     data.get("isp"),
-            "org":     data.get("org"),
-            "as":      data.get("as"),
-            "mobile":  data.get("mobile"),    # True = mobile/cellular IP
-            "proxy":   data.get("proxy"),     # True = proxy/VPN detected
-            "hosting": data.get("hosting"),   # True = datacenter/hosting IP
+            "ip":            data.get("query"),
+            "city":          data.get("city"),
+            "district":      data.get("district"),
+            "zip":           data.get("zip"),
+            "region":        data.get("regionName"),
+            "country":       data.get("country"),
+            "continent":     data.get("continent"),
+            "continentCode": data.get("continentCode"),
+            "isp":           data.get("isp"),
+            "org":           data.get("org"),
+            "as":            data.get("as"),
+            "asname":        data.get("asname"),
+            "reverse":       data.get("reverse"),
+            "currency":      data.get("currency"),
+            "offset":        data.get("offset"),
+            "mobile":        data.get("mobile"),
+            "proxy":         data.get("proxy"),
+            "hosting":       data.get("hosting"),
         }
     except Exception:
         return None
@@ -832,7 +840,7 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
                         existing["language"]    = geo["language"]
                         existing["countryCode"] = geo["countryCode"]
                         existing["geoLocked"]   = True
-                        for _k in ("ip", "city", "region", "country", "isp", "org", "as", "mobile", "proxy", "hosting"):
+                        for _k in ("ip","city","district","zip","region","country","continent","continentCode","isp","org","as","asname","reverse","currency","offset","mobile","proxy","hosting"):
                             if geo.get(_k) is not None:
                                 existing[_k] = geo[_k]
                         try:
@@ -858,7 +866,7 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
         fp["lat"]         = geo.get("lat", 39.8283)
         fp["lon"]         = geo.get("lon", -98.5795)
         fp["geoLocked"]   = True
-        for _k in ("ip", "city", "region", "country", "isp", "org", "as", "mobile", "proxy", "hosting"):
+        for _k in ("ip","city","district","zip","region","country","continent","continentCode","isp","org","as","asname","reverse","currency","offset","mobile","proxy","hosting"):
             if geo.get(_k) is not None:
                 fp[_k] = geo[_k]
     else:
@@ -1846,7 +1854,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     _login_result["fingerprint"] = fp_summary
     # Full IP details from fingerprint geo-lock (no extra network call)
     if fp.get("ip"):
-        _login_result["ipInfo"] = {k: fp.get(k) for k in ("ip", "city", "region", "country", "countryCode", "isp", "org", "as", "mobile", "proxy", "hosting") if fp.get(k) is not None}
+        _login_result["ipInfo"] = {k: fp.get(k) for k in ("ip","city","district","zip","region","country","continent","continentCode","countryCode","isp","org","as","asname","reverse","currency","offset","mobile","proxy","hosting") if fp.get(k) is not None}
         log(f"Exit IP: {fp.get('ip')} | {fp.get('city')}, {fp.get('countryCode')} | {fp.get('isp')}")
     else:
         _login_result["ipInfo"] = None

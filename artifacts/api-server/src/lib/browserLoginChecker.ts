@@ -23,15 +23,23 @@ export type BrowserResultCategory = "open" | "not_open" | "delete" | "unknown";
 export interface IpInfo {
   ip?: string;
   city?: string;
+  district?: string;
+  zip?: string;
   region?: string;
   country?: string;
+  continent?: string;
+  continentCode?: string;
   countryCode?: string;
   isp?: string;
   org?: string;
   as?: string;
-  mobile?: boolean;   // true = cellular/mobile IP
-  proxy?: boolean;    // true = proxy/VPN detected
-  hosting?: boolean;  // true = datacenter IP
+  asname?: string;
+  reverse?: string;
+  currency?: string;
+  offset?: number;
+  mobile?: boolean;
+  proxy?: boolean;
+  hosting?: boolean;
 }
 
 export interface BrowserLoginResult {
