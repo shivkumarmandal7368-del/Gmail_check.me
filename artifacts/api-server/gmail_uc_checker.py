@@ -845,10 +845,9 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
             "en-US", "en-US", "en-US", "en-US",  # weighted — most users are en-US
             "en-GB", "en-CA", "en-AU", "en-IN",
         ])
-    # Fixed India timezone — all accounts use IST (matches Indian mobile proxy)
-    fp["timezone"] = "Asia/Kolkata"
-    # Fixed India language — matches Jio/Airtel mobile carrier locale
-    fp["language"] = "en-IN"
+    # Timezone + language come from geo_lookup_proxy (if proxy provided) or random fallback above.
+    # Do NOT override here — let the proxy exit IP determine the locale so Chrome fingerprint
+    # matches the IP location (US proxy → America/New_York + en-US, etc.).
     # ── App-cloner style: every account has its own unique device identity ────
     # Battery — real phones vary; always discharging (mobile check, plugged-in is rare)
     fp["batteryLevel"]    = round(random.uniform(0.15, 0.94), 2)
@@ -909,31 +908,17 @@ def make_stealth_js(fp: dict) -> str:
         f"AppleWebKit/537.36 (KHTML, like Gecko) "
         f"Chrome/{cv} Mobile Safari/537.36"
     )
-    return f"""
-Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
-Object.defineProperty(navigator,'plugins',{{get:()=>{{
-  try{{
-    var pa=Object.create(PluginArray.prototype);
-    Object.defineProperty(pa,'length',{{get:()=>0,configurable:true}});
-    pa.item=function(){{return null;}};
-    pa.namedItem=function(){{return null;}};
-    pa.refresh=function(){{}};
-    pa[Symbol.iterator]=function*(){{}};
-    return pa;
-  }}catch(e){{var p=[];p.length=0;return p;}}
-}}}});
-Object.defineProperty(navigator,'languages',{{get:()=>['{lg}','en']}});
     sw   = fp["screenW"]
     sh   = fp["screenH"]
     ah   = fp["availH"]
     return f"""
 Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
 Object.defineProperty(navigator,'plugins',{{get:()=>{{var p=[];p.length=0;return p;}}}});
-Object.defineProperty(navigator,'languages',{{get:()=>['en-IN','en-GB','en','hi']}});
-try{{Object.defineProperty(navigator,'language',{{get:()=>'en-IN'}});}}catch(e){{}}
-try{{Object.defineProperty(navigator,'userLanguage',{{get:()=>'en-IN'}});}}catch(e){{}}
-try{{Object.defineProperty(navigator,'browserLanguage',{{get:()=>'en-IN'}});}}catch(e){{}}
-try{{Object.defineProperty(navigator,'systemLanguage',{{get:()=>'en-IN'}});}}catch(e){{}} 
+Object.defineProperty(navigator,'languages',{{get:()=>['{lg}','en']}});
+try{{Object.defineProperty(navigator,'language',{{get:()=>'{lg}'}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'userLanguage',{{get:()=>'{lg}'}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'browserLanguage',{{get:()=>'{lg}'}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'systemLanguage',{{get:()=>'{lg}'}});}}catch(e){{}} 
 Object.defineProperty(navigator,'hardwareConcurrency',{{get:()=>{fp['hwConcurrency']}}});
 Object.defineProperty(navigator,'deviceMemory',{{get:()=>{fp['deviceMemory']}}});
 Object.defineProperty(navigator,'cookieEnabled',{{get:()=>true}});
@@ -1572,7 +1557,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument(f"--window-size={fp['screenW']},{fp['screenH']}")
-    options.add_argument("--lang=en-IN,en-GB;q=0.9,en;q=0.8,hi;q=0.7")
+    options.add_argument(f"--lang={fp['language']},en;q=0.9")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-save-password-bubble")
@@ -1697,7 +1682,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         driver.execute_cdp_cmd("Network.enable", {})
         driver.execute_cdp_cmd("Network.setUserAgentOverride", {
             "userAgent": MOBILE_UA,
-            "acceptLanguage": "en-IN,en-GB;q=0.9,en;q=0.8,hi;q=0.7",
+            "acceptLanguage": f"{fp['language']},en;q=0.9",
             "platform": fp["platform"],
             "userAgentMetadata": {
                 "brands": [
