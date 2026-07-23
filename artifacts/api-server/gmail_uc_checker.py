@@ -2085,6 +2085,41 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         ]) or any(x in url for x in ["WrongPassword", "wrongpassword"]):
             return {"status": "wrong_password", "reason": "Wrong password", "totpCode": totp_code}
 
+        # ── "This might not be safe" — dismissible Google security interstitial ─
+        # Appears when Google detects unusual connection (proxy extension, new IP, etc.)
+        # Has a "Continue to sign in" button — NOT a hard block, can be bypassed.
+        _ltext = text.lower()
+        _is_might_not_safe = (
+            "might not be safe" in _ltext
+            or ("noticed something unusual" in _ltext and (
+                "continue to sign in" in _ltext or "check the web address" in _ltext
+            ))
+        )
+        if _is_might_not_safe:
+            log(f"{email} — 'This might not be safe' page detected in classify(), clicking Continue to sign in")
+            try:
+                _clicked = driver.execute_script("""
+                    var btns = Array.from(document.querySelectorAll(
+                        'button, a[role="button"], [role="button"]'));
+                    var found = btns.find(function(b) {
+                        var t = (b.innerText || b.textContent || '').toLowerCase().trim();
+                        return t.indexOf('continue to sign in') !== -1;
+                    });
+                    if (found) { found.click(); return true; }
+                    // Fallback: first button (Continue) not last (No, don't sign in)
+                    if (btns.length >= 1) { btns[0].click(); return 'fallback'; }
+                    return false;
+                """)
+                if _clicked:
+                    log(f"{email} — Clicked Continue to sign in (result={_clicked})")
+                    rand_sleep(1000, 1800)
+                    return None  # caller will re-check page state
+                else:
+                    log(f"{email} — Continue button not found on 'might not be safe' page")
+            except Exception as _e:
+                log(f"Continue to sign in click error: {_e}")
+            # Button click failed — fall through to verification_required below
+
         # "challenge/pwd" is the normal password page — do NOT flag it as verification
         # "challenge/dp"  is the device-protection / 2FA selection page — handle separately
         # "challenge/totp" / "challenge/ipp" are TOTP pages — handle separately
@@ -2500,6 +2535,37 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     ]) or any(x in url for x in ["WrongPassword", "wrongpassword"]):
         return {"status": "wrong_password", "reason": "Wrong password", "totpCode": totp_code}
 
+    # ── "This might not be safe" right after password submit ─────────────────
+    # Google shows this when it detects unusual connection (proxy extension, new IP).
+    # Has "Continue to sign in" button — click it and continue the login flow.
+    _post_pw_text = text.lower()
+    if (
+        "might not be safe" in _post_pw_text
+        or ("noticed something unusual" in _post_pw_text and (
+            "continue to sign in" in _post_pw_text or "check the web address" in _post_pw_text
+        ))
+    ):
+        log(f"{email} — 'This might not be safe' after password submit, clicking Continue")
+        try:
+            _pp_clicked = driver.execute_script("""
+                var btns = Array.from(document.querySelectorAll(
+                    'button, a[role="button"], [role="button"]'));
+                var found = btns.find(function(b) {
+                    var t = (b.innerText || b.textContent || '').toLowerCase().trim();
+                    return t.indexOf('continue to sign in') !== -1;
+                });
+                if (found) { found.click(); return true; }
+                if (btns.length >= 1) { btns[0].click(); return 'fallback'; }
+                return false;
+            """)
+            log(f"{email} — Continue click result: {_pp_clicked}")
+            if _pp_clicked:
+                rand_sleep(1000, 1800)
+                url, text = page_state()
+                log(f"{email} — After Continue: {url[:70]}")
+        except Exception as _ppe:
+            log(f"Post-password Continue click error: {_ppe}")
+
     # If Google returned us BACK to the password page WITHOUT an error message
     # → this is automation detection, NOT a wrong password.
     # Google silently reloads challenge/pwd when it suspects a bot.
@@ -2865,6 +2931,34 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
         if "mail.google.com" in host:
             break
+
+        # ── "This might not be safe" in interstitial loop — click Continue ──────
+        _ltext_il = text.lower()
+        _il_might_not_safe = (
+            "might not be safe" in _ltext_il
+            or ("noticed something unusual" in _ltext_il and (
+                "continue to sign in" in _ltext_il or "check the web address" in _ltext_il
+            ))
+        )
+        if _il_might_not_safe:
+            log(f"{email} — 'This might not be safe' in interstitial loop (attempt {_attempt+1}), clicking Continue")
+            try:
+                _il_clicked = driver.execute_script("""
+                    var btns = Array.from(document.querySelectorAll(
+                        'button, a[role="button"], [role="button"]'));
+                    var found = btns.find(function(b) {
+                        var t = (b.innerText || b.textContent || '').toLowerCase().trim();
+                        return t.indexOf('continue to sign in') !== -1;
+                    });
+                    if (found) { found.click(); return true; }
+                    if (btns.length >= 1) { btns[0].click(); return 'fallback'; }
+                    return false;
+                """)
+                log(f"{email} — Continue to sign in click: {_il_clicked}")
+                rand_sleep(1000, 1800)
+            except Exception as _ile:
+                log(f"Interstitial Continue click error: {_ile}")
+            continue  # re-check page state on next loop iteration
 
         # ── Early exit: "Verify your info to continue" / phone/device check ──
         # Detect immediately — no point looping or trying to dismiss
