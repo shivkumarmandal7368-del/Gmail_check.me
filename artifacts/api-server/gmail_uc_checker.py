@@ -776,10 +776,13 @@ _RANDOM_TIMEZONES = [
 
 
 def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dict | None:
-    """Hit ip-api.com through the proxy to get exit IP's full details.
+    """Fetch exit IP geo info through the proxy. Tries three services in order per attempt:
+      1. ip-api.com  (HTTP, comprehensive)
+      2. ipwho.is    (HTTPS fallback, comprehensive)
+      3. ipinfo.io   (HTTPS fallback, minimal)
     Returns timezone/language/geo fields (for fingerprint) + full IP info (for display).
-    Retries up to _retries times (2 s sleep between) to handle transient proxy errors.
-    Geo-lock MUST succeed when a proxy is used — timezone/language mismatch flags accounts."""
+    Retries up to _retries times (2 s sleep between) across all services.
+    Geo-lock MUST succeed — timezone/language mismatch flags accounts."""
     import time as _time
     from urllib.parse import urlparse, quote
     import requests as req
@@ -801,56 +804,99 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
         log(f"{tag} Failed to parse proxy URL: {_parse_err}")
         return None
 
+    def _build_result(ip, tz, cc, lat, lon, city=None, region=None, country=None,
+                      continent=None, continentCode=None, isp=None, org=None,
+                      asn=None, zip_=None, district=None, reverse=None,
+                      currency=None, offset=None, mobile=None, proxy_flag=None, hosting=None):
+        lg = _COUNTRY_LANG.get(cc, "en-US")
+        log(f"{tag} Got IP {ip} — {city}, {cc} / {isp or org or 'unknown ISP'}")
+        return {
+            "timezone": tz or random.choice(_RANDOM_TIMEZONES),
+            "language": lg, "countryCode": cc,
+            "lat": float(lat or 39.8283), "lon": float(lon or -98.5795),
+            "ip": ip, "city": city, "district": district, "zip": zip_,
+            "region": region, "country": country,
+            "continent": continent, "continentCode": continentCode,
+            "isp": isp, "org": org, "as": asn,
+            "reverse": reverse, "currency": currency, "offset": offset,
+            "mobile": mobile, "proxy": proxy_flag, "hosting": hosting,
+        }
+
     for _attempt in range(1, _retries + 1):
+        # ── Service 1: ip-api.com (HTTP, most comprehensive) ─────────────────
         try:
-            log(f"{tag} Fetching ip-api.com via proxy {_host}:{_port} (attempt {_attempt}/{_retries})")
+            log(f"{tag} [1/3] ip-api.com attempt {_attempt}/{_retries}")
             r = req.get(
                 "http://ip-api.com/json?fields=status,query,country,countryCode,continent,"
                 "continentCode,regionName,city,district,zip,isp,org,as,asname,mobile,proxy,"
                 "hosting,reverse,currency,offset,timezone,lat,lon",
                 proxies=proxies, timeout=15
             )
-            data = r.json()
-            if data.get("status") != "success":
-                log(f"{tag} ip-api.com returned non-success: {data.get('message', data)}")
-                if _attempt < _retries:
-                    _time.sleep(2)
-                continue
-            cc  = data.get("countryCode", "US")
-            tz  = data.get("timezone") or random.choice(_RANDOM_TIMEZONES)
-            lg  = _COUNTRY_LANG.get(cc, "en-US")
-            lat = float(data.get("lat", 39.8283))
-            lon = float(data.get("lon", -98.5795))
-            log(f"{tag} Got IP {data.get('query')} — {data.get('city')}, {cc} / {data.get('isp')}")
-            return {
-                # Fingerprint fields (timezone, language, geo)
-                "timezone": tz, "language": lg, "countryCode": cc, "lat": lat, "lon": lon,
-                # Full IP display info
-                "ip":            data.get("query"),
-                "city":          data.get("city"),
-                "district":      data.get("district"),
-                "zip":           data.get("zip"),
-                "region":        data.get("regionName"),
-                "country":       data.get("country"),
-                "continent":     data.get("continent"),
-                "continentCode": data.get("continentCode"),
-                "isp":           data.get("isp"),
-                "org":           data.get("org"),
-                "as":            data.get("as"),
-                "asname":        data.get("asname"),
-                "reverse":       data.get("reverse"),
-                "currency":      data.get("currency"),
-                "offset":        data.get("offset"),
-                "mobile":        data.get("mobile"),
-                "proxy":         data.get("proxy"),
-                "hosting":       data.get("hosting"),
-            }
-        except Exception as _geo_err:
-            log(f"{tag} geo_lookup_proxy attempt {_attempt}/{_retries} failed: {_geo_err}")
-            if _attempt < _retries:
-                _time.sleep(2)
+            d = r.json()
+            if d.get("status") == "success":
+                return _build_result(
+                    ip=d.get("query"), tz=d.get("timezone"), cc=d.get("countryCode", "US"),
+                    lat=d.get("lat"), lon=d.get("lon"), city=d.get("city"),
+                    region=d.get("regionName"), country=d.get("country"),
+                    continent=d.get("continent"), continentCode=d.get("continentCode"),
+                    isp=d.get("isp"), org=d.get("org"), asn=d.get("as"),
+                    zip_=d.get("zip"), district=d.get("district"), reverse=d.get("reverse"),
+                    currency=d.get("currency"), offset=d.get("offset"),
+                    mobile=d.get("mobile"), proxy_flag=d.get("proxy"), hosting=d.get("hosting"),
+                )
+            log(f"{tag} ip-api.com non-success: {d.get('message', d)}")
+        except Exception as _e1:
+            log(f"{tag} ip-api.com failed: {_e1}")
 
-    log(f"{tag} ⚠️ GEO LOCK FAILED after {_retries} attempts — timezone/language mismatch risk!")
+        # ── Service 2: ipwho.is (HTTPS, comprehensive fallback) ───────────────
+        try:
+            log(f"{tag} [2/3] ipwho.is attempt {_attempt}/{_retries}")
+            r2 = req.get("https://ipwho.is/", proxies=proxies, timeout=15)
+            d2 = r2.json()
+            if d2.get("success"):
+                tz2  = (d2.get("timezone") or {}).get("id") or d2.get("timezone")
+                off2 = (d2.get("timezone") or {}).get("offset")
+                con2 = d2.get("connection") or {}
+                return _build_result(
+                    ip=d2.get("ip"), tz=tz2, cc=d2.get("country_code", "US"),
+                    lat=d2.get("latitude"), lon=d2.get("longitude"),
+                    city=d2.get("city"), region=d2.get("region"),
+                    country=d2.get("country"), zip_=d2.get("postal"),
+                    isp=con2.get("isp"), org=con2.get("org"),
+                    asn=f"AS{con2['asn']}" if con2.get("asn") else None,
+                    offset=off2,
+                )
+            log(f"{tag} ipwho.is non-success: {d2.get('message', d2)}")
+        except Exception as _e2:
+            log(f"{tag} ipwho.is failed: {_e2}")
+
+        # ── Service 3: ipinfo.io (HTTPS, minimal but very reliable) ──────────
+        try:
+            log(f"{tag} [3/3] ipinfo.io attempt {_attempt}/{_retries}")
+            r3 = req.get("https://ipinfo.io/json", proxies=proxies, timeout=15)
+            d3 = r3.json()
+            if d3.get("ip") and not d3.get("bogon"):
+                cc3  = d3.get("country", "US")
+                tz3  = d3.get("timezone")
+                loc3 = d3.get("loc", "39.8283,-98.5795").split(",")
+                lat3 = float(loc3[0]) if len(loc3) == 2 else 39.8283
+                lon3 = float(loc3[1]) if len(loc3) == 2 else -98.5795
+                org3 = d3.get("org")  # e.g. "AS7922 Comcast Cable"
+                return _build_result(
+                    ip=d3.get("ip"), tz=tz3, cc=cc3, lat=lat3, lon=lon3,
+                    city=d3.get("city"), region=d3.get("region"),
+                    country=d3.get("country"), zip_=d3.get("postal"),
+                    org=org3, asn=org3.split(" ")[0] if org3 else None,
+                )
+            log(f"{tag} ipinfo.io returned bogon/empty: {d3}")
+        except Exception as _e3:
+            log(f"{tag} ipinfo.io failed: {_e3}")
+
+        if _attempt < _retries:
+            log(f"{tag} All 3 services failed on attempt {_attempt}/{_retries}, retrying in 3s…")
+            _time.sleep(3)
+
+    log(f"{tag} ⚠️ GEO LOCK FAILED after {_retries} attempts (all 3 services) — timezone/language mismatch risk!")
     return None
 
 

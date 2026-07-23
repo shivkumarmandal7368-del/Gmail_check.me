@@ -2259,10 +2259,21 @@ driver.execute_cdp_cmd("Emulation.setLocaleOverride",
 
 **The existing post-login CDP re-injection (lines 1932-1936) is kept** as a second-layer fix for the fallback case (when geo-lock fails at fingerprint time, Chrome would have launched with a random timezone — the fallback updates it after login succeeds).
 
+### Fix 2 — `geo_lookup_proxy()` multi-service fallback
+
+**Problem from screenshots:** Accounts showed USA exit IPs (Texas, South Carolina) but fingerprint had `Australia/Sydney` / `Europe/Rome` / `Asia/Jakarta` timezones with `⚠️ Not geo-locked`. Root cause: `ip-api.com` was unreachable through the residential proxy (3 retries all failed), so random timezone was assigned.
+
+**Fix:** `geo_lookup_proxy()` now tries **3 services per attempt** in order:
+1. `http://ip-api.com/json?fields=...` — HTTP, comprehensive (original)
+2. `https://ipwho.is/` — HTTPS, comprehensive fallback
+3. `https://ipinfo.io/json` — HTTPS, minimal but highly reliable
+
+If all 3 fail, retry the whole round up to `_retries` times (default 3) with 3s sleep between rounds. At least one of the three should succeed through any residential proxy. Response fields are mapped to our standard result dict so callers are unaffected.
+
 ### Files changed
 | File | Change |
 |---|---|
-| `artifacts/api-server/gmail_uc_checker.py` | Added `Emulation.setTimezoneOverride` + `Emulation.setLocaleOverride` at Chrome startup (after Network UA override, before `_do_login`) |
+| `artifacts/api-server/gmail_uc_checker.py` | (1) Added `Emulation.setTimezoneOverride` + `Emulation.setLocaleOverride` at Chrome startup; (2) `geo_lookup_proxy()` rewritten to try ip-api.com → ipwho.is → ipinfo.io per attempt |
 
 ### Verification
 - API server restarted clean: `Server listening port: 8080` ✅
