@@ -974,8 +974,8 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
     # Do Not Track — vary per account (most users leave it off)
     fp["doNotTrack"] = random.choice([None, None, None, "1", "unspecified"])
     # Network connection — stable values per account (not randomised per page)
-    fp["connectionRtt"]      = random.randint(35, 95)
-    fp["connectionDownlink"] = round(random.uniform(7.5, 15.0), 1)
+    fp["connectionRtt"]      = random.randint(8, 35)          # WiFi RTT (5–35ms) not cellular (50–150ms)
+    fp["connectionDownlink"] = round(random.uniform(25.0, 120.0), 1)  # Home broadband (25–120 Mbps) not cellular (7–15)
     # Browser history depth — simulates an account that has been used before
     fp["historyLength"] = random.randint(3, 14)
     # Unique WebGL noise per account (shifts float precision slightly)
@@ -1209,7 +1209,7 @@ try{{
 window.ontouchstart=function(){{}};
 try{{Object.defineProperty(screen,'orientation',{{get:()=>({{{{'type':'portrait-primary','angle':0}}}})}}); }}catch(e){{}}
 try{{
-  var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'downlinkMax':{dl},'saveData':false,'type':'cellular','onchange':null}};
+  var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'downlinkMax':{dl},'saveData':false,'type':'wifi','onchange':null}};
   Object.defineProperty(navigator,'connection',{{get:()=>conn}});
   Object.defineProperty(navigator,'mozConnection',{{get:()=>undefined}});
   Object.defineProperty(navigator,'webkitConnection',{{get:()=>undefined}});

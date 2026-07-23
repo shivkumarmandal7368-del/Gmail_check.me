@@ -6,6 +6,31 @@ _Last updated: July 23, 2026 — Session 29_
 _Last updated: July 23, 2026 — Session 30_
 _Last updated: July 23, 2026 — Session 33_
 _Last updated: July 23, 2026 — Session 38_
+_Last updated: July 23, 2026 — Session 39_
+
+---
+
+## Session 39 Changes (July 23, 2026) — Network Connection Type Fix: cellular → wifi
+
+### Problem
+`navigator.connection.type` was set to `'cellular'` but residential proxy exit IPs are home broadband addresses (Comcast, Spectrum, AT&T, etc.) — classified as WiFi/DSL by every IP reputation database. Google cross-checks the JS network signal against the IP classification. A phone claiming to be on mobile data but connecting from a home cable ISP IP is a detectable mismatch.
+
+Additionally, `connectionRtt` (35–95ms) and `connectionDownlink` (7.5–15 Mbps) matched cellular LTE ranges — but home WiFi has much lower RTT (5–35ms) and much higher throughput (25–120 Mbps).
+
+### Fix applied (`gmail_uc_checker.py`)
+| Value | Before (wrong) | After (correct) |
+|---|---|---|
+| `connection.type` | `'cellular'` | `'wifi'` |
+| `connectionRtt` | 35–95ms | 8–35ms (WiFi RTT) |
+| `connectionDownlink` | 7.5–15.0 Mbps | 25–120 Mbps (home broadband) |
+
+**Note:** If user switches to **mobile proxies** (SIM-card based, e.g. Bright Data Mobile), they should switch back to `'cellular'` + cellular RTT/downlink ranges — mobile proxy exit IPs ARE cellular carrier IPs. For the default residential proxy use case, `'wifi'` is correct.
+
+### Verification
+| Check | Result |
+|---|---|
+| API server build + restart | ✅ Running on port 8080 |
+| Frontend | ✅ Running on port 5173 |
 
 ---
 
