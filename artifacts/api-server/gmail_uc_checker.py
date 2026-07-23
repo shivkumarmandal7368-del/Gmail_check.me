@@ -693,21 +693,10 @@ def get_or_create_fingerprint(profile_dir: str) -> dict:
     fp = random.choice(PHONE_PROFILES).copy()
     fp["canvasSeed"]  = random.randint(1, 254)        # unique canvas XOR per account
     fp["audioNoise"]  = round(random.uniform(0.00001, 0.00009), 7)  # unique audio shift
-    # Per-account timezone — each account looks like a different person in a different city
-    fp["timezone"] = random.choice([
-        "America/New_York", "America/Chicago", "America/Los_Angeles",
-        "America/Denver", "America/Toronto", "America/Vancouver",
-        "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Madrid",
-        "Europe/Rome", "Europe/Amsterdam", "Europe/Warsaw",
-        "Asia/Calcutta", "Asia/Tokyo", "Asia/Seoul", "Asia/Singapore",
-        "Asia/Dubai", "Asia/Bangkok", "Asia/Jakarta", "Asia/Hong_Kong",
-        "Australia/Sydney", "Australia/Melbourne",
-    ])
-    # Per-account language — varies the Accept-Language header and navigator.languages
-    fp["language"] = random.choice([
-        "en-US", "en-US", "en-US", "en-US",  # weighted — most users are en-US
-        "en-GB", "en-CA", "en-AU", "en-IN",
-    ])
+    # Fixed India timezone — all accounts use IST (matches Indian mobile proxy)
+    fp["timezone"] = "Asia/Kolkata"
+    # Fixed India language — matches Jio/Airtel mobile carrier locale
+    fp["language"] = "en-IN"
     # ── App-cloner style: every account has its own unique device identity ────
     # Battery — real phones vary; always discharging (mobile check, plugged-in is rare)
     fp["batteryLevel"]    = round(random.uniform(0.15, 0.94), 2)
@@ -756,7 +745,7 @@ def make_stealth_js(fp: dict) -> str:
     return f"""
 Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
 Object.defineProperty(navigator,'plugins',{{get:()=>{{var p=[];p.length=0;return p;}}}});
-Object.defineProperty(navigator,'languages',{{get:()=>['{lg}','en']}});
+Object.defineProperty(navigator,'languages',{{get:()=>['en-IN','en-GB','en','hi']}});
 Object.defineProperty(navigator,'hardwareConcurrency',{{get:()=>{fp['hwConcurrency']}}});
 Object.defineProperty(navigator,'deviceMemory',{{get:()=>{fp['deviceMemory']}}});
 Object.defineProperty(navigator,'cookieEnabled',{{get:()=>true}});
@@ -817,7 +806,7 @@ try{{
 window.ontouchstart=function(){{}};
 try{{Object.defineProperty(screen,'orientation',{{get:()=>({{{{'type':'portrait-primary','angle':0}}}})}}); }}catch(e){{}}
 try{{
-  var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'saveData':false,'type':'wifi','onchange':null}};
+  var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'saveData':false,'type':'cellular','onchange':null}};
   Object.defineProperty(navigator,'connection',{{get:()=>conn}});
   Object.defineProperty(navigator,'mozConnection',{{get:()=>undefined}});
   Object.defineProperty(navigator,'webkitConnection',{{get:()=>undefined}});
@@ -1157,7 +1146,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument(f"--window-size={fp['screenW']},{fp['screenH']}")
-    options.add_argument("--lang=en-US,en")
+    options.add_argument("--lang=en-IN,en-GB;q=0.9,en;q=0.8,hi;q=0.7")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-save-password-bubble")
@@ -1181,8 +1170,6 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--touch-events=enabled")
     # Match the fingerprint DPR so window.devicePixelRatio equals screen.dpr
     options.add_argument(f"--force-device-scale-factor={fp['dpr']}")
-    # Use fingerprint language for Accept-Language Chrome header
-    options.add_argument(f"--lang={fp.get('language', 'en-US')}")
     if headless:
         options.add_argument("--disable-gpu")
 
@@ -1284,7 +1271,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         driver.execute_cdp_cmd("Network.enable", {})
         driver.execute_cdp_cmd("Network.setUserAgentOverride", {
             "userAgent": MOBILE_UA,
-            "acceptLanguage": f"{fp.get('language', 'en-US')},en;q=0.9",
+            "acceptLanguage": "en-IN,en-GB;q=0.9,en;q=0.8,hi;q=0.7",
             "platform": fp["platform"],
             "userAgentMetadata": {
                 "brands": [
