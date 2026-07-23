@@ -1318,12 +1318,12 @@ function BrowserChecker() {
                                 {/* Continent + currency + UTC */}
                                 <div className="text-muted-foreground/60">{[ip.continent, ip.currency, utcOffset].filter(Boolean).join(" · ")}</div>
                                 {/* ISP / Org */}
-                                <div className="text-blue-400/70 truncate max-w-[200px]" title={ip.isp}>{ip.isp ?? ""}</div>
-                                {ip.org && ip.org !== ip.isp && <div className="text-cyan-400/60 truncate max-w-[200px]" title={ip.org}>{ip.org}</div>}
+                                <div className="text-blue-400/70 break-words">{ip.isp ?? ""}</div>
+                                {ip.org && ip.org !== ip.isp && <div className="text-cyan-400/60 break-words">{ip.org}</div>}
                                 {/* AS */}
-                                {ip.asname && <div className="text-purple-400/60 truncate max-w-[200px]">{ip.asname}</div>}
+                                {ip.asname && <div className="text-purple-400/60 break-words">{ip.asname}</div>}
                                 {/* Reverse DNS */}
-                                {ip.reverse && <div className="text-muted-foreground/50 truncate max-w-[200px]" title={ip.reverse}>{ip.reverse}</div>}
+                                {ip.reverse && <div className="text-muted-foreground/50 break-all">{ip.reverse}</div>}
                               </div>
                             );
                           })() : "—"}
