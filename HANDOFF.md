@@ -20,6 +20,65 @@ _Last updated: July 24, 2026 — Session 49 (Google detection gap fixes)_
 _Last updated: July 24, 2026 — Session 50 (Fingerprint.com suspect score audit procedure)_
 _Last updated: July 24, 2026 — Session 51 (Device Check UI — fingerprint.com audit built into the app)_
 _Last updated: July 24, 2026 — Session 52 (Device selector and proxy flow completion)_
+_Last updated: July 24, 2026 — Session 53 (Device Check proxy and profile enforcement)_
+
+---
+
+## Session 53 Changes (July 24, 2026) — Device Check proxy and profile enforcement
+
+### Problem
+
+Device Check could reach `fingerprint.com` through the Replit IP instead of
+reliably using the configured residential proxy. The Python preflight and Chrome
+opened separate connections to the rotating proxy, so they could receive
+different exit IPs. The audit also changed only the user agent and window size,
+leaving the browser's real Linux/WebGL/hardware signals visible.
+
+### Fix applied
+
+- Device Check now requires a configured proxy and fails before the audit if
+  proxy validation fails; it never silently runs directly from Replit.
+- Chrome's own exit IP is verified against a direct Replit-origin baseline before
+  opening `fingerprint.com`; if Chrome is direct instead of proxied, the run
+  stops rather than showing a misleading successful audit. Rotating providers
+  may return different residential IPs for the Python preflight and Chrome, so
+  equality between those two proxy calls is not required.
+- Device Check now reuses the Browser Check fingerprint patcher for the selected
+  profile, applying the selected model, Android platform, WebGL renderer, screen,
+  hardware, canvas, audio, and related browser signals.
+- Startup skips repeated Python package installation when the required modules
+  are already installed, preventing workflow restarts from failing on pip's
+  wheel assertion.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `pnpm run typecheck` | Passed |
+| Python syntax + `git diff --check` | Passed |
+| API health | `{"status":"ok"}` |
+| Device profiles | 52; first and last entries match |
+| Proxy preflight | Residential proxy IP confirmed; direct-IP fallback guard added |
+| Device Check smoke audit | Device #32 completed with residential Chrome IP, 3 screenshots, `done`, exit code 0 |
+| Workflows | API Server and Gmail Checker running |
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `artifacts/api-server/device_check.py` | Proxy fail-fast, direct-IP fallback guard, browser IP verification, selected-profile fingerprint injection |
+| `artifacts/api-server/package.json` | Skip redundant pip install when Python dependencies are present |
+| `artifacts/gmail-checker/src/pages/home.tsx` | Clarified Proxy secret/Custom guidance |
+| `HANDOFF.md` | Recorded Session 53 |
+
+### Note for next session
+
+Verified with the configured `Proxy` secret: Device #32 (`SM-S928B`) completed
+the full fingerprint.com audit. Python preflight and Chrome received different
+residential exit IPs because the provider rotates connections, while Chrome's
+IP was confirmed not to equal the direct Replit IP. The run emitted 3 screenshots,
+`done`, and exit code 0. If Chrome ever bypasses the proxy, the direct-IP guard
+must fail the run rather than expose the Replit IP.
 
 ---
 

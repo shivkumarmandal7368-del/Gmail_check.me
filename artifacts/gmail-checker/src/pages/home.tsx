@@ -1902,7 +1902,10 @@ function DeviceChecker() {
             {proxyMode === "secret" ? (
               <div className="flex items-center gap-2 h-[68px] text-xs font-mono text-muted-foreground/70 bg-muted/20 rounded-md border border-border px-3">
                 <Lock className="w-3.5 h-3.5 opacity-50 shrink-0" />
-                <span>Using <span className="text-purple-400">Proxy</span> secret from Replit environment</span>
+                <span>
+                  Using <span className="text-purple-400">Proxy</span> secret from Replit environment.
+                  If it is not configured, switch to <span className="text-foreground">Custom</span>.
+                </span>
               </div>
             ) : (
               <div className="space-y-1">
