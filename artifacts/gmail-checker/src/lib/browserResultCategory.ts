@@ -19,6 +19,10 @@ function isDeleteReason(reason: string): boolean {
  */
 export function getBrowserResultCategory(result: BrowserResultForCategory): BrowserResultCategory {
   if (result.status === "opened") return "open";
+
+  // wrong_password and 2fa_required are definitive negative signals — not_open
+  if (result.status === "wrong_password" || result.status === "2fa_required") return "not_open";
+
   if (result.status !== "verification_required") return "unknown";
 
   const reason = (result.reason ?? "").toLowerCase();

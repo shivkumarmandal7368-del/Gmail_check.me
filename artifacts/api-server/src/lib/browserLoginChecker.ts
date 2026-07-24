@@ -7,9 +7,9 @@ import { generateTOTP } from "./totp.js";
 // (artifacts/api-server/dist/), so one level up reaches the package root.
 const PYTHON_SCRIPT = join(__dirname, "..", "gmail_uc_checker.py");
 
-// Timeout per account (undetected-chromedriver can be slow on first run due to
-// chromedriver download + patching — give it 3 minutes)
-const TIMEOUT_MS = 180_000;
+// Timeout per account. Python main() does 1 initial attempt + up to 3 retries,
+// each up to ~120 s → worst-case ~480 s. Use 600 s so all retries can complete.
+const TIMEOUT_MS = 600_000;
 
 export type BrowserLoginStatus =
   | "opened"

@@ -92,6 +92,11 @@ def browser_result_category(result: dict) -> str:
     status = result.get("status", "")
     if status == "opened":
         return "open"
+
+    # wrong_password and 2fa_required are definitive negative signals — not_open
+    if status in ("wrong_password", "2fa_required"):
+        return "not_open"
+
     if status != "verification_required":
         return "unknown"
 
@@ -434,7 +439,7 @@ PHONE_PROFILES = [
         "webglVendor": "Samsung Electronics Co., Ltd.", "webglRenderer": "Xclipse 920",
     },
     {
-        "model": "SM-S928B",      "androidVersion": "14",   # Samsung Galaxy S24+
+        "model": "SM-S926B",      "androidVersion": "14",   # Samsung Galaxy S24+
         "chromeVersion": "138.0.7204.100",
         "screenW": 360, "screenH": 780, "availH": 756, "dpr": 3.0,
         "hwConcurrency": 8, "deviceMemory": 12, "maxTouchPoints": 5,
@@ -1414,16 +1419,6 @@ try{{
 }}catch(e){{}}
 try{{document.hasFocus=function(){{return true;}};}}catch(e){{}}
 try{{
-  var _obTblob=HTMLCanvasElement.prototype.toBlob;
-  if(_obTblob){{
-    var _bseed={cs};
-    HTMLCanvasElement.prototype.toBlob=function(cb,t,q){{
-      try{{var c=this.getContext('2d');if(c){{var d=c.getImageData(0,0,this.width||1,this.height||1);d.data[0]=d.data[0]^_bseed;c.putImageData(d,0,0);}}}}catch(e){{}}
-      _obTblob.call(this,cb,t,q);
-    }};
-  }}
-}}catch(e){{}}
-try{{
   Object.defineProperty(navigator,'share',{{value:function(data){{return Promise.resolve();}},writable:false,configurable:true}});
 }}catch(e){{}}
 try{{
@@ -1966,13 +1961,16 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         proxy_info = parse_proxy(proxy)
         if proxy_info and proxy_info["host"]:
             log(f"Proxy: {proxy_info['host']}:{proxy_info['port']} user={proxy_info.get('username')}")
-            if proxy_info.get("username") and not headless:
+            if proxy_info.get("username"):
+                # Chrome 112+ new headless mode supports extensions — always
+                # load the auth extension when credentials are present so proxy
+                # auth works in both Xvfb and headless modes.
                 proxy_ext_path = make_proxy_extension(
                     proxy_info["host"], proxy_info["port"],
                     proxy_info["username"], proxy_info.get("password") or ""
                 )
                 options.add_extension(proxy_ext_path)
-                log("Proxy auth extension loaded")
+                log(f"Proxy auth extension loaded (headless={headless})")
             else:
                 options.add_argument(
                     f'--proxy-server=http://{proxy_info["host"]}:{proxy_info["port"]}'

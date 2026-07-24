@@ -99,15 +99,9 @@ async function checkOneAccount(
   // First attempt: plain password
   let { code, line } = await imapLogin(email, password);
 
-  // If failed and we have a TOTP code, retry with password+totpCode appended
-  // (some IMAP servers accept this format, and it confirms the TOTP is valid)
-  if (code !== "ok" && totpCode) {
-    const combined = await imapLogin(email, password + totpCode);
-    if (combined.code === "ok") {
-      code = combined.code;
-      line = combined.line;
-    }
-  }
+  // NOTE: Gmail IMAP never accepts password+TOTP appended — it requires an
+  // App Password when 2-step verification is on. The retry was removed because
+  // it silently marked accounts as wrong_password even when the TOTP was valid.
 
   if (code === "ok") {
     return {

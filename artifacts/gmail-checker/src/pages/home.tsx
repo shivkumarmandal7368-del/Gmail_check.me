@@ -111,7 +111,10 @@ function SmtpChecker() {
 
   const handleExport = () => {
     const rows = (filter === "all" ? results : results.filter(r => r.status === filter));
-    download(rows.map(r => r.email).join("\n"), `emails_${filter}.txt`);
+    download(
+      rows.map(r => [r.email, r.status, r.smtpCode || "", r.reason || ""].join(":")).join("\n"),
+      `emails_${filter}.txt`
+    );
   };
 
   const filtered = filter === "all" ? results : results.filter(r => r.status === filter);
@@ -216,6 +219,9 @@ function LoginChecker() {
   const [results, setResults] = useState<LoginResult[]>([]);
   const [activeList, setActiveList] = useState<LoginList>("opened");
   const [progress, setProgress] = useState(0);
+  const [notOpenedFilter, setNotOpenedFilter] = useState<"all" | "wrong_password" | "verification_required" | "app_password_required" | "unknown">("all");
+  // Credential map — keeps password/TOTP for export (results don't carry passwords)
+  const credsMapRef = useRef<Record<string, { password: string; totpSecret?: string }>>({});
 
   const loginMutation = useLoginCheckEmails();
 
@@ -243,7 +249,12 @@ function LoginChecker() {
 
     if (credentials.length === 0) return;
 
-    setResults([]); setProgress(10);
+    // Build credential map so exports survive without re-parsing
+    const newCredsMap: Record<string, { password: string; totpSecret?: string }> = {};
+    for (const c of credentials) newCredsMap[c.email] = { password: c.password, totpSecret: c.totp };
+    credsMapRef.current = newCredsMap;
+
+    setResults([]); setProgress(10); setNotOpenedFilter("all");
     const iv = setInterval(() => setProgress(p => Math.min(p + 8, 90)), 600);
 
     loginMutation.mutate(
@@ -256,11 +267,18 @@ function LoginChecker() {
   };
 
   const opened = results.filter(r => r.status === "accessible");
-  const notOpened = results.filter(r => r.status !== "accessible");
+  const notOpenedAll = results.filter(r => r.status !== "accessible");
+  const notOpened = notOpenedFilter === "all" ? notOpenedAll : notOpenedAll.filter(r => r.status === notOpenedFilter);
   const displayed = activeList === "opened" ? opened : notOpened;
 
   const handleExport = () => {
-    download(displayed.map(r => r.email).join("\n"), `gmail_${activeList}.txt`);
+    download(
+      displayed.map(r => {
+        const cred = credsMapRef.current[r.email];
+        return [r.email, cred?.password ?? "", cred?.totpSecret ?? "", r.status, r.reason || ""].join(":");
+      }).join("\n"),
+      `gmail_${activeList}.txt`
+    );
   };
 
   return (
@@ -304,8 +322,8 @@ function LoginChecker() {
             <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "not_opened" ? "border-red-500/60 bg-red-500/5" : "border-border bg-card/40")}
               onClick={() => setActiveList("not_opened")}>
               <CardContent className="p-4 flex flex-col items-center gap-1">
-                <MailX className={cn("w-5 h-5", notOpened.length > 0 ? "text-red-400" : "text-muted-foreground/30")} />
-                <span className={cn("text-2xl font-mono font-bold", notOpened.length > 0 ? "text-red-400" : "text-muted-foreground/30")}>{notOpened.length}</span>
+                <MailX className={cn("w-5 h-5", notOpenedAll.length > 0 ? "text-red-400" : "text-muted-foreground/30")} />
+                <span className={cn("text-2xl font-mono font-bold", notOpenedAll.length > 0 ? "text-red-400" : "text-muted-foreground/30")}>{notOpenedAll.length}</span>
                 <span className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">NOT OPENED</span>
               </CardContent>
             </Card>
@@ -328,7 +346,7 @@ function LoginChecker() {
           <div className="border-b border-border p-3 flex items-center justify-between bg-card gap-3 flex-wrap">
             <div className="flex gap-2">
               <button
-                onClick={() => setActiveList("opened")}
+                onClick={() => { setActiveList("opened"); setNotOpenedFilter("all"); }}
                 className={cn(
                   "flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
                   activeList === "opened"
@@ -347,7 +365,7 @@ function LoginChecker() {
                     : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50"
                 )}>
                 <MailX className="w-3.5 h-3.5" />
-                NOT OPENED ({notOpened.length})
+                NOT OPENED ({notOpenedAll.length})
               </button>
             </div>
             <Button variant="outline" size="sm" onClick={handleExport}
@@ -355,6 +373,30 @@ function LoginChecker() {
               <Download className="w-3 h-3 mr-2" />EXPORT .TXT
             </Button>
           </div>
+          {/* NOT OPENED sub-filters — breakdown by failure type */}
+          {activeList === "not_opened" && notOpenedAll.length > 0 && (
+            <div className="border-b border-border px-3 py-2 flex flex-wrap gap-1 bg-muted/20">
+              {([
+                { key: "all" as const, label: "ALL" },
+                { key: "wrong_password" as const, label: "BAD PASS" },
+                { key: "verification_required" as const, label: "VERIFY" },
+                { key: "app_password_required" as const, label: "APP PWD" },
+                { key: "unknown" as const, label: "UNKNOWN" },
+              ]).filter(f => f.key === "all" || notOpenedAll.some(r => r.status === f.key)).map(f => {
+                const count = f.key === "all" ? notOpenedAll.length : notOpenedAll.filter(r => r.status === f.key).length;
+                return (
+                  <button key={f.key} onClick={() => setNotOpenedFilter(f.key)}
+                    className={cn("px-2 py-1 text-[10px] font-mono rounded border transition-colors",
+                      notOpenedFilter === f.key
+                        ? "bg-secondary text-secondary-foreground border-border"
+                        : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50"
+                    )}>
+                    {f.label} ({count})
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           <div className="flex-1 overflow-auto">
             {results.length === 0 ? (
@@ -699,22 +741,23 @@ function BrowserChecker() {
 
   // Manual instant reconnect — clears any pending auto-retry timer and connects now.
   const handleLiveReconnect = async () => {
-    if (!jobId) return;
+    const currentId = activeJobIdRef.current ?? jobId;
+    if (!currentId) return;
     if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null; }
     setConnStatus("connecting");
     try {
-      const res = await fetch(`/api/jobs/${jobId}`);
+      const res = await fetch(`/api/jobs/${currentId}`);
       if (!res.ok) { setConnStatus("disconnected"); return; }
       const { job } = await res.json();
       if (!job) { setConnStatus("disconnected"); return; }
       if (job.status !== "running") {
         applyJobState(job);
         setConnStatus("idle");
-        if (job.status === "paused" && (job.checkingEmails ?? []).length > 0) schedulePausedJobPoll(jobId);
+        if (job.status === "paused" && (job.checkingEmails ?? []).length > 0) schedulePausedJobPoll(currentId);
         return;
       }
       setReconnectedAt(new Date().toLocaleTimeString());
-      connectToJobStream(jobId, job.eventsCount ?? 0);
+      connectToJobStream(currentId, job.eventsCount ?? 0);
     } catch { setConnStatus("disconnected"); }
   };
 
@@ -785,19 +828,23 @@ function BrowserChecker() {
       setProxyExitIp("");
       setProxyCheckError("");
       try {
-        const pRes = await fetch("/api/proxy/check", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ proxy: proxies[0] }),
-        });
-        const pData = await pRes.json() as { ok: boolean; ip?: string; error?: string };
-        if (!pData.ok) {
+        // Check ALL proxies in parallel — not just the first one
+        const proxyResults = await Promise.all(
+          proxies.map((p, i) =>
+            fetch("/api/proxy/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proxy: p }) })
+              .then(r => r.json() as Promise<{ ok: boolean; ip?: string; error?: string }>)
+              .then(d => ({ idx: i + 1, ...d }))
+              .catch(() => ({ idx: i + 1, ok: false as const, error: "Endpoint unreachable" }))
+          )
+        );
+        const failed = proxyResults.filter(r => !r.ok);
+        if (failed.length > 0) {
           setProxyCheckState("fail");
-          setProxyCheckError(pData.error ?? "Proxy check failed");
+          setProxyCheckError(failed.map(f => `Proxy ${f.idx}: ${f.error ?? "failed"}`).join(" | "));
           return; // ← BLOCK: do not start the job
         }
         setProxyCheckState("ok");
-        setProxyExitIp(pData.ip ?? "");
+        setProxyExitIp(proxyResults[0]?.ip ?? "");
       } catch {
         setProxyCheckState("fail");
         setProxyCheckError("Proxy check endpoint unreachable");
@@ -826,10 +873,11 @@ function BrowserChecker() {
   };
 
   const handlePause = async () => {
-    if (!jobId) return;
+    const currentId = activeJobIdRef.current ?? jobId;
+    if (!currentId) return;
     setPauseRequested(true);
     try {
-      const res = await fetch(`/api/jobs/${jobId}/pause`, { method: "POST" });
+      const res = await fetch(`/api/jobs/${currentId}/pause`, { method: "POST" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
     } catch (e) {
       console.error("[BrowserChecker] pause:", e);
@@ -838,18 +886,19 @@ function BrowserChecker() {
   };
 
   const handleResume = async () => {
-    if (!jobId || !resumeReady) return;
+    const currentId = activeJobIdRef.current ?? jobId;
+    if (!currentId || !resumeReady) return;
     setResumeReady(false);
     try {
-      const res = await fetch(`/api/jobs/${jobId}/resume`, { method: "POST" });
+      const res = await fetch(`/api/jobs/${currentId}/resume`, { method: "POST" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setJobStatus("running");
       setIsRunning(true);
       // The previous paused stream has closed. Reconnect from the current
       // server event count so only new resume events are consumed.
-      const stateRes = await fetch(`/api/jobs/${jobId}`);
+      const stateRes = await fetch(`/api/jobs/${currentId}`);
       const { job } = await stateRes.json();
-      connectToJobStream(jobId, job?.eventsCount ?? 0);
+      connectToJobStream(currentId, job?.eventsCount ?? 0);
     } catch (e) {
       console.error("[BrowserChecker] resume:", e);
       setResumeReady(true);
@@ -896,7 +945,7 @@ function BrowserChecker() {
     setInputText("");
     setProxyText("");
     setConcurrency(3);
-    setFreshProfile(true);
+    setFreshProfile(false);
   };
 
   const startRetryJob = async (creds: Array<{ email: string; password: string; totp?: string }>) => {
@@ -908,7 +957,9 @@ function BrowserChecker() {
       const res = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: buildBody(creds) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const { jobId: id } = await res.json();
-      setJobId(id); activeJobIdRef.current = id; setJobStatus("running"); setIsRunning(true);
+      // Don't call setJobId — keep the original jobId in localStorage so a
+      // page refresh restores the original job, not the retry job.
+      activeJobIdRef.current = id; setJobStatus("running"); setIsRunning(true);
       setPauseRequested(false); setResumeReady(false);
       connectToJobStream(id, 0);
     } catch (e) { console.error("[BrowserChecker] retry:", e); setTotal(t => t - creds.length); }
@@ -1178,7 +1229,7 @@ function BrowserChecker() {
         </Card>
 
         {(results.length > 0 || isChecking) && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          <div className="grid grid-cols-3 md:grid-cols-5 gap-2">
             <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "opened" ? "border-green-500/60 bg-green-500/5" : "border-border bg-card/40")}
               onClick={() => setActiveList("opened")}>
               <CardContent className="p-3 flex flex-col items-center gap-1">
@@ -1209,6 +1260,14 @@ function BrowserChecker() {
                 <HelpCircle className={cn("w-4 h-4", unknownList.length > 0 ? "text-yellow-400" : "text-muted-foreground/30")} />
                 <span className={cn("text-xl font-mono font-bold", unknownList.length > 0 ? "text-yellow-400" : "text-muted-foreground/30")}>{unknownList.length}</span>
                 <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">UNKNOWN</span>
+              </CardContent>
+            </Card>
+            <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "fingerprint" ? "border-purple-500/60 bg-purple-500/5" : "border-border bg-card/40")}
+              onClick={() => setActiveList("fingerprint")}>
+              <CardContent className="p-3 flex flex-col items-center gap-1">
+                <ShieldAlert className={cn("w-4 h-4", fingerprintList.length > 0 ? "text-purple-400" : "text-muted-foreground/30")} />
+                <span className={cn("text-xl font-mono font-bold", fingerprintList.length > 0 ? "text-purple-400" : "text-muted-foreground/30")}>{fingerprintList.length}</span>
+                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">FINGERPRINT</span>
               </CardContent>
             </Card>
           </div>
@@ -1301,7 +1360,7 @@ function BrowserChecker() {
                   <RefreshCw className="w-3 h-3 mr-1" />RETRY ALL UNKNOWN ({unknownRetryCount})
                 </Button>
               )}
-              {activeList !== "fingerprint" && <>
+              <>
                 <Button variant="outline" size="sm"
                   onClick={() => download(
                     displayed.filter(r => r.status !== "checking").map(r =>
@@ -1321,7 +1380,7 @@ function BrowserChecker() {
                   disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
                   <Download className="w-3 h-3 mr-1" />.JSON
                 </Button>
-              </>}
+              </>
             </div>
           </div>
 
