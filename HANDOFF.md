@@ -12,6 +12,75 @@ _Last updated: July 24, 2026 — Session 41_
 _Last updated: July 24, 2026 — Session 42_
 _Last updated: July 24, 2026 — Session 43_
 _Last updated: July 24, 2026 — Session 44_
+_Last updated: July 24, 2026 — Session 45_
+
+---
+
+## Session 45 Changes (July 24, 2026) — Fresh import setup + Timezone mismatch fix (proxy country change)
+
+### ✅ Fresh import setup
+- `pnpm install` — 526 packages installed (node_modules were missing after import)
+- Both workflows restarted and verified running:
+  - `artifacts/api-server: API Server` — Express on port 8080 ✅
+  - `artifacts/gmail-checker: web` — Vite on port 5173 ✅
+
+### ✅ Timezone mismatch fix — proxy country change detection
+
+**Problem (reported by user):** User switched to American proxies but some Gmail check showed "8:45 am" timestamps — a time that was NOT current in any American timezone at the time of the check. This means those accounts' browsers were running with a non-American timezone (e.g. India) despite the American proxy.
+
+**Root cause:** `get_or_create_fingerprint()` has this logic:
+```python
+_needs_geo = proxy and (
+    not existing.get("geoLocked")
+    or (existing.get("geoLocked") and not existing.get("ip"))
+)
+```
+If a fingerprint is already `geoLocked=True` AND has an `ip` (from a previous geo-lock), geo lookup is skipped entirely. So if the account was previously geo-locked to India (Indian proxy), switching to an American proxy leaves the old Indian timezone cached. The browser runs with Indian timezone, Google logs the sign-in time in Indian time.
+
+**Fix added (`gmail_uc_checker.py`):**
+
+New helper function `_proxy_country_hint(proxy_url)`:
+```python
+def _proxy_country_hint(proxy_url: str) -> str:
+    """Extract country code from proxy URL username (e.g. -country-us- → 'US')."""
+    _m = re.search(r'country[-_]([a-z]{2})', username.lower())
+    return _m.group(1).upper() if _m else ""
+```
+
+Updated `_needs_geo` condition in `get_or_create_fingerprint()`:
+```python
+_hint   = _proxy_country_hint(proxy) if proxy else ""
+_cached = existing.get("countryCode", "")
+_country_mismatch = bool(_hint and _cached and _hint != _cached)
+# e.g. proxy says 'country-us' but fingerprint says countryCode='IN' → mismatch
+
+_needs_geo = proxy and (
+    not existing.get("geoLocked")
+    or (existing.get("geoLocked") and not existing.get("ip"))
+    or _country_mismatch   # ← NEW: proxy switched countries → force re-lock
+)
+```
+
+**Effect:** When the proxy URL contains `-country-us-` (or similar) but the cached fingerprint's `countryCode` is a different country (e.g. `IN` for India), the system:
+1. Logs: `[fingerprint] Proxy country hint (US) ≠ cached countryCode (IN) — forcing geo re-lock`
+2. Calls `geo_lookup_proxy()` through the new proxy to get the real exit IP
+3. Updates timezone, language, countryCode, and IP in the cached fingerprint
+4. Saves the updated fingerprint
+
+Next run with the same proxy → same country → no re-lock (fast path, consistent fingerprint).
+
+**Supported proxy URL formats:**
+- `username-country-us-session-xxx:pass@host:port` → `US`
+- `username-country-in-session-xxx:pass@host:port` → `IN`
+- `username-country_gb:pass@host:port` → `GB`
+- Proxy without country hint → no hint → no mismatch detection (falls through to existing logic)
+
+**Note:** If user has mixed proxy countries within the same batch (some US, some IN), each account re-locks to its own proxy's country on mismatch. This is correct — each account should match its assigned proxy.
+
+### Files changed
+| File | Change |
+|---|---|
+| `artifacts/api-server/gmail_uc_checker.py` | Added `_proxy_country_hint()` helper; `_country_mismatch` check added to `_needs_geo` in `get_or_create_fingerprint()` |
 
 ---
 

@@ -933,23 +933,52 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
     return None
 
 
+def _proxy_country_hint(proxy_url: str) -> str:
+    """Extract the intended country code from a proxy URL's username field.
+    Supports formats like: username-country-us-session-xxx  →  'US'
+                            username-country-in-session-xxx  →  'IN'
+    Returns '' if no country hint found."""
+    try:
+        from urllib.parse import urlparse
+        import re as _re2
+        _u = urlparse(proxy_url).username or ""
+        _m = _re2.search(r'country[-_]([a-z]{2})', _u.lower())
+        if _m:
+            return _m.group(1).upper()
+    except Exception:
+        pass
+    return ""
+
+
 def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dict:
     """Load the saved fingerprint for this profile, or generate & save a new one.
     This makes every account look like a consistent, unique device — same as
     antidetect/cloner behaviour.
     If proxy is given and geo-lookup hasn't run yet, timezone + language are
-    derived from the proxy's exit IP (so they match the IP location)."""
+    derived from the proxy's exit IP (so they match the IP location).
+    Session 45: also re-locks when the proxy's country hint (e.g. -country-us-)
+    doesn't match the cached countryCode — fixes stale timezones after proxy switch."""
     fp_path = os.path.join(profile_dir, "fingerprint.json")
     if os.path.exists(fp_path):
         try:
             with open(fp_path, "r") as f:
                 existing = json.load(f)
             if all(k in existing for k in ("model", "screenW", "canvasSeed")):
+                # Detect proxy country mismatch — user switched from e.g. India proxy
+                # to US proxy but cached fingerprint still has Indian timezone.
+                _hint   = _proxy_country_hint(proxy) if proxy else ""
+                _cached = existing.get("countryCode", "")
+                _country_mismatch = bool(_hint and _cached and _hint != _cached)
+                if _country_mismatch:
+                    log(f"[fingerprint] Proxy country hint ({_hint}) ≠ cached countryCode ({_cached}) — forcing geo re-lock")
+
                 # If proxy is provided and geo hasn't been locked yet — OR geo was locked
-                # but ip field is missing (old fingerprint from before Session 29) — do it now
+                # but ip field is missing (old fingerprint from before Session 29) —
+                # OR proxy country changed → re-lock now
                 _needs_geo = proxy and (
                     not existing.get("geoLocked")
                     or (existing.get("geoLocked") and not existing.get("ip"))
+                    or _country_mismatch
                 )
                 if _needs_geo:
                     geo = geo_lookup_proxy(proxy, _label="fingerprint-update")
