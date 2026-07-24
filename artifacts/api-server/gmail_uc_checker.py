@@ -3419,8 +3419,15 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         elif "challenge/totp" in url or "challenge/selection" in url:
             log(f"{email} — TOTP/selection page reappeared in interstitial loop, re-entering")
             if totp_secret:
+                # Previous TOTP code was already consumed/rejected — same code
+                # will always fail because TOTP codes are one-time-use per 30s window.
+                # Always wait for the next window before generating a fresh code.
+                _secs_until_next = 30 - (int(time.time()) % 30)
+                if _secs_until_next > 1:
+                    log(f"{email} — Waiting {_secs_until_next}s for next TOTP window (previous code consumed)…")
+                    time.sleep(_secs_until_next + 0.5)
                 fresh_code = generate_totp(totp_secret)
-                log(f"{email} — Fresh TOTP code: {fresh_code}")
+                log(f"{email} — Fresh TOTP code (new window): {fresh_code}")
                 try:
                     # On selection page, click authenticator first
                     if "challenge/selection" in url:

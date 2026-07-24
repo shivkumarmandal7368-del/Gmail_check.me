@@ -9,6 +9,40 @@ _Last updated: July 23, 2026 — Session 38_
 _Last updated: July 23, 2026 — Session 39_
 _Last updated: July 23, 2026 — Session 40_
 _Last updated: July 24, 2026 — Session 41_
+_Last updated: July 24, 2026 — Session 42_
+
+---
+
+## Session 42 Changes (July 24, 2026) — TOTP "Wrong code" fix in interstitial loop
+
+### Problem
+Jab Google login ke baad TOTP page dobara aata tha (interstitial loop mein), script turant `generate_totp()` call karta tha — jo **same 30-second window mein same code** deta tha jo pehle already submit ho chuka tha. TOTP codes one-time-use hain (per 30s window), isliye Google "Wrong code. Try again." dikhata tha. Result mein "Unexpected page" classify hota tha.
+
+Screenshot proof: user ne `download_(38)_(2).jpeg` share kiya — "Verify it's you" page pe "641951 — Wrong code. Try again." dikhta hai.
+
+### Fix (`artifacts/api-server/gmail_uc_checker.py` — interstitial TOTP handler, line ~3418)
+
+```python
+# Previously (WRONG):
+fresh_code = generate_totp(totp_secret)  # Same code as before — already consumed!
+
+# Now (FIXED):
+_secs_until_next = 30 - (int(time.time()) % 30)
+if _secs_until_next > 1:
+    log(f"{email} — Waiting {_secs_until_next}s for next TOTP window (previous code consumed)…")
+    time.sleep(_secs_until_next + 0.5)
+fresh_code = generate_totp(totp_secret)  # Genuinely new code from new window
+```
+
+Ab jab TOTP page dobara aata hai interstitial loop mein, script pehle next 30-second window ka wait karta hai (max 30s), phir fresh code generate karke enter karta hai. Same code kabhi dobara use nahi hoga.
+
+### Note
+Python file direct use hoti hai (no rebuild needed) — fix turant live tha.
+
+### Files changed
+| File | Change |
+|---|---|
+| `artifacts/api-server/gmail_uc_checker.py` | Interstitial TOTP handler (~line 3418): next 30s window wait added before fresh code generation |
 
 ---
 
