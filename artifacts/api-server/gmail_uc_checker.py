@@ -1284,10 +1284,19 @@ try{{
   }});
 }}catch(e){{}}
 window.ontouchstart=function(){{}};
-try{{Object.defineProperty(screen,'orientation',{{get:()=>({{'type':'portrait-primary','angle':0}})}}); }}catch(e){{}}
 try{{
-  var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'downlinkMax':{dl},'saveData':false,'type':'wifi','onchange':null}};
-  Object.defineProperty(navigator,'connection',{{get:()=>conn}});
+  var _sOrient={{type:'portrait-primary',angle:0,onchange:null,
+    lock:function(o){{return Promise.resolve();}},
+    unlock:function(){{}},
+    addEventListener:function(){{}},removeEventListener:function(){{}},dispatchEvent:function(){{return true;}}
+  }};
+  Object.defineProperty(screen,'orientation',{{get:function(){{return _sOrient;}},configurable:true}});
+}}catch(e){{}}
+try{{
+  var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'downlinkMax':{dl},'saveData':false,'type':'wifi','onchange':null,
+    addEventListener:function(){{}},removeEventListener:function(){{}},dispatchEvent:function(){{return true;}}
+  }};
+  Object.defineProperty(navigator,'connection',{{get:()=>conn,configurable:true}});
   Object.defineProperty(navigator,'mozConnection',{{get:()=>undefined}});
   Object.defineProperty(navigator,'webkitConnection',{{get:()=>undefined}});
 }}catch(e){{}}
@@ -1505,6 +1514,13 @@ try{{
 }}catch(e){{}}
 try{{delete window.chrome.webstore;}}catch(e){{}}
 try{{delete window.chrome.cast;}}catch(e){{}}
+try{{
+  // Proxy extension may set a real extension ID on chrome.runtime.id —
+  // a strong bot-detection signal (real Android Chrome has no extensions).
+  // Force it to undefined even if the extension already set it.
+  if(window.chrome&&window.chrome.runtime)
+    Object.defineProperty(window.chrome.runtime,'id',{{get:function(){{return undefined;}},configurable:true}});
+}}catch(e){{}}
 try{{
   if(window.speechSynthesis){{
     var _origGV=window.speechSynthesis.getVoices.bind(window.speechSynthesis);
