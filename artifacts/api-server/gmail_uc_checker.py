@@ -19,6 +19,39 @@ import subprocess
 import tempfile
 import fcntl
 import socket
+import signal as _signal
+
+# ── SIGTERM handler — called by Node.js on pause/cancel ───────────────────────
+# Node.js sends SIGTERM (not SIGKILL) so we can clean up Chrome + Xvfb properly.
+# Without this, Chrome and Xvfb would linger as zombie processes, sharing the
+# same profile dir on the next run and getting detected by Google.
+_active_driver   = None   # set in check_gmail after Chrome launches
+_active_xvfb     = None   # set in check_gmail after Xvfb starts
+_active_locks    = []     # (fd, ) pairs to unlock on exit
+
+def _sigterm_cleanup(signum, frame):
+    """Graceful shutdown: quit Chrome, kill Xvfb, release locks, exit 0."""
+    global _active_driver, _active_xvfb, _active_locks
+    try:
+        if _active_driver:
+            _active_driver.quit()
+    except Exception:
+        pass
+    try:
+        if _active_xvfb:
+            _active_xvfb.terminate()
+            _active_xvfb.wait(timeout=3)
+    except Exception:
+        pass
+    for fd in _active_locks:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+        except Exception:
+            pass
+    sys.exit(0)
+
+_signal.signal(_signal.SIGTERM, _sigterm_cleanup)
 
 # ── Cross-process Chrome launch lock ─────────────────────────────────────────
 # Multiple Python processes (one per account) can be spawned concurrently.
@@ -1991,6 +2024,11 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             use_subprocess=True,
             port=_cd_port,
         )
+        # Expose driver + xvfb to the SIGTERM handler so they're cleaned up on pause/cancel.
+        global _active_driver, _active_xvfb, _active_locks
+        _active_driver = driver
+        _active_xvfb   = _xvfb_proc
+        _active_locks  = [_session_lock_fd]
         # Reduced from 2.5s → 1.0s: Chrome process is already running, just
         # letting CDP settle.  Lock is released sooner so next account can start.
         time.sleep(1.0)
@@ -2149,6 +2187,11 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
 
 
 def _cleanup(path: str | None, xvfb_proc=None):
+    # Clear SIGTERM handler refs so a late signal doesn't double-quit
+    global _active_driver, _active_xvfb, _active_locks
+    _active_driver = None
+    _active_xvfb   = None
+    _active_locks  = []
     if path and os.path.exists(path):
         try:
             os.unlink(path)

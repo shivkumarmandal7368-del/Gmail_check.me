@@ -277,7 +277,11 @@ export async function browserLoginCheck(
   const killSet = new Set<ChildProcess>();
   const onAbort = () => {
     for (const p of killSet) {
-      try { p.kill("SIGKILL"); } catch {}
+      // SIGTERM (not SIGKILL) — lets Python's _sigterm_cleanup handler run,
+      // which calls driver.quit() + xvfb.terminate() before exiting.
+      // Without this, Chrome and Xvfb linger as zombies and share the same
+      // profile dir on the next run, making Google detection trivial.
+      try { p.kill("SIGTERM"); } catch {}
     }
   };
   signal?.addEventListener("abort", onAbort, { once: true });

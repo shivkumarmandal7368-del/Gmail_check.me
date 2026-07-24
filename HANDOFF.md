@@ -10,6 +10,71 @@ _Last updated: July 23, 2026 — Session 39_
 _Last updated: July 23, 2026 — Session 40_
 _Last updated: July 24, 2026 — Session 41_
 _Last updated: July 24, 2026 — Session 42_
+_Last updated: July 24, 2026 — Session 43_
+
+---
+
+## Session 43 Changes (July 24, 2026) — Zombie Chrome/Xvfb fix (stale process leak)
+
+### Problem
+Pause ya cancel ke baad Chrome aur Xvfb processes zinda rehte the — zombie ho jaate the. Agle check pe same profile directory mein do Chrome instances chal rahe the ek saath (`jamesrodgersfhi888` aur `markevansbe551` dono baar baar duplicate the). Google ke liye yeh ek badi detection signal hai:
+- Same device fingerprint, ek saath do sessions
+- Profile lock file conflicts
+- RAM aur CPU unnecessarily use
+
+**Root cause:** Humara naya pause fix (`browserLoginChecker.ts`) Python process ko `SIGKILL` karta tha — jo uncatchable hai. `finally` block mein `driver.quit()` aur `_cleanup()` kabhi nahi chalte the.
+
+### Fix
+
+**1. `gmail_uc_checker.py` — SIGTERM handler add kiya (top of file, after imports):**
+```python
+_active_driver = None
+_active_xvfb   = None
+_active_locks  = []
+
+def _sigterm_cleanup(signum, frame):
+    # driver.quit() → Chrome closes; xvfb.terminate() → display closes
+    if _active_driver: _active_driver.quit()
+    if _active_xvfb:   _active_xvfb.terminate()
+    for fd in _active_locks: fcntl.flock(fd, LOCK_UN); fd.close()
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, _sigterm_cleanup)
+```
+
+**2. `gmail_uc_checker.py` — After Chrome launches, refs set kiye:**
+```python
+global _active_driver, _active_xvfb, _active_locks
+_active_driver = driver
+_active_xvfb   = _xvfb_proc
+_active_locks  = [_session_lock_fd]
+```
+
+**3. `gmail_uc_checker.py` — `_cleanup()` mein refs clear kiye** (double-quit prevent karne ke liye)
+
+**4. `browserLoginChecker.ts` — `SIGKILL` → `SIGTERM` change kiya:**
+```typescript
+// Before: p.kill("SIGKILL")  — uncatchable, Chrome/Xvfb leak
+// After:  p.kill("SIGTERM")  — Python cleans up before exiting
+try { p.kill("SIGTERM"); } catch {}
+```
+
+### Result
+Ab pause/cancel pe:
+1. Node.js → SIGTERM → Python
+2. Python SIGTERM handler → `driver.quit()` (Chrome closes) → `xvfb.terminate()` (display closes)
+3. Locks release ho jaate hain
+4. Python `sys.exit(0)` — koi zombie nahi
+
+### Also fixed this session
+- Stale processes (4 Chrome + 4 Xvfb from previous SIGKILLed runs) manually killed
+- Corrupted job file `2ef37d606056176a.json` deleted (SyntaxError on load)
+
+### Files changed
+| File | Change |
+|---|---|
+| `artifacts/api-server/gmail_uc_checker.py` | SIGTERM handler + `_active_driver/xvfb/locks` module refs + `_cleanup()` clears refs |
+| `artifacts/api-server/src/lib/browserLoginChecker.ts` | `SIGKILL` → `SIGTERM` in abort handler |
 
 ---
 
