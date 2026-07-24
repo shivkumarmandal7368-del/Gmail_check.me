@@ -21,6 +21,61 @@ _Last updated: July 24, 2026 — Session 50 (Fingerprint.com suspect score audit
 _Last updated: July 24, 2026 — Session 51 (Device Check UI — fingerprint.com audit built into the app)_
 _Last updated: July 24, 2026 — Session 52 (Device selector and proxy flow completion)_
 _Last updated: July 24, 2026 — Session 53 (Device Check proxy and profile enforcement)_
+_Last updated: July 24, 2026 — Session 54 (Workspace restore + typecheck fix)_
+
+---
+
+## Session 54 Changes (July 24, 2026) — Workspace restore + typecheck fix
+
+### Context
+
+Session 53 left 4 files changed but the quota ended before the agent could finish
+verifying. This session re-imported the project on a fresh Replit instance, so
+`node_modules` were missing and the TypeScript project-reference build artefacts
+(`lib/api-zod/dist`, `lib/db/dist`) were absent.
+
+### What was done
+
+- Ran `pnpm install --frozen-lockfile` at workspace root — all 526 packages
+  restored cleanly in ~13 s.
+- Confirmed Python dependencies already present (`undetected_chromedriver`,
+  `pyotp`, `selenium`, `requests`) — no pip install required.
+- Built TypeScript project references with `tsc --build lib/api-zod lib/db`
+  so the api-server typecheck can resolve them.
+- Restarted **API Server** and **Gmail Checker** workflows; both came up
+  cleanly.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `pnpm install --frozen-lockfile` | 526 packages, Done in 13.2 s |
+| Python deps | Already installed, no pip needed |
+| `pnpm --filter @workspace/api-server run typecheck` | Passed (0 errors) |
+| `GET /api/healthz` | `{"status":"ok"}` |
+| `GET /api/device-check/profiles` | 52 profiles returned |
+| API Server workflow | RUNNING on port 8080 |
+| Gmail Checker workflow | RUNNING on port 5173 |
+| Frontend preview | Loaded — all 4 tabs visible (SMTP, IMAP, BROWSER, DEVICE CHECK) |
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `HANDOFF.md` | Recorded Session 54 |
+
+### Notes for next session
+
+- Session 53 code is fully functional (proxy local-forwarder, fingerprint
+  profile injection, direct-IP guard). See Session 53 section for details.
+- After a fresh Replit import, always run `pnpm install --frozen-lockfile` then
+  `tsc --build lib/api-zod lib/db` before running typecheck or starting
+  workflows.
+- Current fingerprint.com suspect score baseline: **37 / High risk** (Session 50).
+  Target: < 15. Remaining reductions: VM signals (14 pts), automation traces
+  (8 pts), tampering patterns (8 pts) — see Session 50 for full procedure.
+- The `Proxy` secret is configured. Device Check requires it (or a Custom proxy
+  URL in the UI) to run — it never falls back to a direct Replit connection.
 
 ---
 
