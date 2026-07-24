@@ -428,8 +428,24 @@ else:
     emit_screenshot("/tmp/dc_2_breakdown.png", "breakdown")
 
 # ── Scroll and third screenshot ────────────────────────────────────────────────
-driver.execute_script("window.scrollBy(0, 300)")
-time.sleep(2)
+# The breakdown panel is a modal/overlay with its own scroll container.
+# Scroll every scrollable element to the bottom, then scroll the window too,
+# so the 3rd screenshot shows content that was hidden below the fold.
+driver.execute_script("""
+    // Scroll all overflow containers to the bottom
+    var all = document.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        var st = window.getComputedStyle(el);
+        var overflow = st.overflowY || st.overflow;
+        if ((overflow === 'scroll' || overflow === 'auto') && el.scrollHeight > el.clientHeight) {
+            el.scrollTop = el.scrollHeight;
+        }
+    }
+    // Also scroll the main window to the bottom
+    window.scrollTo(0, document.body.scrollHeight);
+""")
+time.sleep(3)
 driver.get_screenshot_as_file("/tmp/dc_3_scrolled.png")
 emit_screenshot("/tmp/dc_3_scrolled.png", "scrolled")
 

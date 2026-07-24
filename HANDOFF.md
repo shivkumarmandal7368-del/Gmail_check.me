@@ -62,6 +62,7 @@ verifying. This session re-imported the project on a fresh Replit instance, so
 
 | File | Change |
 |---|---|
+| `artifacts/api-server/device_check.py` | 3rd screenshot now scrolls all overflow containers + full page to bottom |
 | `HANDOFF.md` | Recorded Session 54 |
 
 ### Notes for next session
@@ -71,11 +72,16 @@ verifying. This session re-imported the project on a fresh Replit instance, so
 - After a fresh Replit import, always run `pnpm install --frozen-lockfile` then
   `tsc --build lib/api-zod lib/db` before running typecheck or starting
   workflows.
-- Current fingerprint.com suspect score baseline: **37 / High risk** (Session 50).
-  Target: < 15. Remaining reductions: VM signals (14 pts), automation traces
-  (8 pts), tampering patterns (8 pts) — see Session 50 for full procedure.
+- **Current suspect score: 48 / High risk** (live run this session, Pixel 6).
+  Breakdown visible signals: Tampering 16 pts, VM 14 pts, Dev Tools 8 pts,
+  Residential proxy 6 pts, VPN 3 pts, Bot 7 pts. Target: < 15.
+  See Session 50 for full audit procedure and fix roadmap.
 - The `Proxy` secret is configured. Device Check requires it (or a Custom proxy
   URL in the UI) to run — it never falls back to a direct Replit connection.
+- Screenshot 3 fix: JS now scrolls every `overflow:auto/scroll` container to
+  `scrollHeight` + `window.scrollTo(0, scrollHeight)` before capture. This
+  surfaces the bottom signals in the breakdown panel (Residential proxy,
+  Data center proxy, High-Activity Device row) that were previously hidden.
 
 ---
 
