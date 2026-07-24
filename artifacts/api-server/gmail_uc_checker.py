@@ -1324,6 +1324,17 @@ try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable
       id:undefined
     }};
   }}
+  // Register chrome.runtime methods as native-looking so .toString() doesn't reveal JS source.
+  // Real Chrome's runtime is a C++ native object — unregistered overrides expose JS source.
+  if(window.__nr&&window.chrome.runtime){{
+    window.__nr(window.chrome.runtime.connect,'connect');
+    window.__nr(window.chrome.runtime.sendMessage,'sendMessage');
+    if(window.chrome.runtime.onMessage){{
+      window.__nr(window.chrome.runtime.onMessage.addListener,'addListener');
+      window.__nr(window.chrome.runtime.onMessage.removeListener,'removeListener');
+      window.__nr(window.chrome.runtime.onMessage.hasListener,'hasListener');
+    }}
+  }}
   try{{delete window.chrome.app;}}catch(e){{}}
   if(!window.chrome.loadTimes){{var _lt=Date.now()/1000;window.chrome.loadTimes=function(){{var _t=Date.now()/1000;return{{requestTime:_t-0.5,startLoadTime:_t-0.5,commitLoadTime:_t-0.3,finishDocumentLoadTime:_t-0.1,finishLoadTime:_t,firstPaintTime:_lt-0.25,firstPaintAfterLoadTime:_lt-0.18,navigationType:'Other',wasFetchedViaSpdy:false,wasNpnNegotiated:false,npnNegotiatedProtocol:'',wasAlternateProtocolAvailable:false,connectionInfo:''}}}};if(window.__nr)window.__nr(window.chrome.loadTimes,'loadTimes');}}
   if(!window.chrome.csi)window.chrome.csi=function(){{return{{startE:Date.now()-1000,onloadT:Date.now()-500,pageT:500,tran:15}}}};
@@ -1872,6 +1883,10 @@ try{{
   // Prevent document-level webdriver property exposure
   try{{Object.defineProperty(document,'__webdriver_script_fn',{{get:function(){{return undefined;}},configurable:true}});}}catch(e){{}}
 }})();
+// Tampering fix: remove window.__nr from window so fingerprint.com cannot detect it via
+// Object.getOwnPropertyNames(window). The underlying WeakMap stays alive in the IIFE
+// closure — all already-registered functions keep their native-looking toString().
+try{{delete window.__nr;}}catch(e){{}}
 """
 
 
@@ -2337,6 +2352,20 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         log(f"CDP deviceMetrics set → {fp['screenW']}x{fp['screenH']} dpr={fp['dpr']}")
     except Exception as e:
         log(f"CDP deviceMetrics warning (non-fatal): {e}")
+
+    # VM detection fix: Emulation.setUserAgentOverride sets navigator.userAgent and
+    # navigator.platform at the CDP emulation layer — deeper than Network.setUserAgentOverride.
+    # fingerprint.com compares the CDP-emulation-reported platform against the JS-reported
+    # platform; both must agree on "Linux armv8l" to avoid a VM mismatch signal.
+    try:
+        driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
+            "userAgent":      MOBILE_UA,
+            "acceptLanguage": f"{fp['language']},en;q=0.9",
+            "platform":       fp["platform"],
+        })
+        log(f"CDP Emulation UA override set → platform={fp['platform']}")
+    except Exception as e:
+        log(f"CDP Emulation UA override warning (non-fatal): {e}")
 
     # Exit IP fetch skipped — each account uses a unique sticky session ID for IP isolation
     exit_ip = None

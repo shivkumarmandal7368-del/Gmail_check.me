@@ -1,0 +1,42 @@
+Sabse pehle handoff.md padho achha se , session 1 se  last session tak uske  jo bhi changes kroge sab update krte jaana handoff.md main
+
+Special session - 49,50,51,52,53,54,55,56
+
+Sabse pehle vm per kaam kro
+
+VM fix ke liye exact analysis karta hoon — kya CDP mein kuch missing hai, stealth JS mein kya hai.
+
+Screen orientation aur matchMedia already patched hain. WebGL parameters aur CDP-level platform check karta hoon — yehi most likely VM signal hai.
+
+WebGL getParameter patching aur stealth JS ka poora WebGL section ek saath dekhta hoon.
+
+WebGL UNMASKED params aur shader precision patching full dekhta hoon — yehi most likely VM signal hai.
+
+WebGL getShaderPrecisionFormat missing hai — SwiftShader aur real Mali ke values bahut alag hote hain, aur extension list bhi check karni hai.
+
+Kya gap hai ab pata hai:
+
+getShaderPrecisionFormat — bilkul patch nahi hua (SwiftShader vs Mali values bahut alag)
+MAX_VARYING_VECTORS (36348): SwiftShader=31 vs Mali=15 — unpatched
+MAX_FRAGMENT_UNIFORM_VECTORS (36349): SwiftShader=254 vs Mali=224 — unpatched
+ALIASED_POINT_SIZE_RANGE (33901): SwiftShader=[1,8191] vs Mali=[1,511] — unpatched
+Exact edit lines dhundta hoon phir fix karta hoon.
+
+Exact text padhta hoon dono files ke liye, phir parallel edit karta hoon.
+
+Ab dono files mein parallel edit karta hoon — WebGL precision patch + CDP Emulation UA override.
+
+Syntax verify karta hoon aur API server restart karta hoon parallel mein.
+
+API server running hai. Ab live Device Check run karta hoon — dekhte hain VM signal drop hua ya nahi.
+
+Score 34→39 — worse! VM still 14, plus VPN (3) aur High-Activity Device (6) aa gaye. WebGL parameter fix kaam nahi kiya.
+
+Asli VM signal: EXT_disjoint_timer_query — ye GPU timing extension hai. Real Android Chrome 138 pe YE NAHI HOTA (Chrome 80+ me Android par disabled hai for Spectre). fingerprint.com is se actual GPU timing test karta hai aur SwiftShader detect karta hai. Ye hatana zaroori hai.
+
+Ab fix karta hoon — EXT_disjoint_timer_query aur WEBGL_debug_shaders remove karo. Real Android Chrome 138 pe ye dono nahi hote.
+
+You've reached your daily free quota limit. It will reset at 12:00 AM UTC.
+
+
+Old account ka replit agent ne yaha tak kaam adhura chhor diya h  dekh lo achha se aur sahi se complete krdo
