@@ -35,6 +35,32 @@ pnpm install
 pip install -r artifacts/api-server/requirements.txt
 ```
 
+### Chrome for Testing runtime
+
+The browser checker stays on **Python Selenium + undetected-chromedriver**. It
+does not use Puppeteer or Playwright. The API workflow runs
+`scripts/setup-chrome-for-testing.sh` on every boot. The script:
+
+- reads the current Stable Chrome for Testing version from Google's public
+  last-known-good manifest;
+- caches the Linux Chrome bundle under
+  `~/.cache/vanguard-mx/chrome-for-testing/`;
+- exports `CHROME_BINARY`, `CHROME_VERSION_MAIN`, and `LD_LIBRARY_PATH`;
+- verifies that the Chrome binary can load its shared libraries before the API
+  starts.
+
+The current stable browser is Chrome for Testing 151.x. The Python code reads
+the configured binary and detects its major version dynamically instead of
+hardcoding the system Chromium version. Required Chrome/X11 libraries,
+including `libgbm` and `libudev`, are declared in `replit.nix`.
+
+To manually verify the runtime:
+```bash
+bash scripts/setup-chrome-for-testing.sh > /tmp/chrome-env.sh
+source /tmp/chrome-env.sh
+"$CHROME_BINARY" --version
+```
+
 ## Environment / Secrets
 
 No Replit secrets required. The proxy password is entered manually in the UI each time.

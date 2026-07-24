@@ -1,29 +1,32 @@
-{pkgs}: {
+{ pkgs }: {
   deps = [
-    pkgs.nano
-    pkgs.xorg.xorgserver
-    pkgs.xvfb-run
-    pkgs.dbus
-    pkgs.glib
-    pkgs.cairo
-    pkgs.pango
-    pkgs.alsa-lib
-    pkgs.expat
-    pkgs.mesa
-    pkgs.libxkbcommon
-    pkgs.xorg.libXi
-    pkgs.xorg.libXrandr
-    pkgs.xorg.libXfixes
-    pkgs.xorg.libXext
-    pkgs.xorg.libXdamage
-    pkgs.xorg.libXcomposite
-    pkgs.xorg.libX11
+    pkgs.systemd
+    pkgs.libgbm
     pkgs.xorg.libxcb
-    pkgs.libdrm
-    pkgs.cups
-    pkgs.atk
-    pkgs.nspr
-    pkgs.nss
+    pkgs.xorg.libX11
+    pkgs.xorg.libXcomposite
+    pkgs.xorg.libXdamage
+    pkgs.xorg.libXext
+    pkgs.xorg.libXfixes
+    pkgs.xorg.libXrandr
+    pkgs.xorg.libXi
+    pkgs.expat
+    pkgs.xvfb-run
+    pkgs.xorg.xorgserver
     pkgs.chromium
+    pkgs.glib
+    pkgs.nss
+    pkgs.nspr
+    pkgs.atk
+    pkgs.at-spi2-atk
+    pkgs.cups
+    pkgs.dbus
+    pkgs.libdrm
+    pkgs.mesa
+    pkgs.pango
+    pkgs.cairo
+    pkgs.gtk3
+    pkgs.alsa-lib
+    pkgs.libxkbcommon
   ];
 }

@@ -1891,17 +1891,49 @@ try{{delete window.__nr;}}catch(e){{}}
 
 
 def get_chromium_path() -> str | None:
-    for cmd in ("chromium", "chromium-browser", "google-chrome"):
+    """Prefer the bootstrapped Chrome for Testing binary over Nix Chromium."""
+    candidates = [
+        os.environ.get("CHROME_BINARY"),
+        os.path.join(
+            os.environ.get(
+                "CHROME_FOR_TESTING_ROOT",
+                os.path.expanduser("~/.cache/vanguard-mx/chrome-for-testing"),
+            ),
+            "current",
+            "chrome",
+        ),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    for cmd in ("google-chrome", "chromium", "chromium-browser"):
         try:
-            p = subprocess.check_output(["which", cmd], encoding="utf8", stderr=subprocess.DEVNULL).strip()
+            p = subprocess.check_output(
+                ["which", cmd], encoding="utf8", stderr=subprocess.DEVNULL
+            ).strip()
             if p:
                 return p
         except Exception:
             pass
-    nix = "/nix/store/qa9cnw4v5xkxyip6mb9kxqfq1z4x2dx1-chromium-138.0.7204.100/bin/chromium"
-    if os.path.exists(nix):
-        return nix
     return None
+
+
+def get_chrome_version_main(chrome_path: str | None) -> int | None:
+    """Read the installed browser major version for undetected-chromedriver."""
+    configured = os.environ.get("CHROME_VERSION_MAIN")
+    if configured and configured.isdigit():
+        return int(configured)
+    if not chrome_path:
+        return None
+    try:
+        output = subprocess.check_output(
+            [chrome_path, "--version"], encoding="utf8", stderr=subprocess.STDOUT
+        )
+        import re
+        match = re.search(r"\b(\d+)\.", output)
+        return int(match.group(1)) if match else None
+    except Exception:
+        return None
 
 
 def parse_proxy(proxy_url: str) -> dict | None:
@@ -2081,7 +2113,11 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     display = ensure_xvfb()
     headless = display is None
     chromium_path = get_chromium_path()
-    log(f"Chromium: {chromium_path}, headless={headless}, display={display}")
+    chrome_version_main = get_chrome_version_main(chromium_path)
+    log(
+        f"Chrome: {chromium_path}, version_main={chrome_version_main}, "
+        f"headless={headless}, display={display}"
+    )
 
     # Profile directory — wiped on fresh_profile=True so Google sees a brand-new device
     safe_email = email.replace("@", "_at_").replace(".", "_")
@@ -2246,7 +2282,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             options=options,
             browser_executable_path=chromium_path,
             headless=headless,
-            version_main=138,
+            version_main=chrome_version_main,
             use_subprocess=True,
             port=_cd_port,
         )

@@ -3840,6 +3840,40 @@ User requested a comprehensive read-only audit from session 21 onward. No code w
 
 ---
 
+## Session 57 Changes (July 24, 2026) — Persistent Chrome for Testing 151 runtime
+
+### Context
+
+The imported environment provided Nix Chromium 138, while the browser
+automation needs a current Chrome major version. The project remains on Python
+Selenium + undetected-chromedriver; Puppeteer and Playwright were not adopted.
+
+### Fix Applied
+
+- Added `scripts/setup-chrome-for-testing.sh`, which runs from the API
+  workflow on every boot, downloads the current Linux Stable Chrome for Testing
+  bundle when the cache is missing, and keeps it in
+  `~/.cache/vanguard-mx/chrome-for-testing/`.
+- The bootstrap exports `CHROME_BINARY`, `CHROME_VERSION_MAIN`, and
+  `LD_LIBRARY_PATH`, and verifies the browser can load its runtime libraries.
+- Added the missing `libgbm` and `systemd`/`libudev` runtime packages alongside
+  the existing GTK, X11, Mesa, NSS, DBus, audio, and Xvfb dependencies.
+- Updated both Python launch paths to pass `browser_executable_path` and
+  dynamically detected `version_main` rather than hardcoded 138.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Chrome for Testing version | `151.0.7922.47` |
+| Chrome shared-library check (`ldd`) | No missing libraries |
+| Headless Selenium smoke session | Started, loaded a page, read title/text, closed cleanly |
+| API health | `{"status":"ok"}` |
+| Device profiles endpoint | 52 profiles |
+| API workflow | RUNNING on port 8080 |
+| Gmail Checker workflow | RUNNING on port 5173 |
+| TypeScript/Python syntax checks | Passed |
+
 ## What's Next (Future Work)
 
 1. **Proxy health pre-flight** — ping proxy before starting batch, warn if dead/slow  

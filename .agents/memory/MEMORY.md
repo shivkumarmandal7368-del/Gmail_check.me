@@ -3,3 +3,4 @@
 - [Resumable browser jobs](resumable-browser-jobs.md) — pause saves in-flight completions, and resume runs only accounts without results.
 - [Generated browser script validation](generated-browser-script-validation.md) — syntax-check rendered f-string JavaScript, not only the Python source.
 - [Device check SSE lifecycle](device-check-sse-lifecycle.md) — long-running POST-to-SSE cleanup must watch the response, not the consumed request body.
+- [Chrome for Testing runtime](chrome-for-testing-runtime.md) — bootstrap current Chrome with explicit libgbm/libudev closure instead of relying on lagging Nix Chromium.

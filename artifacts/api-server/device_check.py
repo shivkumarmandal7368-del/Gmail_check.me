@@ -38,6 +38,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 try:
     from gmail_uc_checker import (
         PHONE_PROFILES,
+        get_chrome_version_main,
+        get_chromium_path,
         make_stealth_js,
         parse_proxy,
     )
@@ -297,8 +299,16 @@ o.add_argument("--password-store=basic")
 o.add_argument(f"--proxy-server=http://127.0.0.1:{local_proxy_port}")
 
 log("Launching Chrome...")
+chromium_path = get_chromium_path()
+chrome_version_main = get_chrome_version_main(chromium_path)
+log(f"Chrome binary: {chromium_path} (version_main={chrome_version_main})")
+
 try:
-    driver = uc.Chrome(options=o, version_main=138)
+    driver = uc.Chrome(
+        options=o,
+        browser_executable_path=chromium_path,
+        version_main=chrome_version_main,
+    )
 except Exception as e:
     print(f"ERROR:Chrome launch failed: {str(e)[:400]}", flush=True)
     xvfb.terminate()
