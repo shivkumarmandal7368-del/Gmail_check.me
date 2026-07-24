@@ -834,7 +834,9 @@ function BrowserChecker() {
           proxies.map((p, i) =>
             fetch("/api/proxy/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proxy: p }) })
               .then(r => r.json() as Promise<{ ok: boolean; ip?: string; error?: string }>)
-              .then(d => ({ idx: i + 1, ...d }))
+              .then(d => d.ok
+                ? { idx: i + 1, ok: true as const, ip: d.ip }
+                : { idx: i + 1, ok: false as const, error: d.error })
               .catch(() => ({ idx: i + 1, ok: false as const, error: "Endpoint unreachable" }))
           )
         );
@@ -845,7 +847,10 @@ function BrowserChecker() {
           return; // ← BLOCK: do not start the job
         }
         setProxyCheckState("ok");
-        setProxyExitIp(proxyResults[0]?.ip ?? "");
+        const firstSuccessful = proxyResults.find(
+          (result): result is { idx: number; ok: true; ip?: string } => result.ok
+        );
+        setProxyExitIp(firstSuccessful?.ip ?? "");
       } catch {
         setProxyCheckState("fail");
         setProxyCheckError("Proxy check endpoint unreachable");
@@ -1701,26 +1706,50 @@ const DEVICE_PROFILES = [
   { index: 5,  label: "Pixel 8 Pro",          sub: "Android 14 · Adreno 740" },
   { index: 6,  label: "Pixel 9",              sub: "Android 15 · Mali-G715 MP7" },
   { index: 7,  label: "Pixel 9 Pro",          sub: "Android 15 · Mali-G715 MP7" },
-  { index: 8,  label: "Samsung Galaxy S21",   sub: "Android 14 · Mali-G78 MP14" },
-  { index: 9,  label: "Samsung Galaxy S22",   sub: "Android 14 · Xclipse 920" },
-  { index: 10, label: "Samsung Galaxy S22 Ultra", sub: "Android 14 · Xclipse 920" },
-  { index: 11, label: "Samsung Galaxy S23",   sub: "Android 14 · Adreno 740" },
-  { index: 12, label: "Samsung Galaxy S23 FE",sub: "Android 14 · Xclipse 920" },
-  { index: 13, label: "Samsung Galaxy S24+",  sub: "Android 14 · Xclipse 940" },
-  { index: 14, label: "Samsung Galaxy A53",   sub: "Android 14 · Mali-G68" },
-  { index: 15, label: "Samsung Galaxy A54",   sub: "Android 14 · Mali-G68" },
-  { index: 16, label: "Samsung Galaxy A34",   sub: "Android 14 · Mali-G68" },
-  { index: 17, label: "Samsung Galaxy A73",   sub: "Android 14 · Adreno 619" },
-  { index: 18, label: "OnePlus 11",           sub: "Android 14 · Adreno 740" },
-  { index: 19, label: "OnePlus 12",           sub: "Android 14 · Adreno 750" },
-  { index: 20, label: "OnePlus Nord 3",       sub: "Android 14 · Mali-G710" },
-  { index: 21, label: "Xiaomi 13",            sub: "Android 14 · Adreno 740" },
-  { index: 22, label: "Xiaomi 14",            sub: "Android 14 · Adreno 750" },
-  { index: 23, label: "Xiaomi 13T Pro",       sub: "Android 14 · Dimensity 9200+" },
-  { index: 24, label: "Redmi Note 12 Pro",    sub: "Android 13 · Mali-G68" },
-  { index: 25, label: "Realme GT 5",          sub: "Android 14 · Adreno 740" },
-  { index: 26, label: "Nothing Phone 2",      sub: "Android 14 · Adreno 730" },
-  { index: 27, label: "Motorola Edge 40",     sub: "Android 14 · Mali-G715" },
+  { index: 8,  label: "Galaxy S21 (SM-G991B)", sub: "Android 14 · Mali-G78 MP14" },
+  { index: 9,  label: "Galaxy S22 (SM-S901B)", sub: "Android 14 · Xclipse 920" },
+  { index: 10, label: "Galaxy S22 Ultra (SM-S908B)", sub: "Android 14 · Xclipse 920" },
+  { index: 11, label: "Galaxy S23 (SM-S911B)", sub: "Android 14 · Adreno 740" },
+  { index: 12, label: "Galaxy S23 FE (SM-S711B)", sub: "Android 14 · Xclipse 920" },
+  { index: 13, label: "Galaxy S24+ (SM-S926B)", sub: "Android 14 · Xclipse 940" },
+  { index: 14, label: "Galaxy A53 (SM-A536B)", sub: "Android 14 · Mali-G68 MC4" },
+  { index: 15, label: "Galaxy A54 (SM-A546B)", sub: "Android 14 · Mali-G68" },
+  { index: 16, label: "Galaxy A34 (SM-A346B)", sub: "Android 14 · Mali-G68" },
+  { index: 17, label: "Galaxy A73 (SM-A736B)", sub: "Android 14 · Adreno 642L" },
+  { index: 18, label: "OnePlus 11 (CPH2423)", sub: "Android 14 · Adreno 740" },
+  { index: 19, label: "OnePlus 12 (CPH2447)", sub: "Android 14 · Adreno 750" },
+  { index: 20, label: "OnePlus Nord 3 (CPH2493)", sub: "Android 14 · Mali-G710 MC10" },
+  { index: 21, label: "Xiaomi 13 (2211133G)", sub: "Android 14 · Adreno 740" },
+  { index: 22, label: "Xiaomi 14 (23049PCD8G)", sub: "Android 14 · Adreno 750" },
+  { index: 23, label: "Xiaomi 13T Pro (23078PND5G)", sub: "Android 14 · Mali-G715 MC11" },
+  { index: 24, label: "Redmi Note 12 Pro (22101316G)", sub: "Android 13 · Mali-G68 MC4" },
+  { index: 25, label: "Realme GT 5 (RMX3706)", sub: "Android 14 · Adreno 740" },
+  { index: 26, label: "Nothing Phone 2 (A065)", sub: "Android 14 · Adreno 730" },
+  { index: 27, label: "Motorola Edge 40 (XT2303-2)", sub: "Android 14 · Mali-G77 MC9" },
+  { index: 28, label: "Vivo V29 (V2246)", sub: "Android 14 · Adreno 642L" },
+  { index: 29, label: "Oppo Find X6 (PGEM10)", sub: "Android 14 · Mali-G715 MC11" },
+  { index: 30, label: "Pixel 9 Pro XL", sub: "Android 15 · Mali-G715 MP7" },
+  { index: 31, label: "Galaxy S24 (SM-S921B)", sub: "Android 14 · Xclipse 940" },
+  { index: 32, label: "Galaxy S24 Ultra (SM-S928B)", sub: "Android 14 · Adreno 750" },
+  { index: 33, label: "Galaxy S25 (SM-S931B)", sub: "Android 15 · Adreno 830" },
+  { index: 34, label: "Galaxy A55 (SM-A556B)", sub: "Android 14 · Xclipse 530" },
+  { index: 35, label: "OnePlus 13 (CPH2655)", sub: "Android 15 · Adreno 830" },
+  { index: 36, label: "Xiaomi 14 Ultra (24030PN60G)", sub: "Android 14 · Adreno 750" },
+  { index: 37, label: "Xiaomi 14T Pro (23127PN0CG)", sub: "Android 14 · Immortalis-G720 MC12" },
+  { index: 38, label: "Redmi Note 13 Pro+ (23013PC75G)", sub: "Android 13 · Mali-G610 MC4" },
+  { index: 39, label: "ASUS ROG Phone 8 (AI2401)", sub: "Android 14 · Adreno 750" },
+  { index: 40, label: "Motorola Edge 50 Pro (XT2403-3)", sub: "Android 14 · Adreno 720" },
+  { index: 41, label: "Sony Xperia 1 VI (XQ-EC54)", sub: "Android 14 · Adreno 750" },
+  { index: 42, label: "Galaxy S25+ (SM-S936B)", sub: "Android 15 · Adreno 830" },
+  { index: 43, label: "Galaxy S25 Ultra (SM-S938B)", sub: "Android 15 · Adreno 830" },
+  { index: 44, label: "Pixel 8a", sub: "Android 14 · Adreno 740" },
+  { index: 45, label: "OnePlus Nord 4 (CPH2609)", sub: "Android 14 · Adreno 735" },
+  { index: 46, label: "Xiaomi 15 (24129PN74G)", sub: "Android 15 · Adreno 830" },
+  { index: 47, label: "Redmi Note 14 Pro+ (24117RA73G)", sub: "Android 14 · Adreno 720" },
+  { index: 48, label: "Nothing Phone (2a) (A142)", sub: "Android 14 · Mali-G610 MC4" },
+  { index: 49, label: "Realme GT 6 (RMX3851)", sub: "Android 14 · Adreno 735" },
+  { index: 50, label: "Oppo Reno 12 Pro (CPH2629)", sub: "Android 14 · Immortalis-G720 MC12" },
+  { index: 51, label: "vivo X100 Pro (V2324A)", sub: "Android 14 · Immortalis-G720 MC12" },
 ];
 
 function DeviceChecker() {

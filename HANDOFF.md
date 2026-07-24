@@ -19,6 +19,55 @@ _Last updated: July 24, 2026 — Session 48 (full audit fix pass)_
 _Last updated: July 24, 2026 — Session 49 (Google detection gap fixes)_
 _Last updated: July 24, 2026 — Session 50 (Fingerprint.com suspect score audit procedure)_
 _Last updated: July 24, 2026 — Session 51 (Device Check UI — fingerprint.com audit built into the app)_
+_Last updated: July 24, 2026 — Session 52 (Device selector and proxy flow completion)_
+
+---
+
+## Session 52 Changes (July 24, 2026) — Device selector and proxy flow completion
+
+### Problem found
+
+Session 51 added the DEVICE CHECK tab, device selector, and proxy controls, but the frontend and API each contained stale lists of only 28 devices while `PHONE_PROFILES` in `gmail_uc_checker.py` contains 52 profiles. Selecting a device after index 27 could therefore send the correct index to Python while showing the wrong or missing device label in the UI.
+
+The imported workspace also had no `node_modules`, so all three configured workflows failed with `vite: command not found` or `Cannot find package 'esbuild'`.
+
+### Fix applied
+
+- Synced the API's `DEVICE_LABELS` list with all 52 `PHONE_PROFILES` entries, including model identifiers, Android versions, and GPU renderers.
+- Synced the frontend `DEVICE_PROFILES` list with the same 52-entry order, so every selector index maps to the device Python actually launches.
+- Kept the two proxy modes:
+  - **Secret**: uses the Replit `Proxy` secret through `device_check.py`.
+  - **Custom**: sends the entered proxy URL as `PROXY_OVERRIDE` for that run only.
+- Fixed the existing frontend proxy preflight response narrowing so the workspace TypeScript check passes without changing runtime behavior.
+- Fixed the DEVICE CHECK SSE lifecycle: the route now watches the response socket instead of the POST request socket, preventing the Python audit from being terminated immediately after the request body is read.
+- Restored the imported pnpm workspace from the existing lockfile with `pnpm install --frozen-lockfile`.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `PHONE_PROFILES` source count | 52 |
+| `GET /api/healthz` | `{"status":"ok"}` |
+| `GET /api/device-check/profiles` | 52 profiles; first and last entries match Python source |
+| `pnpm run typecheck` | Passed for all workspace packages |
+| `git diff --check` | Passed |
+| API workflow | Running on port 8080 |
+| Gmail Checker workflow | Running on port 5173 |
+| Component Preview workflow | Running |
+| App preview screenshot | Loaded without browser errors beyond the standard React DevTools notice |
+| `POST /api/device-check/run` smoke audit | Pixel 6 + configured Proxy secret completed in ~48s with 3 screenshots, `done`, and exit code 0 |
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `artifacts/api-server/src/routes/deviceCheck.ts` | Replaced stale 28-entry labels with the complete 52-entry profile list |
+| `artifacts/gmail-checker/src/pages/home.tsx` | Replaced stale 28-entry selector list and fixed proxy preflight type narrowing |
+| `HANDOFF.md` | Recorded Session 52 completion and verification |
+
+### Note for next session
+
+The local `browser-use` CLI was not installed in this environment, so direct interaction testing of the DEVICE CHECK dropdown was unavailable. The running app preview loaded successfully, the API profile endpoint verified the complete selector data, and the backend smoke audit completed successfully using the configured Proxy secret. A custom proxy override should still be tested from the UI when a second proxy is available.
 
 ---
 
