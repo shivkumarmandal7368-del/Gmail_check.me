@@ -1,0 +1,58 @@
+Sabse pehle handoff.md padho achha se , session 1 se  last session tak uske  jo bhi changes kroge sab update krte jaana handoff.md main
+
+Special session - 49,50,51,52,53,54,55,56
+
+Score 39 aa raha hai aur breakdown screenshot nahi aya properly — "calculated" click kaam nahi kiya. Fix karta hoon: Suspect Score badge pe directly click karunga breakdown ke liye.
+
+Poora click + screenshot section rewrite karta hoon — Suspect Score badge pe click karke breakdown laaonga, aur 3rd screenshot mein modal scroll karunga (footer nahi):
+
+Ab live run karta hoon fixed click logic ke saath:
+
+Ab poora breakdown dikh raha hai. Current score: 37
+
+Signal	Score
+Virtual machine	14
+Tampering	8
+Developer tools	8
+Residential proxy	6
+VPN	3
+Target < 15 ke liye teen cheezein fix karni hain. Let me analyse exactly kya leak ho raha hai:
+
+Ab teen exact root causes dikh gaye:
+
+Tampering (8 pts) — screen.* properties instance pe hain (Object.defineProperty(screen, ...)) — prototype pe honi chahiye. Fingerprint Object.getOwnPropertyDescriptor(screen, 'width') check karta hai — instance pe found = tampered.
+
+Dev tools (8 pts) — $cdc_ cleanup hardcoded names se hai. Chrome 138's UC uses a different hash. domAutomation / domAutomationController bhi missing hain. Dynamic scan needed.
+
+VM (14 pts) — CSS resolution media query aur devicePixelRatio still mismatch possible.
+
+Teeno fixes ek saath apply karta hoon:
+
+Good — workflows running. Ab remaining fixes: duplicate outerWidth lines remove karo, dev tools dynamic cdc_ cleanup, aur resolution media query — sab parallel:
+
+Ab sab parallel edits — duplicates remove, dynamic cdc_ cleanup, aur resolution media query VM fix:
+
+Saari cheezein ek saath apply karta hoon — 4 parallel edits:
+
+Syntax check karta hoon aur API restart parallel mein:
+
+Sab workflows running. Ab live score check karta hoon new fixes ke saath:
+
+Click kaam kiya! Screenshots dekh leta hoon:
+
+Score: 37 → 30! VPN (3) aur Residential proxy (6) bhi 0 ho gaye. Abhi remaining:
+
+Tampering: 8
+VM: 14
+Dev tools: 8
+Score 30 - 16 = 14 ke liye Tampering + Dev tools dono fix karne hain. Root causes identify karta hoon:
+
+Tampering (8): navigator.userLanguage/browserLanguage/systemLanguage IE-only properties hain — real Android Chrome 138 mein exist hi nahi karte. Unka presence = tamper signal. Plus document.documentElement ka webdriver attribute.
+
+Dev tools (8): HTML element pe webdriver attribute set hota hai Selenium se — clean nahi ho raha.
+
+
+
+Old account ka replit agent ne yaha tak kaam adhura chhor diya h  dekh lo achha se aur sahi se complete krdo
+
+Screenshot bhi de rha complete krdo

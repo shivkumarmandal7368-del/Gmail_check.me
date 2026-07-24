@@ -1252,6 +1252,16 @@ def make_stealth_js(fp: dict) -> str:
 // Real Android Chrome 138 does NOT have them. Their presence on navigator
 // is a tampering signal fingerprint.com explicitly checks for — remove them.
 (function(){{
+  // Delete from prototype so Object.getOwnPropertyDescriptor(proto, key) === undefined,
+  // matching real Android Chrome 138 where these IE-only properties don't exist at all.
+  // Do NOT re-define them — any descriptor (even returning undefined) is a tamper signal.
+  var _np2=Object.getPrototypeOf(navigator);
+  ['userLanguage','browserLanguage','systemLanguage'].forEach(function(k){{
+    try{{delete _np2[k];}}catch(e){{}}
+    try{{delete navigator[k];}}catch(e){{}}
+  }});
+}})();
+(function(){{
   // Tampering fix: screen.* must be overridden on Screen.prototype, NOT on the
   // screen instance. fingerprint.com calls Object.getOwnPropertyDescriptor(screen,'width')
   // — if that returns anything, it means the property was set on the instance (tampered).
