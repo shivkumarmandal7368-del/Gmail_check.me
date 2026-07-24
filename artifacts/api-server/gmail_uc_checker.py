@@ -1077,7 +1077,10 @@ def _webgl_extensions(vendor: str, renderer: str) -> tuple[list[str], list[str]]
     # ── Base set present on every modern Android Chrome GPU ──────────────────
     wgl1: list[str] = [
         "ANGLE_instanced_arrays", "EXT_blend_minmax", "EXT_color_buffer_half_float",
-        "EXT_disjoint_timer_query", "EXT_float_blend", "EXT_frag_depth",
+        # EXT_disjoint_timer_query intentionally EXCLUDED:
+        # Chrome disabled it on Android (80+) due to Spectre. Its presence is a VM
+        # signal — fingerprint.com uses it to run GPU timing tests and detect SwiftShader.
+        "EXT_float_blend", "EXT_frag_depth",
         "EXT_shader_texture_lod", "EXT_texture_filter_anisotropic",
         "EXT_texture_norm16", "KHR_parallel_shader_compile",
         "OES_depth24", "OES_depth32", "OES_element_index_uint",
@@ -1088,18 +1091,22 @@ def _webgl_extensions(vendor: str, renderer: str) -> tuple[list[str], list[str]]
         "WEBGL_compressed_texture_astc",   # Android — NOT on Linux desktop
         "WEBGL_compressed_texture_etc",    # Android ETC2 — NOT on Linux desktop
         "WEBGL_compressed_texture_etc1",   # Android ETC1 — NOT on Linux desktop
-        "WEBGL_debug_renderer_info", "WEBGL_debug_shaders",
+        "WEBGL_debug_renderer_info",
+        # WEBGL_debug_shaders intentionally EXCLUDED: debugging extension not
+        # available in production Android Chrome — its presence flags a debug build / VM.
         "WEBGL_depth_texture", "WEBGL_draw_buffers",
         "WEBGL_lose_context", "WEBGL_multi_draw",
     ]
     wgl2: list[str] = [
         "EXT_color_buffer_float", "EXT_color_buffer_half_float",
-        "EXT_disjoint_timer_query_webgl2", "EXT_float_blend",
+        # EXT_disjoint_timer_query_webgl2 intentionally EXCLUDED (same reason as wgl1).
+        "EXT_float_blend",
         "EXT_texture_filter_anisotropic", "EXT_texture_norm16",
         "KHR_parallel_shader_compile", "OES_draw_buffers_indexed",
         "OES_texture_float_linear", "WEBGL_compressed_texture_astc",
         "WEBGL_compressed_texture_etc", "WEBGL_debug_renderer_info",
-        "WEBGL_debug_shaders", "WEBGL_lose_context", "WEBGL_multi_draw",
+        # WEBGL_debug_shaders intentionally EXCLUDED (same reason as wgl1).
+        "WEBGL_lose_context", "WEBGL_multi_draw",
     ]
     # ── BPTC texture compression + OVR_multiview2 for newer GPU generations ──
     # Adreno 720+, Mali G610/G710/G715/G720/Immortalis, all Xclipse
@@ -1377,6 +1384,11 @@ try{{Object.defineProperty(navigator,'pdfViewerEnabled',{{get:()=>true}});}}catc
       if(p===3379) return 16384;        // MAX_TEXTURE_SIZE (SwiftShader returns 8192 — wrong)
       if(p===34024)return 16384;        // MAX_RENDERBUFFER_SIZE
       if(p===34076)return 16384;        // MAX_CUBE_MAP_TEXTURE_SIZE
+      if(p===36348)return 15;           // MAX_VARYING_VECTORS (SwiftShader:31, Mali:15)
+      if(p===36349)return 224;          // MAX_FRAGMENT_UNIFORM_VECTORS (SwiftShader:254, Mali:224)
+      if(p===36347)return 256;          // MAX_VERTEX_UNIFORM_VECTORS (SwiftShader:254, Mali:256)
+      if(p===33901)return new Float32Array([1,511]); // ALIASED_POINT_SIZE_RANGE (desktop:[1,8191], mobile:[1,511])
+      if(p===34930)return 8;            // STENCIL_BITS (SwiftShader:0, Mali:8)
       var v=gp.call(this,p);
       if(typeof v==='number'){{var n=(_phash(p)/65535)*_ws*4-_ws*2;return v+n*Math.sign(v||1);}}
       return v;
@@ -1387,7 +1399,19 @@ try{{Object.defineProperty(navigator,'pdfViewerEnabled',{{get:()=>true}});}}catc
       if(extList.indexOf(name)===-1)return null;
       return _origGE.call(this,name);
     }};
-    if(window.__nr){{window.__nr(ctx.prototype.getParameter,'getParameter');window.__nr(ctx.prototype.getSupportedExtensions,'getSupportedExtensions');window.__nr(ctx.prototype.getExtension,'getExtension');}}
+    // getShaderPrecisionFormat — SwiftShader returns wrong precision values vs real Mali GPU.
+    // fingerprint.com reads vertex/fragment HIGH_FLOAT precision to detect VM rendering.
+    // Mali-G78 MP20 (Pixel 6) reference values used here.
+    var _origGSPF=ctx.prototype.getShaderPrecisionFormat;
+    ctx.prototype.getShaderPrecisionFormat=function(st,pt){{
+      var HF=36338,MF=36337,LF=36336,HI=36341,MI=36340,LI=36339;
+      if(pt===HF)return{{rangeMin:127,rangeMax:127,precision:23}};
+      if(pt===MF||pt===LF)return{{rangeMin:15,rangeMax:15,precision:10}};
+      if(pt===HI)return{{rangeMin:31,rangeMax:30,precision:0}};
+      if(pt===MI||pt===LI)return{{rangeMin:15,rangeMax:14,precision:0}};
+      return _origGSPF?_origGSPF.call(this,st,pt):null;
+    }};
+    if(window.__nr){{window.__nr(ctx.prototype.getParameter,'getParameter');window.__nr(ctx.prototype.getSupportedExtensions,'getSupportedExtensions');window.__nr(ctx.prototype.getExtension,'getExtension');window.__nr(ctx.prototype.getShaderPrecisionFormat,'getShaderPrecisionFormat');}}
   }}
   patch(WebGLRenderingContext,_e1);
   if(window.WebGL2RenderingContext)patch(WebGL2RenderingContext,_e2);

@@ -419,7 +419,19 @@ try:
         })
     except Exception:
         pass
-    log("CDP overrides applied (UA, timezone, locale, hwConcurrency, deviceMetrics)")
+    # Emulation.setUserAgentOverride sets navigator.userAgent + navigator.platform
+    # at the CDP emulation level (deeper than Network.setUserAgentOverride).
+    # fingerprint.com compares CDP-level platform against JS-reported platform —
+    # both must agree on "Linux armv8l" to avoid the VM mismatch signal.
+    try:
+        driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
+            "userAgent": UA,
+            "acceptLanguage": "en-US,en;q=0.9",
+            "platform": profile["platform"],
+        })
+    except Exception:
+        pass
+    log("CDP overrides applied (UA, timezone, locale, hwConcurrency, deviceMetrics, emuUA)")
 except Exception as e:
     log(f"CDP override warning (non-fatal): {e}")
 
