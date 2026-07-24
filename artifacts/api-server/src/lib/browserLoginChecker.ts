@@ -1,4 +1,4 @@
-import { execSync, spawn } from "child_process";
+import { execSync, spawn, type ChildProcess } from "child_process";
 import { join } from "path";
 import { generateTOTP } from "./totp.js";
 
@@ -131,6 +131,7 @@ async function checkOneAccount(
   proxy?: string,           // sticky-session URL — used by Chrome
   freshProfile = false,
   proxyForIpCheck?: string, // original URL (no sticky suffix) — used for pre-flight IP fetch via requests
+  killSet?: Set<ChildProcess>, // shared set — caller kills all procs on abort
 ): Promise<BrowserLoginResult> {
   let totpCode: string | null = null;
   if (totpSecret) {
@@ -154,6 +155,10 @@ async function checkOneAccount(
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
+
+    // Register in shared kill-set so the abort handler can SIGKILL this proc
+    // immediately when pause/cancel is requested.
+    killSet?.add(proc);
 
     let stdout = "";
     let stderr = "";
@@ -185,6 +190,7 @@ async function checkOneAccount(
 
     proc.on("close", (code) => {
       clearTimeout(timer);
+      killSet?.delete(proc);
 
       // The Python script prints exactly one JSON line to stdout
       const lastLine = stdout.trim().split("\n").filter(Boolean).pop() ?? "";
@@ -217,6 +223,7 @@ async function checkOneAccount(
 
     proc.on("error", (err) => {
       clearTimeout(timer);
+      killSet?.delete(proc);
       resolve({
         email,
         status: "unknown",
@@ -264,10 +271,20 @@ export async function browserLoginCheck(
     return proxy;
   };
 
+  // Shared set of live Python child processes.
+  // When abort fires (pause/cancel), every in-flight proc is immediately SIGKILLed
+  // so the UI transitions out of "PAUSING…" in seconds rather than waiting up to 3 min.
+  const killSet = new Set<ChildProcess>();
+  const onAbort = () => {
+    for (const p of killSet) {
+      try { p.kill("SIGKILL"); } catch {}
+    }
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+
   const tasks = credentials.map(
     (cred, idx) => async () => {
       // Check abort signal before starting a new account.
-      // Accounts already in-flight will run to completion.
       if (signal?.aborted) {
         const result: BrowserLoginResult = {
           email: cred.email,
@@ -289,7 +306,11 @@ export async function browserLoginCheck(
       console.log(`[BROWSER] ${cred.email} → proxy slot ${proxies && proxies.length > 0 ? (idx % proxies.length) + 1 : "single"} | session=${sessionId} | fresh=${freshProfile}`);
       // Notify frontend that this account is now actively being checked
       onAccountStart?.(cred.email);
-      const result = await checkOneAccount(cred.email, cred.password, cred.totp, assignedProxy, freshProfile, baseProxy).catch(
+      const result = await checkOneAccount(
+        cred.email, cred.password, cred.totp,
+        assignedProxy, freshProfile, baseProxy,
+        killSet,  // pass kill-set so proc is registered for immediate SIGKILL on abort
+      ).catch(
         (err: unknown) => ({
           email: cred.email,
           status: "unknown" as BrowserLoginStatus,
@@ -304,5 +325,11 @@ export async function browserLoginCheck(
       return enriched;
     },
   );
-  return runWithConcurrency(tasks, concurrency);
+
+  try {
+    return await runWithConcurrency(tasks, concurrency);
+  } finally {
+    // Always clean up the abort listener to avoid memory leaks
+    signal?.removeEventListener("abort", onAbort);
+  }
 }

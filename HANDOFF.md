@@ -8,6 +8,58 @@ _Last updated: July 23, 2026 — Session 33_
 _Last updated: July 23, 2026 — Session 38_
 _Last updated: July 23, 2026 — Session 39_
 _Last updated: July 23, 2026 — Session 40_
+_Last updated: July 24, 2026 — Session 41_
+
+---
+
+## Session 41 Changes (July 24, 2026) — Pause Button Fix (stuck on "PAUSING…")
+
+### Problem
+PAUSE button click ke baad UI "PAUSING…" mein hi reh jaata tha — kabhi "PAUSED / READY TO RESUME" tak nahi pahunchta tha.
+
+### Root Cause
+`browserLoginChecker.ts` mein jab `abort()` call hota tha (pause ke liye), sirf **nayi** Python processes spawn hone se rokta tha. Jo processes **pehle se chal rahi thi** (in-flight), unhe kuch nahi hota tha — woh apna poora 3-minute timeout khatam hone ka wait karti thi. Tab tak `paused_done` event nahi aata tha, aur frontend "PAUSING…" dikhata rehta tha.
+
+### Fix (`artifacts/api-server/src/lib/browserLoginChecker.ts`)
+
+**1. `checkOneAccount` — killSet parameter add kiya:**
+```typescript
+async function checkOneAccount(
+  ...,
+  killSet?: Set<ChildProcess>,  // NEW
+): Promise<BrowserLoginResult>
+```
+- Spawn ke turant baad: `killSet?.add(proc)`
+- `close` aur `error` events pe: `killSet?.delete(proc)`
+
+**2. `browserLoginCheck` — abort listener add kiya:**
+```typescript
+const killSet = new Set<ChildProcess>();
+const onAbort = () => {
+  for (const p of killSet) {
+    try { p.kill("SIGKILL"); } catch {}
+  }
+};
+signal?.addEventListener("abort", onAbort, { once: true });
+```
+Ab jab `ctrl.abort()` call hota hai (pause ya cancel pe), **saari in-flight Python processes turant SIGKILL ho jaati hain** — 3 minute wait nahi karna padta.
+
+**3. Cleanup:**
+```typescript
+try {
+  return await runWithConcurrency(tasks, concurrency);
+} finally {
+  signal?.removeEventListener("abort", onAbort);
+}
+```
+
+### Result
+Pause click karo → sabhi chal rahi Python processes turant kill → `paused_done` event aata hai → UI "PAUSED / READY TO RESUME" dikhata hai. **Seconds mein**, 3 minute nahi.
+
+### Files changed
+| File | Change |
+|---|---|
+| `artifacts/api-server/src/lib/browserLoginChecker.ts` | `killSet: Set<ChildProcess>` param added to `checkOneAccount`; abort listener in `browserLoginCheck` kills all in-flight procs on abort |
 
 ---
 
