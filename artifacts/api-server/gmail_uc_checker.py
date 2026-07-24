@@ -1020,12 +1020,22 @@ def get_or_create_fingerprint(profile_dir: str, proxy: str | None = None) -> dic
         fp["geoLocked"] = False
         fp["lat"]       = 37.7749   # San Francisco fallback
         fp["lon"]       = -122.4194
-        fp["timezone"] = random.choice(_RANDOM_TIMEZONES)
-        # Per-account language — varies the Accept-Language header and navigator.languages
-        fp["language"] = random.choice([
-            "en-US", "en-US", "en-US", "en-US",  # weighted — most users are en-US
-            "en-GB", "en-CA", "en-AU", "en-IN",
-        ])
+        # Session 46: If proxy has a US country hint, restrict fallback to US timezones
+        # so geo-lock failures don't produce obviously wrong non-American timestamps.
+        _hint_cc = _proxy_country_hint(proxy) if proxy else ""
+        if _hint_cc == "US":
+            fp["timezone"] = random.choice([
+                "America/New_York", "America/Chicago", "America/Los_Angeles",
+                "America/Denver", "America/Phoenix", "America/Anchorage",
+                "America/Toronto", "America/Vancouver",
+            ])
+            fp["language"] = random.choice(["en-US", "en-US", "en-US", "en-CA"])
+        else:
+            fp["timezone"] = random.choice(_RANDOM_TIMEZONES)
+            fp["language"] = random.choice([
+                "en-US", "en-US", "en-US", "en-US",  # weighted — most users are en-US
+                "en-GB", "en-CA", "en-AU", "en-IN",
+            ])
     # Timezone + language come from geo_lookup_proxy (if proxy provided) or random fallback above.
     # Do NOT override here — let the proxy exit IP determine the locale so Chrome fingerprint
     # matches the IP location (US proxy → America/New_York + en-US, etc.).
@@ -1354,17 +1364,7 @@ try{{var _tz='{tz}';var _dto=Intl.DateTimeFormat;function _dtow(l,o){{o=o||{{}};
 Object.defineProperty(window,'outerWidth',{{get:()=>{fp['screenW']}}});
 Object.defineProperty(window,'outerHeight',{{get:()=>{fp['screenH']}}});
 try{{navigator.vibrate=function(){{return true;}};}}catch(e){{}}
-try{{
-  if(navigator.mediaDevices&&navigator.mediaDevices.enumerateDevices){{
-    var _oED=navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
-    navigator.mediaDevices.enumerateDevices=function(){{
-      return _oED().then(function(r){{
-        if(r&&r.length>0)return r;
-        return[
-          {{deviceId:'{cam_rear_id}',groupId:'{cam_group}',kind:'videoinput',label:'camera2 0, facing back'}},
-          {{deviceId:'{cam_front_id}',groupId:'{cam_group}',kind:'videoinput',label:'camera2 1, facing front'}},
-          {{deviceId:'{mic_id}',groupId:'{mic_group}',kind:'audioinput',label:'Default'}},
-        ];
+
 try{{Object.defineProperty(window,'outerWidth',{{get:()=>{sw}}});}}catch(e){{}}
 try{{Object.defineProperty(window,'outerHeight',{{get:()=>{sh}}});}}catch(e){{}}
 try{{
@@ -1397,9 +1397,10 @@ try{{
   if(navigator.mediaDevices){{
     navigator.mediaDevices.enumerateDevices=function(){{
       return Promise.resolve([
-        {{kind:'audioinput',deviceId:'',groupId:'',label:'',toJSON:function(){{return {{kind:'audioinput',deviceId:'',groupId:'',label:''}};}} }},
-        {{kind:'videoinput',deviceId:'',groupId:'',label:'',toJSON:function(){{return {{kind:'videoinput',deviceId:'',groupId:'',label:''}};}} }},
-        {{kind:'audiooutput',deviceId:'default',groupId:'default',label:'',toJSON:function(){{return {{kind:'audiooutput',deviceId:'default',groupId:'default',label:''}};}} }}
+        {{kind:'videoinput',deviceId:'{cam_rear_id}',groupId:'{cam_group}',label:''}},
+        {{kind:'videoinput',deviceId:'{cam_front_id}',groupId:'{cam_group}',label:''}},
+        {{kind:'audioinput',deviceId:'{mic_id}',groupId:'{mic_group}',label:''}},
+        {{kind:'audiooutput',deviceId:'default',groupId:'{mic_group}',label:''}},
       ]);
     }};
   }}
@@ -1648,6 +1649,7 @@ try{{
   var _pnBase=performance.now.bind(performance);
   var _pnJ=(Math.random()-0.5)*0.4;
   performance.now=function(){{return _pnBase()+_pnJ;}};
+  if(window.__nr)window.__nr(performance.now,'now');
 }}catch(e){{}}
 try{{
   var _geoLat={lat};var _geoLon={lon};
@@ -1985,15 +1987,12 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument(f"--window-size={fp['screenW']},{fp['screenH']}")
     options.add_argument(f"--lang={fp['language']},en;q=0.9")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-save-password-bubble")
-    options.add_argument("--disable-translate")
     options.add_argument("--password-store=basic")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-features=ChromeWhatsNewUI,ChromeReporting,EnablePasswordsAccountStorage,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,MediaRouter")
+    options.add_argument("--disable-features=ChromeWhatsNewUI,EnablePasswordsAccountStorage,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions")
     options.add_argument("--disable-sync")
     options.add_argument("--no-pings")
     # NOTE: --disable-background-networking, --disable-client-side-phishing-detection,
@@ -2003,7 +2002,6 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--disable-component-update")
     options.add_argument("--disable-default-apps")
     options.add_argument("--disable-prompt-on-repost")
-    options.add_argument("--mute-audio")
     options.add_argument(f"--user-agent={MOBILE_UA}")
     options.add_argument("--touch-events=enabled")
     # Match the fingerprint DPR so window.devicePixelRatio equals screen.dpr
