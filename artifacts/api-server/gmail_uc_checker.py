@@ -1248,19 +1248,46 @@ def make_stealth_js(fp: dict) -> str:
   try{{Object.defineProperty(_np,'language',{{get:function(){{return'{lg}';}},configurable:true}});}}catch(e){{}}
   try{{Object.defineProperty(_np,'globalPrivacyControl',{{get:function(){{return undefined;}},configurable:true}});}}catch(e){{}}
 }})();
-try{{Object.defineProperty(navigator,'userLanguage',{{get:()=>'{lg}'}});}}catch(e){{}}
-try{{Object.defineProperty(navigator,'browserLanguage',{{get:()=>'{lg}'}});}}catch(e){{}}
-try{{Object.defineProperty(navigator,'systemLanguage',{{get:()=>'{lg}'}});}}catch(e){{}}
-Object.defineProperty(screen,'width',      {{get:()=>{fp['screenW']}}});
-Object.defineProperty(screen,'height',     {{get:()=>{fp['screenH']}}});
-Object.defineProperty(screen,'availWidth', {{get:()=>{fp['screenW']}}});
-Object.defineProperty(screen,'availHeight',{{get:()=>{fp['availH']}}});
-Object.defineProperty(screen,'colorDepth', {{get:()=>24}});
-Object.defineProperty(screen,'pixelDepth', {{get:()=>24}});
-try{{Object.defineProperty(screen,'isExtended',{{get:()=>false}});}}catch(e){{}}
-Object.defineProperty(window,'devicePixelRatio',{{get:()=>{fp['dpr']}}});
-Object.defineProperty(window,'innerWidth',  {{get:()=>{fp['screenW']}}});
-Object.defineProperty(window,'innerHeight', {{get:()=>{fp['availH']}}});
+// userLanguage / browserLanguage / systemLanguage are IE-only properties.
+// Real Android Chrome 138 does NOT have them. Their presence on navigator
+// is a tampering signal fingerprint.com explicitly checks for — remove them.
+(function(){{
+  // Tampering fix: screen.* must be overridden on Screen.prototype, NOT on the
+  // screen instance. fingerprint.com calls Object.getOwnPropertyDescriptor(screen,'width')
+  // — if that returns anything, it means the property was set on the instance (tampered).
+  // On a real phone the descriptor lives on Screen.prototype, so instance lookup returns undefined.
+  var _sp = Object.getPrototypeOf(screen);
+  function _sd(k,v){{
+    try{{
+      Object.defineProperty(_sp,k,{{get:function(){{return v;}},configurable:true,enumerable:true}});
+      if(window.__nr){{var _d=Object.getOwnPropertyDescriptor(_sp,k);if(_d&&_d.get)window.__nr(_d.get,k,true);}}
+    }}catch(e){{}}
+  }}
+  _sd('width',{fp['screenW']});
+  _sd('height',{fp['screenH']});
+  _sd('availWidth',{fp['screenW']});
+  _sd('availHeight',{fp['availH']});
+  _sd('colorDepth',24);
+  _sd('pixelDepth',24);
+  _sd('availLeft',0);
+  _sd('availTop',0);
+  try{{_sd('isExtended',false);}}catch(e){{}}
+}})();
+(function(){{
+  // Tampering fix: window dimension properties on Window.prototype, not instance.
+  var _wp=Object.getPrototypeOf(window)||Window.prototype;
+  function _wd(k,v){{
+    try{{
+      Object.defineProperty(_wp,k,{{get:function(){{return v;}},configurable:true,enumerable:true}});
+      if(window.__nr){{var _d=Object.getOwnPropertyDescriptor(_wp,k);if(_d&&_d.get)window.__nr(_d.get,k,true);}}
+    }}catch(e){{}}
+  }}
+  _wd('devicePixelRatio',{fp['dpr']});
+  _wd('innerWidth',{fp['screenW']});
+  _wd('innerHeight',{fp['availH']});
+  _wd('outerWidth',{fp['screenW']});
+  _wd('outerHeight',{fp['screenH']});
+}})();
 // maxTouchPoints, platform, vendor, appVersion now set on Navigator.prototype above
 try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable:true}});}}catch(e){{}}
 (function(){{
@@ -1395,12 +1422,7 @@ try{{var _tz='{tz}';var _dto=Intl.DateTimeFormat;function _dtow(l,o){{o=o||{{}};
     window.mozRTCPeerConnection=undefined;
   }}catch(e){{}}
 }})();
-Object.defineProperty(window,'outerWidth',{{get:()=>{fp['screenW']}}});
-Object.defineProperty(window,'outerHeight',{{get:()=>{fp['screenH']}}});
 try{{navigator.vibrate=function(){{return true;}};}}catch(e){{}}
-
-try{{Object.defineProperty(window,'outerWidth',{{get:()=>{sw}}});}}catch(e){{}}
-try{{Object.defineProperty(window,'outerHeight',{{get:()=>{sh}}});}}catch(e){{}}
 try{{
   var _vvp=window.visualViewport;
   if(_vvp){{
@@ -1439,8 +1461,7 @@ try{{
     }};
   }}
 }}catch(e){{}}
-try{{Object.defineProperty(screen,'availLeft',{{get:()=>0}});}}catch(e){{}}
-try{{Object.defineProperty(screen,'availTop',{{get:()=>0}});}}catch(e){{}}
+// screen.availLeft / availTop now on Screen.prototype via _sd() above
 try{{Object.defineProperty(navigator,'javaEnabled',{{value:function(){{return false;}},writable:false,configurable:true}});}}catch(e){{}}
 try{{
   var _origMimeTypes=navigator.mimeTypes;
@@ -1524,6 +1545,16 @@ try{{
       if(s==='(overflow-block:scroll)')return _mmr(q,true);
       if(s==='(overflow-block:optional-paged)')return _mmr(q,false);
       if(s==='(overflow-inline:scroll)')return _mmr(q,true);
+      // VM detection fix: resolution/dpi media queries — spoof to match device DPI.
+      // CSS resolution = devicePixelRatio × 96 dpi (standard CSS definition).
+      // Pixel 6 DPR=2.625 → ~252dpi. VM default would return real display DPI (~96).
+      if(s.indexOf('resolution')!==-1){{
+        var _dpiExpected=Math.round({fp['dpr']}*96);
+        var _mDpi=s.match(/([0-9]+(?:\.[0-9]*)?)dpi/);
+        if(_mDpi)return _mmr(q,Math.abs(parseFloat(_mDpi[1])-_dpiExpected)<30);
+        var _mDppx=s.match(/([0-9]+(?:\.[0-9]*)?)dppx/);
+        if(_mDppx)return _mmr(q,Math.abs(parseFloat(_mDppx[1])-{fp['dpr']})<0.15);
+      }}
       return _omm(q);
     }};
     if(window.__nr)window.__nr(window.matchMedia,'matchMedia');
@@ -1753,9 +1784,20 @@ try{{
     'cdc_adoQpoasnfa76pfcZLmcfl_Array',
     'cdc_adoQpoasnfa76pfcZLmcfl_Promise',
     'cdc_adoQpoasnfa76pfcZLmcfl_Symbol',
-    '__webdriverio_element','webdriverio'
+    '__webdriverio_element','webdriverio',
+    'domAutomation','domAutomationController',
+    '__lastWatirPrompt','_WEBDRIVER_ELEM_CACHE'
   ];
   _bad.forEach(function(k){{try{{delete window[k];}}catch(e){{}}try{{delete document[k];}}catch(e){{}}}});
+  // Dynamic scan: UC Chrome 138 renames $cdc_ to a version-specific hash.
+  // Delete ANY property whose name starts with 'cdc_' or '$cdc_' regardless of suffix.
+  try{{
+    Object.keys(window).forEach(function(k){{
+      if(k.startsWith('cdc_')||k.startsWith('$cdc_')){{
+        try{{delete window[k];}}catch(e){{}}
+      }}
+    }});
+  }}catch(e){{}}
   // Patch Error so stack traces never leak DevTools Protocol paths
   try{{
     var _origErr=Error;
@@ -1777,6 +1819,24 @@ try{{
     if(window.chrome&&window.chrome.runtime)
       Object.defineProperty(window.chrome.runtime,'id',{{get:function(){{return undefined;}},configurable:true}});
   }}catch(e){{}}
+  // Dev-tools fix: Selenium/WebDriver sets a 'webdriver' attribute on <html>.
+  // fingerprint.com reads document.documentElement.getAttribute('webdriver').
+  // Remove it immediately and watch for re-injection via MutationObserver.
+  try{{
+    document.documentElement.removeAttribute('webdriver');
+    if(window.MutationObserver){{
+      var _mo=new MutationObserver(function(muts){{
+        muts.forEach(function(m){{
+          if(m.type==='attributes'&&m.attributeName==='webdriver'){{
+            document.documentElement.removeAttribute('webdriver');
+          }}
+        }});
+      }});
+      _mo.observe(document.documentElement,{{attributes:true,attributeFilter:['webdriver']}});
+    }}
+  }}catch(e){{}}
+  // Prevent document-level webdriver property exposure
+  try{{Object.defineProperty(document,'__webdriver_script_fn',{{get:function(){{return undefined;}},configurable:true}});}}catch(e){{}}
 }})();
 """
 

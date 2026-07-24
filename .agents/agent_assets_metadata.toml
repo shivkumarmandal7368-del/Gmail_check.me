@@ -1,0 +1,20 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "1Wc0JGGdNdKYCXoEIh8xL"
+uri = "file://dc_1_homepage.png"
+type = "image"
+title = "Score — Homepage"
+
+[[outputs]]
+id = "gx6UCih-At-oDdRRWjRlW"
+uri = "file://dc_2_breakdown.png"
+type = "image"
+title = "Score — Breakdown"
+
+[[outputs]]
+id = "UpdEjq8DA7sQoAeD4_Lbb"
+uri = "file://dc_3_scrolled.png"
+type = "image"
+title = "Score — Breakdown Scrolled"

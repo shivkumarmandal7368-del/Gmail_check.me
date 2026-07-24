@@ -447,47 +447,95 @@ except Exception as e:
     xvfb.terminate()
     sys.exit(1)
 
-log("Waiting 14s for fingerprint widget to fully render...")
-time.sleep(14)
+log("Waiting 16s for fingerprint widget to fully render...")
+time.sleep(16)
 
-# Screenshot 1 — homepage with score
+# Screenshot 1 — homepage with score visible
 driver.get_screenshot_as_file("/tmp/dc_1_homepage.png")
 emit_screenshot("/tmp/dc_1_homepage.png", "homepage")
 
-# ── Click "See how this is calculated" ────────────────────────────────────────
-calculated_els = driver.find_elements(By.XPATH, "//*[contains(text(),'calculated')]")
-log(f"Found {len(calculated_els)} element(s) with 'calculated'")
+# ── Click the Suspect Score expand button to open the breakdown ───────────────
+# fingerprint.com renders a score card with an expand/arrow button (↗).
+# Try several selectors in priority order until one works.
+clicked = False
 
-if calculated_els:
-    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", calculated_els[0])
-    time.sleep(1)
-    driver.execute_script("arguments[0].click();", calculated_els[0])
-    log("Clicked 'See how this is calculated' — waiting 10s...")
-    time.sleep(10)
-    driver.get_screenshot_as_file("/tmp/dc_2_breakdown.png")
-    emit_screenshot("/tmp/dc_2_breakdown.png", "breakdown")
-else:
-    log("WARNING: 'calculated' element not found — saving fallback screenshot")
-    driver.get_screenshot_as_file("/tmp/dc_2_breakdown.png")
-    emit_screenshot("/tmp/dc_2_breakdown.png", "breakdown")
+def _try_click(driver, label, js_finder):
+    """Run js_finder to get an element, scroll it into view, click it. Returns True on success."""
+    try:
+        el = driver.execute_script(js_finder)
+        if not el:
+            return False
+        driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'instant'});", el)
+        time.sleep(0.5)
+        driver.execute_script("arguments[0].click();", el)
+        log(f"Clicked via: {label}")
+        return True
+    except Exception as ex:
+        log(f"Click attempt '{label}' failed: {ex}")
+        return False
 
-# ── Scroll and third screenshot ────────────────────────────────────────────────
-# The breakdown panel is a modal/overlay with its own scroll container.
-# Scroll every scrollable element to the bottom, then scroll the window too,
-# so the 3rd screenshot shows content that was hidden below the fold.
+# 1. The small expand / arrow button that sits inside the Suspect Score card
+clicked = _try_click(driver, "expand-svg-button",
+    "var btns=document.querySelectorAll('button,a,[role=button]');"
+    "for(var i=0;i<btns.length;i++){"
+    "  var t=btns[i].innerText||''; var h=btns[i].innerHTML||'';"
+    "  if(t.includes('Suspect')||h.includes('Suspect')){return btns[i];}"
+    "} return null;")
+
+if not clicked:
+    # 2. Any element whose text contains "Suspect Score"
+    clicked = _try_click(driver, "suspect-score-text",
+        "var all=document.querySelectorAll('*');"
+        "for(var i=0;i<all.length;i++){"
+        "  if((all[i].childElementCount===0||all[i].tagName==='SPAN'||all[i].tagName==='DIV')"
+        "  &&all[i].innerText&&all[i].innerText.trim().startsWith('Suspect Score')){return all[i];}"
+        "} return null;")
+
+if not clicked:
+    # 3. Fallback — any element containing "calculated"
+    clicked = _try_click(driver, "calculated-text",
+        "var all=document.querySelectorAll('*');"
+        "for(var i=0;i<all.length;i++){"
+        "  if(all[i].childElementCount===0&&all[i].innerText&&"
+        "  all[i].innerText.toLowerCase().includes('calculated')){return all[i];}"
+        "} return null;")
+
+if not clicked:
+    log("WARNING: could not find a clickable score element — taking fallback screenshot")
+
+log("Waiting 10s for breakdown panel to open...")
+time.sleep(10)
+
+# Screenshot 2 — after clicking the score badge (breakdown panel should be open)
+driver.get_screenshot_as_file("/tmp/dc_2_breakdown.png")
+emit_screenshot("/tmp/dc_2_breakdown.png", "breakdown")
+
+# ── Screenshot 3 — scroll INSIDE the breakdown panel (not the whole page) ────
+# The breakdown is a floating card / modal with its own scroll container.
+# Scroll only that container so we see the individual signal rows, not the footer.
 driver.execute_script("""
-    // Scroll all overflow containers to the bottom
+    // Find the deepest scroll container that is NOT the body/html/documentElement
+    // and that has scrollable overflow — this is the breakdown panel.
+    var best = null;
+    var bestH = 0;
     var all = document.querySelectorAll('*');
     for (var i = 0; i < all.length; i++) {
         var el = all[i];
+        if (el === document.body || el === document.documentElement) continue;
         var st = window.getComputedStyle(el);
-        var overflow = st.overflowY || st.overflow;
-        if ((overflow === 'scroll' || overflow === 'auto') && el.scrollHeight > el.clientHeight) {
-            el.scrollTop = el.scrollHeight;
+        var ov = st.overflowY || st.overflow;
+        if ((ov === 'scroll' || ov === 'auto') && el.scrollHeight > el.clientHeight + 10) {
+            // Prefer the tallest scrollable container (the panel, not tiny dropdowns)
+            if (el.scrollHeight > bestH) { best = el; bestH = el.scrollHeight; }
         }
     }
-    // Also scroll the main window to the bottom
-    window.scrollTo(0, document.body.scrollHeight);
+    if (best) {
+        best.scrollTop = best.scrollHeight;
+    } else {
+        // No inner scroll container found — scroll the window modestly
+        // (avoid going to the footer by capping at 600px)
+        window.scrollBy(0, 600);
+    }
 """)
 time.sleep(3)
 driver.get_screenshot_as_file("/tmp/dc_3_scrolled.png")
