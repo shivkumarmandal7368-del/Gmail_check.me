@@ -1578,7 +1578,18 @@ function BrowserChecker() {
                                 {/* Hardware */}
                                 <div className="text-green-400/70">CPU {fd.hwConcurrency}c · RAM {fd.deviceMemory}GB · Touch {fd.maxTouchPoints}pt</div>
                                 {/* Locale */}
-                                <div className="text-yellow-400/70">{fd.language} · {fd.timezone}</div>
+                                <div className="text-yellow-400/70 flex items-center gap-1 flex-wrap">
+                                  <span>{fd.language} · {fd.timezone}</span>
+                                  {fd.geoLocked === false && (
+                                    <span
+                                      title="Timezone NOT geo-locked — may not match proxy exit IP. Run again or enable Fresh Device to fix."
+                                      className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded bg-yellow-500/20 text-yellow-400 text-[9px] font-bold cursor-help"
+                                    >
+                                      <AlertTriangle className="w-2.5 h-2.5" />
+                                      TZ?
+                                    </span>
+                                  )}
+                                </div>
                                 {/* Battery + Network */}
                                 <div className="text-orange-400/70">
                                   {bat}{dtH ? ` (${dtH} left)` : ""} · {fd.connectionDownlink}Mbps {fd.connectionRtt}ms

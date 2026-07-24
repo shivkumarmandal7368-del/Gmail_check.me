@@ -13,6 +13,40 @@ _Last updated: July 24, 2026 — Session 42_
 _Last updated: July 24, 2026 — Session 43_
 _Last updated: July 24, 2026 — Session 44_
 _Last updated: July 24, 2026 — Session 45_
+_Last updated: July 24, 2026 — Session 46_
+
+---
+
+## Session 46 Changes (July 24, 2026) — Geo-lock warning badge in fingerprint column
+
+### Problem
+When `geo_lookup_proxy()` fails and a random timezone is assigned (`geoLocked=False`), users had no visible signal in the results table — they'd have to open the FINGERPRINT tab per account to spot mismatches. Accounts running with a non-matching timezone could pass unnoticed.
+
+### Fix (`artifacts/gmail-checker/src/pages/home.tsx`)
+
+In the FINGERPRINT column's locale row (where `{fd.language} · {fd.timezone}` is displayed), added a conditional yellow badge when `fd.geoLocked === false`:
+
+```tsx
+{fd.geoLocked === false && (
+  <span
+    title="Timezone NOT geo-locked — may not match proxy exit IP. Run again or enable Fresh Device to fix."
+    className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded bg-yellow-500/20 text-yellow-400 text-[9px] font-bold cursor-help"
+  >
+    <AlertTriangle className="w-2.5 h-2.5" />
+    TZ?
+  </span>
+)}
+```
+
+- `AlertTriangle` was already imported from lucide-react — no new imports needed
+- Badge shows only when `geoLocked === false` (geo lookup failed, random timezone used)
+- Hovering the badge shows the full tooltip explaining the issue and how to fix it
+- Accounts with `geoLocked === true` (normal case) are unaffected — no badge shown
+
+### Files changed
+| File | Change |
+|---|---|
+| `artifacts/gmail-checker/src/pages/home.tsx` | Geo-lock warning badge added to fingerprint column locale row |
 
 ---
 
