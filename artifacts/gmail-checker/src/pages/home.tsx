@@ -1691,15 +1691,49 @@ function BrowserChecker() {
 }
 
 /* ───────────────────────── DEVICE CHECKER ───────────────────────── */
-function DeviceChecker() {
-  const [status, setStatus]       = useState<"idle"|"running"|"done"|"error">("idle");
-  const [logs,   setLogs]         = useState<string[]>([]);
-  const [shots,  setShots]        = useState<{ label: string; b64: string }[]>([]);
-  const [errMsg, setErrMsg]       = useState("");
-  const abortRef                  = useRef<AbortController | null>(null);
-  const logEndRef                 = useRef<HTMLDivElement | null>(null);
+// Device profiles list — must match PHONE_PROFILES order in gmail_uc_checker.py
+const DEVICE_PROFILES = [
+  { index: 0,  label: "Pixel 6",              sub: "Android 14 · Mali-G78 MP20" },
+  { index: 1,  label: "Pixel 6a",             sub: "Android 14 · Mali-G78 MP20" },
+  { index: 2,  label: "Pixel 7",              sub: "Android 14 · Adreno 730" },
+  { index: 3,  label: "Pixel 7a",             sub: "Android 14 · Mali-G710 MP7" },
+  { index: 4,  label: "Pixel 8",              sub: "Android 14 · Adreno 740" },
+  { index: 5,  label: "Pixel 8 Pro",          sub: "Android 14 · Adreno 740" },
+  { index: 6,  label: "Pixel 9",              sub: "Android 15 · Mali-G715 MP7" },
+  { index: 7,  label: "Pixel 9 Pro",          sub: "Android 15 · Mali-G715 MP7" },
+  { index: 8,  label: "Samsung Galaxy S21",   sub: "Android 14 · Mali-G78 MP14" },
+  { index: 9,  label: "Samsung Galaxy S22",   sub: "Android 14 · Xclipse 920" },
+  { index: 10, label: "Samsung Galaxy S22 Ultra", sub: "Android 14 · Xclipse 920" },
+  { index: 11, label: "Samsung Galaxy S23",   sub: "Android 14 · Adreno 740" },
+  { index: 12, label: "Samsung Galaxy S23 FE",sub: "Android 14 · Xclipse 920" },
+  { index: 13, label: "Samsung Galaxy S24+",  sub: "Android 14 · Xclipse 940" },
+  { index: 14, label: "Samsung Galaxy A53",   sub: "Android 14 · Mali-G68" },
+  { index: 15, label: "Samsung Galaxy A54",   sub: "Android 14 · Mali-G68" },
+  { index: 16, label: "Samsung Galaxy A34",   sub: "Android 14 · Mali-G68" },
+  { index: 17, label: "Samsung Galaxy A73",   sub: "Android 14 · Adreno 619" },
+  { index: 18, label: "OnePlus 11",           sub: "Android 14 · Adreno 740" },
+  { index: 19, label: "OnePlus 12",           sub: "Android 14 · Adreno 750" },
+  { index: 20, label: "OnePlus Nord 3",       sub: "Android 14 · Mali-G710" },
+  { index: 21, label: "Xiaomi 13",            sub: "Android 14 · Adreno 740" },
+  { index: 22, label: "Xiaomi 14",            sub: "Android 14 · Adreno 750" },
+  { index: 23, label: "Xiaomi 13T Pro",       sub: "Android 14 · Dimensity 9200+" },
+  { index: 24, label: "Redmi Note 12 Pro",    sub: "Android 13 · Mali-G68" },
+  { index: 25, label: "Realme GT 5",          sub: "Android 14 · Adreno 740" },
+  { index: 26, label: "Nothing Phone 2",      sub: "Android 14 · Adreno 730" },
+  { index: 27, label: "Motorola Edge 40",     sub: "Android 14 · Mali-G715" },
+];
 
-  // Auto-scroll logs
+function DeviceChecker() {
+  const [deviceIndex,  setDeviceIndex]  = useState(0);
+  const [proxyText,    setProxyText]    = useState("");
+  const [proxyMode,    setProxyMode]    = useState<"secret"|"custom">("secret");
+  const [status,       setStatus]       = useState<"idle"|"running"|"done"|"error">("idle");
+  const [logs,         setLogs]         = useState<string[]>([]);
+  const [shots,        setShots]        = useState<{ label: string; b64: string }[]>([]);
+  const [errMsg,       setErrMsg]       = useState("");
+  const abortRef  = useRef<AbortController | null>(null);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
 
   const runCheck = async () => {
@@ -1713,8 +1747,13 @@ function DeviceChecker() {
     abortRef.current = abort;
 
     try {
+      const body: Record<string, unknown> = { deviceIndex };
+      if (proxyMode === "custom" && proxyText.trim()) body.proxy = proxyText.trim();
+
       const resp = await fetch("/api/device-check/run", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
         signal: abort.signal,
       });
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
@@ -1729,36 +1768,26 @@ function DeviceChecker() {
         buf += decoder.decode(value, { stream: true });
         const blocks = buf.split("\n\n"); buf = blocks.pop() ?? "";
         for (const block of blocks) {
-          const lines = block.split("\n");
+          const lines     = block.split("\n");
           const eventLine = lines.find(l => l.startsWith("event: "));
           const dataLine  = lines.find(l => l.startsWith("data: "));
           if (!eventLine || !dataLine) continue;
           const event = eventLine.slice(7).trim();
           const data  = dataLine.slice(6);
-
           if (event === "log") {
             try { setLogs(p => [...p, JSON.parse(data)]); } catch { setLogs(p => [...p, data]); }
           } else if (event === "screenshot") {
-            // data = "label:base64"
-            const colonIdx = data.indexOf(":");
-            if (colonIdx !== -1) {
-              const label = data.slice(0, colonIdx);
-              const b64   = data.slice(colonIdx + 1);
-              setShots(p => [...p, { label, b64 }]);
-            }
+            const ci = data.indexOf(":");
+            if (ci !== -1) setShots(p => [...p, { label: data.slice(0, ci), b64: data.slice(ci + 1) }]);
           } else if (event === "done") {
             setStatus("done");
           } else if (event === "error") {
-            let msg = data;
-            try { msg = JSON.parse(data); } catch {}
-            setErrMsg(msg);
-            setStatus("error");
-          } else if (event === "close") {
-            // stream ended
+            let msg = data; try { msg = JSON.parse(data); } catch {}
+            setErrMsg(msg); setStatus("error");
           }
         }
       }
-      if (status !== "error") setStatus("done");
+      setStatus(s => s === "error" ? s : "done");
     } catch (err: any) {
       if (err?.name === "AbortError") return;
       setErrMsg(err?.message ?? "Unknown error");
@@ -1773,76 +1802,136 @@ function DeviceChecker() {
   };
 
   const shotLabels: Record<string, string> = {
-    homepage:  "1 · Homepage (Suspect Score)",
-    breakdown: "2 · Score Breakdown Panel",
-    scrolled:  "3 · Breakdown (Scrolled)",
+    homepage:  "① Homepage — Suspect Score",
+    breakdown: "② Score Breakdown Panel",
+    scrolled:  "③ Breakdown (Scrolled)",
   };
+
+  const selectedDevice = DEVICE_PROFILES[deviceIndex] ?? DEVICE_PROFILES[0];
 
   return (
     <div className="space-y-4">
-      {/* Header card */}
-      <Card className="bg-card/60 border-border">
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between flex-wrap gap-3">
-            <div className="flex items-center gap-3">
-              <div className="bg-purple-500/10 p-2 rounded-lg border border-purple-500/20">
-                <ShieldAlert className="w-5 h-5 text-purple-400" />
+      {/* Config + action row */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+        {/* Device selector */}
+        <Card className="bg-card/60 border-border">
+          <CardHeader className="pb-2 pt-4 px-4">
+            <div className="flex items-center gap-2">
+              <Smartphone className="w-4 h-4 text-purple-400" />
+              <span className="text-xs font-mono font-semibold tracking-widest text-muted-foreground uppercase">Device Profile</span>
+            </div>
+          </CardHeader>
+          <CardContent className="px-4 pb-4 space-y-2">
+            <select
+              disabled={status === "running"}
+              value={deviceIndex}
+              onChange={e => setDeviceIndex(Number(e.target.value))}
+              className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50 disabled:opacity-50"
+            >
+              {DEVICE_PROFILES.map(d => (
+                <option key={d.index} value={d.index}>{d.label}</option>
+              ))}
+            </select>
+            <p className="text-[11px] font-mono text-muted-foreground/70 pl-1">
+              {selectedDevice.sub} · Chrome 138
+            </p>
+          </CardContent>
+        </Card>
+
+        {/* Proxy input */}
+        <Card className="bg-card/60 border-border">
+          <CardHeader className="pb-2 pt-4 px-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Globe className="w-4 h-4 text-purple-400" />
+                <span className="text-xs font-mono font-semibold tracking-widest text-muted-foreground uppercase">Proxy</span>
               </div>
-              <div>
-                <CardTitle className="text-base font-mono">DEVICE CHECK</CardTitle>
-                <p className="text-xs text-muted-foreground font-mono mt-0.5">
-                  Pixel 6 · Android 14 · Chrome 138 · fingerprint.com suspect score
+              <div className="flex items-center gap-1 text-[11px] font-mono">
+                <button
+                  onClick={() => setProxyMode("secret")}
+                  disabled={status === "running"}
+                  className={cn(
+                    "px-2 py-0.5 rounded border transition-colors",
+                    proxyMode === "secret"
+                      ? "bg-purple-600/20 border-purple-500/40 text-purple-300"
+                      : "border-transparent text-muted-foreground hover:text-foreground"
+                  )}>Secret</button>
+                <button
+                  onClick={() => setProxyMode("custom")}
+                  disabled={status === "running"}
+                  className={cn(
+                    "px-2 py-0.5 rounded border transition-colors",
+                    proxyMode === "custom"
+                      ? "bg-purple-600/20 border-purple-500/40 text-purple-300"
+                      : "border-transparent text-muted-foreground hover:text-foreground"
+                  )}>Custom</button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="px-4 pb-4">
+            {proxyMode === "secret" ? (
+              <div className="flex items-center gap-2 h-[68px] text-xs font-mono text-muted-foreground/70 bg-muted/20 rounded-md border border-border px-3">
+                <Lock className="w-3.5 h-3.5 opacity-50 shrink-0" />
+                <span>Using <span className="text-purple-400">Proxy</span> secret from Replit environment</span>
+              </div>
+            ) : (
+              <div className="space-y-1">
+                <Textarea
+                  disabled={status === "running"}
+                  value={proxyText}
+                  onChange={e => setProxyText(e.target.value)}
+                  placeholder="http://user:pass@host:port"
+                  className="font-mono text-xs h-[58px] resize-none bg-background border-border placeholder:text-muted-foreground/40"
+                />
+                <p className="text-[10px] font-mono text-muted-foreground/50 pl-1">
+                  Overrides the Proxy secret for this run only
                 </p>
               </div>
-            </div>
-            <div className="flex items-center gap-2">
-              {status === "running" && (
-                <Badge variant="outline" className="font-mono text-[10px] border-blue-500/40 text-blue-400 bg-blue-400/10 flex items-center gap-1">
-                  <Loader2 className="w-3 h-3 animate-spin" /> RUNNING
-                </Badge>
-              )}
-              {status === "done" && (
-                <Badge variant="outline" className="font-mono text-[10px] border-green-500/40 text-green-400 bg-green-400/10 flex items-center gap-1">
-                  <CheckCircle2 className="w-3 h-3" /> DONE
-                </Badge>
-              )}
-              {status === "error" && (
-                <Badge variant="outline" className="font-mono text-[10px] border-red-500/40 text-red-400 bg-red-400/10 flex items-center gap-1">
-                  <XCircle className="w-3 h-3" /> ERROR
-                </Badge>
-              )}
-              {status === "running" ? (
-                <Button size="sm" variant="outline" onClick={stopCheck}
-                  className="font-mono text-xs border-red-500/40 text-red-400 hover:bg-red-500/10">
-                  STOP
-                </Button>
-              ) : (
-                <Button size="sm" onClick={runCheck}
-                  className="font-mono text-xs bg-purple-600 hover:bg-purple-700 text-white">
-                  {status === "idle" ? "RUN CHECK" : "RUN AGAIN"}
-                </Button>
-              )}
-            </div>
-          </div>
-        </CardHeader>
+            )}
+          </CardContent>
+        </Card>
+      </div>
 
-        <CardContent className="pt-0 space-y-1 pb-3">
-          <p className="text-xs text-muted-foreground font-mono leading-relaxed">
-            Opens <span className="text-purple-400">fingerprint.com</span> using the same browser setup as the Gmail checker (Pixel 6 profile + proxy + CDP overrides),
-            clicks "See how this is calculated", and returns screenshots so you can see the suspect score.
-          </p>
-          {status === "idle" && logs.length === 0 && (
-            <p className="text-xs text-muted-foreground/50 font-mono pt-1">
-              ⚠ This takes ~50s — Chrome launches in the background with Xvfb.
-            </p>
-          )}
-        </CardContent>
-      </Card>
+      {/* Run button row */}
+      <div className="flex items-center gap-3">
+        {status === "running" ? (
+          <Button variant="outline" onClick={stopCheck}
+            className="font-mono text-xs border-red-500/40 text-red-400 hover:bg-red-500/10">
+            STOP
+          </Button>
+        ) : (
+          <Button onClick={runCheck}
+            className="font-mono text-xs bg-purple-600 hover:bg-purple-700 text-white px-6">
+            {status === "idle" ? "▶ RUN CHECK" : "▶ RUN AGAIN"}
+          </Button>
+        )}
+        {status === "running" && (
+          <Badge variant="outline" className="font-mono text-[10px] border-blue-500/40 text-blue-400 bg-blue-400/10 flex items-center gap-1">
+            <Loader2 className="w-3 h-3 animate-spin" /> RUNNING — ~50s
+          </Badge>
+        )}
+        {status === "done" && (
+          <Badge variant="outline" className="font-mono text-[10px] border-green-500/40 text-green-400 bg-green-400/10 flex items-center gap-1">
+            <CheckCircle2 className="w-3 h-3" /> DONE
+          </Badge>
+        )}
+        {status === "error" && (
+          <Badge variant="outline" className="font-mono text-[10px] border-red-500/40 text-red-400 bg-red-400/10 flex items-center gap-1">
+            <XCircle className="w-3 h-3" /> ERROR
+          </Badge>
+        )}
+        {status === "idle" && logs.length === 0 && (
+          <span className="text-xs text-muted-foreground/40 font-mono">
+            Chrome opens in the background with Xvfb — takes ~50s
+          </span>
+        )}
+      </div>
 
-      {/* Main content — logs + screenshots */}
+      {/* Logs + Screenshots */}
       {(logs.length > 0 || shots.length > 0) && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {/* Log terminal */}
+          {/* Terminal */}
           <Card className="bg-card/40 border-border">
             <CardHeader className="py-2 px-4 border-b border-border">
               <span className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">
@@ -1850,13 +1939,12 @@ function DeviceChecker() {
               </span>
             </CardHeader>
             <CardContent className="p-0">
-              <div className="h-[340px] overflow-y-auto bg-black/40 rounded-b-lg p-3 font-mono text-xs space-y-0.5">
+              <div className="h-[380px] overflow-y-auto bg-black/40 rounded-b-lg p-3 font-mono text-xs space-y-0.5">
                 {logs.map((line, i) => (
-                  <div key={i} className={cn(
-                    "leading-relaxed",
+                  <div key={i} className={cn("leading-relaxed",
                     line.startsWith("WARNING") ? "text-yellow-400" :
                     line.startsWith("[stderr]") ? "text-orange-400" :
-                    line.includes("✓") || line.includes("Done") || line.includes("DONE") ? "text-green-400" :
+                    line.includes("✓") || line.includes("Done") || line.includes("cleanly") ? "text-green-400" :
                     line.startsWith("ERROR") ? "text-red-400" :
                     "text-slate-300"
                   )}>
@@ -1870,9 +1958,7 @@ function DeviceChecker() {
                     <span className="animate-pulse">running…</span>
                   </div>
                 )}
-                {errMsg && (
-                  <div className="text-red-400 pt-1">❌ {errMsg}</div>
-                )}
+                {errMsg && <div className="text-red-400 pt-1">❌ {errMsg}</div>}
                 <div ref={logEndRef} />
               </div>
             </CardContent>
@@ -1882,27 +1968,29 @@ function DeviceChecker() {
           <Card className="bg-card/40 border-border">
             <CardHeader className="py-2 px-4 border-b border-border">
               <span className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">
-                <Activity className="w-3 h-3 inline mr-1 opacity-60" />Screenshots
+                <Activity className="w-3 h-3 inline mr-1 opacity-60" />Screenshots — {selectedDevice.label}
               </span>
             </CardHeader>
-            <CardContent className="p-3 space-y-3 max-h-[340px] overflow-y-auto">
+            <CardContent className="p-3 space-y-3 h-[380px] overflow-y-auto">
               {shots.length === 0 ? (
-                <div className="h-[280px] flex items-center justify-center text-muted-foreground/40 font-mono text-xs">
-                  {status === "running" ? (
-                    <span className="flex items-center gap-2">
-                      <Loader2 className="w-4 h-4 animate-spin" /> Waiting for screenshots…
-                    </span>
-                  ) : "No screenshots yet"}
+                <div className="h-full flex items-center justify-center text-muted-foreground/40 font-mono text-xs">
+                  {status === "running"
+                    ? <span className="flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Waiting for screenshots…</span>
+                    : "No screenshots yet"}
                 </div>
               ) : shots.map((shot, i) => (
                 <div key={i} className="space-y-1">
-                  <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">
+                  <p className="text-[10px] font-mono text-purple-400 uppercase tracking-wider">
                     {shotLabels[shot.label] ?? shot.label}
                   </p>
                   <img
                     src={`data:image/png;base64,${shot.b64}`}
                     alt={shot.label}
-                    className="w-full rounded-md border border-border shadow-sm"
+                    className="w-full rounded-md border border-border shadow-sm cursor-pointer hover:opacity-90 transition-opacity"
+                    onClick={() => {
+                      const w = window.open(); 
+                      if (w) w.document.write(`<img src="data:image/png;base64,${shot.b64}" style="max-width:100%">`);
+                    }}
                   />
                 </div>
               ))}
@@ -1911,13 +1999,15 @@ function DeviceChecker() {
         </div>
       )}
 
-      {/* Empty / ready state */}
+      {/* Empty state */}
       {status === "idle" && logs.length === 0 && (
         <Card className="bg-card/20 border-border border-dashed">
-          <CardContent className="py-16 flex flex-col items-center justify-center gap-3 text-muted-foreground/50">
+          <CardContent className="py-14 flex flex-col items-center justify-center gap-3 text-muted-foreground/40">
             <ShieldAlert className="w-10 h-10 opacity-30" />
-            <p className="font-mono text-sm">Click RUN CHECK to start the audit</p>
-            <p className="font-mono text-xs opacity-60">fingerprint.com will open in a headless Pixel 6 browser</p>
+            <p className="font-mono text-sm">Select a device, configure proxy, then click RUN CHECK</p>
+            <p className="font-mono text-xs opacity-70">
+              fingerprint.com opens in a headless {selectedDevice.label} browser
+            </p>
           </CardContent>
         </Card>
       )}

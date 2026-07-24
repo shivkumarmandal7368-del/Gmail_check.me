@@ -1,29 +1,71 @@
 /**
- * /api/device-check — Fingerprint.com audit via browser (Pixel 6 + proxy).
+ * /api/device-check — Fingerprint.com audit via browser.
  *
  * POST /api/device-check/run
- *   Opens fingerprint.com exactly like the browser checker, takes 3 screenshots,
- *   streams progress + screenshots back to the caller via SSE.
+ *   Body (JSON, optional):
+ *     deviceIndex  number  — index into PHONE_PROFILES (0 = Pixel 6, default)
+ *     proxy        string  — proxy URL; overrides the Proxy secret if provided
  *
- * SSE event types:
- *   log        — data: JSON string (progress message)
- *   screenshot — data: "<label>:<base64png>"
- *   done       — data: "{}"
- *   error      — data: JSON string (fatal message)
- *   close      — data: JSON { code: number }
+ * Response: SSE stream
+ *   event: log        data: JSON string
+ *   event: screenshot data: "<label>:<base64png>"
+ *   event: done       data: "{}"
+ *   event: error      data: JSON string
+ *   event: close      data: JSON { code: number }
+ *
+ * GET /api/device-check/profiles
+ *   Returns JSON array of all device profiles with index + display label.
  */
 
 import { Router } from "express";
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import { join } from "path";
 
 const router = Router();
 
-// Location of the Python audit script (same dir as gmail_uc_checker.py)
 const SCRIPT = join(__dirname, "..", "device_check.py");
 
+// Friendly display labels matching PHONE_PROFILES order in gmail_uc_checker.py
+const DEVICE_LABELS: string[] = [
+  "Pixel 6 · Android 14 · Mali-G78",
+  "Pixel 6a · Android 14 · Mali-G78",
+  "Pixel 7 · Android 14 · Adreno 730",
+  "Pixel 7a · Android 14 · Mali-G710",
+  "Pixel 8 · Android 14 · Adreno 740",
+  "Pixel 8 Pro · Android 14 · Adreno 740",
+  "Pixel 9 · Android 15 · Mali-G715",
+  "Pixel 9 Pro · Android 15 · Mali-G715",
+  "Samsung Galaxy S21 · Android 14 · Mali-G78",
+  "Samsung Galaxy S22 · Android 14 · Xclipse 920",
+  "Samsung Galaxy S22 Ultra · Android 14 · Xclipse 920",
+  "Samsung Galaxy S23 · Android 14 · Adreno 740",
+  "Samsung Galaxy S23 FE · Android 14 · Xclipse 920",
+  "Samsung Galaxy S24+ · Android 14 · Xclipse 940",
+  "Samsung Galaxy A53 · Android 14 · Mali-G68",
+  "Samsung Galaxy A54 · Android 14 · Mali-G68",
+  "Samsung Galaxy A34 · Android 14 · Mali-G68",
+  "Samsung Galaxy A73 · Android 14 · Adreno 619",
+  "OnePlus 11 · Android 14 · Adreno 740",
+  "OnePlus 12 · Android 14 · Adreno 750",
+  "OnePlus Nord 3 · Android 14 · Mali-G710",
+  "Xiaomi 13 · Android 14 · Adreno 740",
+  "Xiaomi 14 · Android 14 · Adreno 750",
+  "Xiaomi 13T Pro · Android 14 · Dimensity 9200+",
+  "Redmi Note 12 Pro · Android 13 · Mali-G68",
+  "Realme GT 5 · Android 14 · Adreno 740",
+  "Nothing Phone 2 · Android 14 · Adreno 730",
+  "Motorola Edge 40 · Android 14 · Mali-G715",
+];
+
+// ── GET /api/device-check/profiles ─────────────────────────────────────────
+router.get("/device-check/profiles", (_req, res) => {
+  res.json({
+    profiles: DEVICE_LABELS.map((label, index) => ({ index, label })),
+  });
+});
+
+// ── POST /api/device-check/run ──────────────────────────────────────────────
 router.post("/device-check/run", (req, res) => {
-  // ── SSE headers ──────────────────────────────────────────────────────────
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -31,25 +73,26 @@ router.post("/device-check/run", (req, res) => {
   res.flushHeaders();
 
   const send = (event: string, data: string) => {
-    try {
-      res.write(`event: ${event}\ndata: ${data}\n\n`);
-    } catch {
-      // client already gone
-    }
+    try { res.write(`event: ${event}\ndata: ${data}\n\n`); } catch {}
   };
 
-  // ── Resolve python3 ───────────────────────────────────────────────────────
+  // Parse optional body params
+  const body = req.body ?? {};
+  const deviceIndex: number = Number.isInteger(body.deviceIndex) ? body.deviceIndex : 0;
+  const proxyOverride: string = typeof body.proxy === "string" ? body.proxy.trim() : "";
+
+  // Resolve python3
   let python3 = "python3";
-  try {
-    const { execSync } = require("child_process");
-    python3 = execSync("which python3", { encoding: "utf8" }).trim() || "python3";
-  } catch {}
+  try { python3 = execSync("which python3", { encoding: "utf8" }).trim() || "python3"; } catch {}
 
-  send("log", JSON.stringify("Starting device check…"));
+  send("log", JSON.stringify(`Starting device check (device #${deviceIndex})…`));
 
-  // ── Spawn Python script ───────────────────────────────────────────────────
   const py = spawn(python3, [SCRIPT], {
-    env: { ...process.env },
+    env: {
+      ...process.env,
+      DEVICE_INDEX: String(deviceIndex),
+      ...(proxyOverride ? { PROXY_OVERRIDE: proxyOverride } : {}),
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -66,26 +109,19 @@ router.post("/device-check/run", (req, res) => {
 
       if (line.startsWith("LOG:")) {
         send("log", JSON.stringify(line.slice(4)));
-
       } else if (line.startsWith("SCREENSHOT")) {
-        // Format: SCREENSHOT:<label>:<base64>  OR  SCREENSHOT:<base64>
         const rest = line.slice("SCREENSHOT".length);
         if (rest.startsWith(":")) {
-          // rest = ":label:base64"  or  ":base64"
           const afterColon = rest.slice(1);
-          const colonIdx = afterColon.indexOf(":");
+          const colonIdx   = afterColon.indexOf(":");
           if (colonIdx !== -1) {
-            const label   = afterColon.slice(0, colonIdx);
-            const b64     = afterColon.slice(colonIdx + 1);
-            send("screenshot", `${label}:${b64}`);
+            send("screenshot", `${afterColon.slice(0, colonIdx)}:${afterColon.slice(colonIdx + 1)}`);
           } else {
             send("screenshot", `:${afterColon}`);
           }
         }
-
       } else if (line === "DONE") {
         send("done", "{}");
-
       } else if (line.startsWith("ERROR:")) {
         send("error", JSON.stringify(line.slice(6)));
       }
@@ -102,10 +138,7 @@ router.post("/device-check/run", (req, res) => {
     res.end();
   });
 
-  // ── Abort when client disconnects ────────────────────────────────────────
-  req.on("close", () => {
-    try { py.kill("SIGTERM"); } catch {}
-  });
+  req.on("close", () => { try { py.kill("SIGTERM"); } catch {} });
 });
 
 export default router;
