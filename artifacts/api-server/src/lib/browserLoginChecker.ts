@@ -156,15 +156,23 @@ async function checkOneAccount(
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    // Register in shared kill-set so the abort handler can SIGKILL this proc
-    // immediately when pause/cancel is requested.
+    // Register in shared kill-set so the abort handler can stop this proc
+    // immediately when pause/cancel is requested. The Python child handles
+    // SIGTERM by closing Chrome/Xvfb before it exits.
     killSet?.add(proc);
 
     let stdout = "";
     let stderr = "";
 
+    let forceKillTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
-      try { proc.kill("SIGKILL"); } catch {}
+      try { proc.kill("SIGTERM"); } catch {}
+      // SIGTERM is the normal cleanup path. Keep a hard-stop fallback for a
+      // child that is genuinely hung and does not respond within the grace
+      // period, so a timed-out job cannot hold the worker forever.
+      forceKillTimer = setTimeout(() => {
+        try { proc.kill("SIGKILL"); } catch {}
+      }, 5_000);
       resolve({
         email,
         status: "unknown",
@@ -190,6 +198,7 @@ async function checkOneAccount(
 
     proc.on("close", (code) => {
       clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       killSet?.delete(proc);
 
       // The Python script prints exactly one JSON line to stdout

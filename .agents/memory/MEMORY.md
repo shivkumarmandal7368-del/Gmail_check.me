@@ -1,3 +1,4 @@
 - [Imported workspace dependencies](imported-workspace-dependencies.md) — restore an imported pnpm monorepo from its existing lockfile before running package checks.
 - [Browser result categories](browser-result-categories.md) — keep UI buckets driven by a stable backend category signal, with legacy reason fallback.
 - [Resumable browser jobs](resumable-browser-jobs.md) — pause saves in-flight completions, and resume runs only accounts without results.
+- [Generated browser script validation](generated-browser-script-validation.md) — syntax-check rendered f-string JavaScript, not only the Python source.

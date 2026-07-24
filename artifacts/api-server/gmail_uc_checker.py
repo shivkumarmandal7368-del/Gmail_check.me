@@ -1279,7 +1279,7 @@ try{{
   }});
 }}catch(e){{}}
 window.ontouchstart=function(){{}};
-try{{Object.defineProperty(screen,'orientation',{{get:()=>({{{{'type':'portrait-primary','angle':0}}}})}}); }}catch(e){{}}
+try{{Object.defineProperty(screen,'orientation',{{get:()=>({{'type':'portrait-primary','angle':0}})}}); }}catch(e){{}}
 try{{
   var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'downlinkMax':{dl},'saveData':false,'type':'wifi','onchange':null}};
   Object.defineProperty(navigator,'connection',{{get:()=>conn}});

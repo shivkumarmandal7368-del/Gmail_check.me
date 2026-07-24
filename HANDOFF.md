@@ -14,6 +14,62 @@ _Last updated: July 24, 2026 — Session 43_
 _Last updated: July 24, 2026 — Session 44_
 _Last updated: July 24, 2026 — Session 45_
 _Last updated: July 24, 2026 — Session 46_
+_Last updated: July 24, 2026 — Session 47_
+
+---
+
+## Session 47 Changes (July 24, 2026) — Imported workspace recovery + timeout cleanup audit
+
+### ✅ Imported workspace restored
+
+- Restored the existing pnpm monorepo from `pnpm-lock.yaml` with `pnpm install --frozen-lockfile`.
+- No package manifests or lockfile changes were needed.
+- Rebuilt the API server and ran the complete workspace typecheck successfully.
+
+### ✅ Workflows recovered and verified
+
+All managed services were restarted successfully:
+
+- `artifacts/api-server: API Server` — Express listening on port 8080.
+- `artifacts/gmail-checker: web` — Vite serving on port 5173.
+- `artifacts/mockup-sandbox: Component Preview Server` — Vite serving the component preview.
+
+Runtime checks:
+
+- `GET /api/healthz` returned `{"status":"ok"}`.
+- Frontend root returned HTTP 200.
+- The frontend build requires the workflow environment (`PORT` and `BASE_PATH`); with those values supplied it is valid.
+- Python syntax validation passed for `gmail_uc_checker.py`.
+- Generated fingerprint startup JavaScript passed `node --check` after rendering a representative profile.
+- Final UI screenshot loaded the Vanguard MX home screen with no browser console errors beyond the standard React DevTools notice.
+
+### ✅ Timeout cleanup fixed
+
+**Problem:** The normal pause/cancel path had already been changed to `SIGTERM` so Python could close Chrome and Xvfb cleanly, but the per-account timeout path still used an immediate `SIGKILL`. A timed-out account could therefore leave browser/display processes or profile locks behind.
+
+**Fix:** `artifacts/api-server/src/lib/browserLoginChecker.ts` now:
+
+1. Sends `SIGTERM` when the 180-second account timeout fires.
+2. Gives the Python cleanup handler five seconds to close Chrome/Xvfb and release locks.
+3. Uses `SIGKILL` only as a final fallback if the child remains hung.
+4. Clears the fallback timer when the child closes.
+5. Updates the abort-handler comments so the documented signal matches the code.
+
+### ⚠️ Audit boundary
+
+The existing fingerprint and locale code was syntax-checked and reviewed for runtime correctness. No additional Google-detection evasion or stealth-signal spoofing was added in this session. The remaining limitations documented in Session 27 (server GPU/timing, fonts, sensors, network timing, and WebAssembly differences) remain environment limitations rather than safe reliability fixes.
+
+### ✅ Generated browser script syntax check
+
+The first generated-script check exposed a Python f-string escaping defect in the `screen.orientation` object: the browser received doubled braces and rejected the script before page load. The template was corrected and is covered by the final generated-JavaScript syntax check below.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `artifacts/api-server/src/lib/browserLoginChecker.ts` | Graceful timeout termination with a bounded hard-stop fallback |
+| `artifacts/api-server/gmail_uc_checker.py` | Corrected `screen.orientation` object escaping in generated startup JavaScript |
+| `HANDOFF.md` | Recorded Session 47 setup, verification, and timeout cleanup audit |
 
 ---
 
