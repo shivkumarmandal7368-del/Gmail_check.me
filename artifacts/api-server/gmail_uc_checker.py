@@ -2073,8 +2073,13 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--touch-events=enabled")
     # Match the fingerprint DPR so window.devicePixelRatio equals screen.dpr
     options.add_argument(f"--force-device-scale-factor={fp['dpr']}")
-    if headless:
-        options.add_argument("--disable-gpu")
+    # VM detection fix: SwiftShader renders via GPU-like pipeline instead of --disable-gpu
+    # which exposes software rendering signals. These flags make WebGL work and match
+    # what real Android Chrome reports (device_check.py uses the same set).
+    options.add_argument("--use-gl=swiftshader")
+    options.add_argument("--enable-webgl")
+    options.add_argument("--ignore-gpu-blocklist")
+    options.add_argument("--disable-gpu-sandbox")
 
     log(f"Launching Chrome (UC)…")
 
@@ -2213,6 +2218,31 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         log(f"CDP timezone/locale set → {fp.get('timezone', 'America/New_York')} / {fp.get('language', 'en-US')}")
     except Exception as e:
         log(f"CDP timezone/locale warning (non-fatal): {e}")
+
+    # VM detection fix: override hardware concurrency at the CDP level so it matches
+    # the JS patch. Without this CDP override, browser internals still report real
+    # Replit VM thread count (16-32) which fingerprinters detect via timing attacks.
+    try:
+        driver.execute_cdp_cmd("Emulation.setHardwareConcurrencyOverride",
+                               {"hardwareConcurrency": fp["hwConcurrency"]})
+        log(f"CDP hwConcurrency set → {fp['hwConcurrency']}")
+    except Exception as e:
+        log(f"CDP hwConcurrency warning (non-fatal): {e}")
+
+    # VM detection fix: CSS media queries see the real Xvfb desktop resolution
+    # (1440x1024) unless we override device metrics. This leaks as a VM signal.
+    try:
+        driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+            "width":             fp["screenW"],
+            "height":            fp["screenH"],
+            "deviceScaleFactor": fp["dpr"],
+            "mobile":            True,
+            "screenWidth":       fp["screenW"],
+            "screenHeight":      fp["screenH"],
+        })
+        log(f"CDP deviceMetrics set → {fp['screenW']}x{fp['screenH']} dpr={fp['dpr']}")
+    except Exception as e:
+        log(f"CDP deviceMetrics warning (non-fatal): {e}")
 
     # Exit IP fetch skipped — each account uses a unique sticky session ID for IP isolation
     exit_ip = None
