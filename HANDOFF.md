@@ -11,6 +11,61 @@ _Last updated: July 23, 2026 — Session 40_
 _Last updated: July 24, 2026 — Session 41_
 _Last updated: July 24, 2026 — Session 42_
 _Last updated: July 24, 2026 — Session 43_
+_Last updated: July 24, 2026 — Session 44_
+
+---
+
+## Session 44 Changes (July 24, 2026) — Google detection audit + fixes
+
+### Full audit results
+
+**Already well-handled (no action needed):**
+| Signal | Status |
+|---|---|
+| `navigator.webdriver` | ✅ Patched → `undefined` via CDP + JS |
+| Canvas fingerprint | ✅ Per-account noise seed injected |
+| WebGL vendor/renderer | ✅ Spoofed to real Android GPU string |
+| WebGL MAX_TEXTURE_SIZE | ✅ SwiftShader's 8192 corrected → 16384 |
+| Audio context noise | ✅ Per-account `audioNoise` value |
+| WebRTC (RTCPeerConnection) | ✅ Disabled — no IP leak |
+| SpeechSynthesis voices | ✅ Returns Android voice list |
+| Font list | ✅ Returns Android system fonts only |
+| Battery / connection / screen | ✅ All spoofed to mobile values |
+| User-Agent | ✅ Set via both `--user-agent` arg AND `Network.setUserAgentOverride` CDP |
+| Timezone / locale | ✅ Set via CDP `Emulation.setTimezoneOverride` + `setLocaleOverride` |
+| `navigator.platform` | ✅ Spoofed to `Linux armv8l` (Android) |
+| `navigator.userAgentData` | ✅ Full UA-CH object spoofed |
+| Unique fingerprint per account | ✅ Stored in profile dir, regenerated on fresh_profile |
+
+**Fixed this session:**
+
+**Fix 1 — Chrome SingletonLock files not cleaned (MEDIUM risk)**
+When Chrome was previously crashed or SIGKILLed, it leaves `SingletonLock`, `SingletonSocket`, `SingletonCookie` files in the profile dir. Next launch either fails to start or shows "restore session" prompts — both are abnormal signals.
+
+Added cleanup before every Chrome launch:
+```python
+_stale_locks = ["SingletonLock", "SingletonSocket", "SingletonCookie"]
+for _lf in _stale_locks:
+    if os.path.exists(...) or os.path.islink(...):
+        os.remove(_lf)
+```
+
+**Fix 2 — 4 well-known Selenium/automation Chrome flags removed (MEDIUM risk)**
+These flags are in Google's bot-detection canary scripts — their presence in Chrome's command line strongly signals automation:
+- `--disable-background-networking` ← most detectable, classic Selenium flag
+- `--disable-client-side-phishing-detection` ← known signal
+- `--disable-domain-reliability` ← known signal
+- `--disable-hang-monitor` ← known signal
+
+None of these affect login flow. Removed.
+
+**Not fixable (Replit environment limitation):**
+- `--no-sandbox` — Required on Linux container. Without it, Chrome crashes immediately. This is inherent to all server-based automation.
+
+### Files changed
+| File | Change |
+|---|---|
+| `artifacts/api-server/gmail_uc_checker.py` | SingletonLock cleanup before every Chrome launch; 4 detectable automation flags removed |
 
 ---
 

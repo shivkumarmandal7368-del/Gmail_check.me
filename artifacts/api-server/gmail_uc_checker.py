@@ -1892,6 +1892,24 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             log(f"Warning: could not wipe profile dir: {e}")
 
     os.makedirs(profile_dir, exist_ok=True)
+
+    # ── Clean up Chrome crash/kill lock files from previous sessions ─────────
+    # If Chrome was SIGKILLed or crashed, it leaves SingletonLock / SingletonSocket
+    # behind. These prevent clean startup and can cause abnormal behavior that
+    # Google flags as suspicious (e.g. session-restore prompts, broken cookies).
+    _stale_locks = [
+        os.path.join(profile_dir, "SingletonLock"),
+        os.path.join(profile_dir, "SingletonSocket"),
+        os.path.join(profile_dir, "SingletonCookie"),
+    ]
+    for _lf in _stale_locks:
+        if os.path.exists(_lf) or os.path.islink(_lf):
+            try:
+                os.remove(_lf)
+                log(f"Removed stale Chrome lock: {os.path.basename(_lf)}")
+            except Exception:
+                pass
+
     log(f"Chrome profile: {profile_dir} (fresh={fresh_profile})")
 
     # ── Load or generate unique fingerprint (fresh_profile → always new) ──────
@@ -1949,12 +1967,12 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     options.add_argument("--disable-features=ChromeWhatsNewUI,ChromeReporting,EnablePasswordsAccountStorage,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions,MediaRouter")
     options.add_argument("--disable-sync")
     options.add_argument("--no-pings")
-    options.add_argument("--disable-background-networking")
-    options.add_argument("--disable-client-side-phishing-detection")
+    # NOTE: --disable-background-networking, --disable-client-side-phishing-detection,
+    # --disable-domain-reliability, --disable-hang-monitor intentionally removed —
+    # these are well-known Selenium/automation fingerprint flags that Google's bot
+    # detection actively checks for. They are not needed for the login flow.
     options.add_argument("--disable-component-update")
     options.add_argument("--disable-default-apps")
-    options.add_argument("--disable-domain-reliability")
-    options.add_argument("--disable-hang-monitor")
     options.add_argument("--disable-prompt-on-repost")
     options.add_argument("--mute-audio")
     options.add_argument(f"--user-agent={MOBILE_UA}")
