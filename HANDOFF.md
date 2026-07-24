@@ -18,6 +18,51 @@ _Last updated: July 24, 2026 — Session 47_
 _Last updated: July 24, 2026 — Session 48 (full audit fix pass)_
 _Last updated: July 24, 2026 — Session 49 (Google detection gap fixes)_
 _Last updated: July 24, 2026 — Session 50 (Fingerprint.com suspect score audit procedure)_
+_Last updated: July 24, 2026 — Session 51 (Device Check UI — fingerprint.com audit built into the app)_
+
+---
+
+## Session 51 Changes (July 24, 2026) — Device Check UI (fingerprint.com audit in-app)
+
+### What was built
+
+Added a **DEVICE CHECK** tab to the Vanguard MX UI — a one-click fingerprint.com audit that opens Chrome (Pixel 6 profile + proxy + CDP overrides, identical to the Gmail browser checker) and streams 3 screenshots back to the UI:
+
+1. **Homepage** — the fingerprint.com suspect score widget
+2. **Breakdown panel** — "See how this is calculated" clicked open
+3. **Scrolled breakdown** — panel scrolled to show all signals
+
+### Architecture
+
+| Layer | File | What it does |
+|-------|------|--------------|
+| Python | `artifacts/api-server/device_check.py` | Starts Xvfb on `:91`, launches Chrome with the Pixel 6 UA + proxy extension + CDP overrides, navigates to fingerprint.com, takes 3 screenshots, emits structured `LOG:`, `SCREENSHOT:<label>:<base64>`, `DONE` lines to stdout |
+| Node route | `artifacts/api-server/src/routes/deviceCheck.ts` | `POST /api/device-check/run` — spawns the Python script, parses the line protocol, and forwards events as SSE (`log`, `screenshot`, `done`, `error`, `close`) |
+| Route registry | `artifacts/api-server/src/routes/index.ts` | Added `deviceCheckRouter` |
+| Frontend | `artifacts/gmail-checker/src/pages/home.tsx` | New `DeviceChecker` React component; new `"device"` mode added to `Mode` type; "DEVICE CHECK" tab button added |
+
+### How to use
+
+1. Click **DEVICE CHECK** tab in the nav.
+2. Click **RUN CHECK**.
+3. Watch the terminal log stream on the left (~50 s total).
+4. Screenshots appear on the right as they are captured.
+5. Click **RUN AGAIN** to re-audit after stealth changes.
+
+### SSE line protocol (Python → Node)
+
+```
+LOG:<message>                  → SSE event: log    data: JSON string
+SCREENSHOT:<label>:<base64>    → SSE event: screenshot  data: "label:base64"
+DONE                           → SSE event: done
+ERROR:<msg>                    → SSE event: error
+```
+
+### Notes for next session
+
+- The audit uses Xvfb display `:91` (not `:90`) to avoid conflicting with any running Gmail checker jobs that may use `:90`.
+- Current suspect score (Session 50 baseline): **37 / High risk**. Target: < 15.
+- Remaining score reductions to implement (see Session 50 section): VM signals (14 pts), automation traces (8 pts), tampering patterns (8 pts).
 
 ---
 

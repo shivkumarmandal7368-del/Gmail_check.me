@@ -28,7 +28,7 @@ import {
 } from "lucide-react"
 
 type SmtpFilter = "all" | "valid" | "invalid" | "disabled" | "catch_all" | "unknown";
-type Mode = "smtp" | "login" | "browser";
+type Mode = "smtp" | "login" | "browser" | "device";
 type LoginList = "opened" | "not_opened" | "delete" | "unknown" | "fingerprint";
 
 export default function Home() {
@@ -61,6 +61,7 @@ export default function Home() {
             { id: "smtp",    label: "SMTP CHECK",    icon: <Terminal className="w-4 h-4" /> },
             { id: "login",   label: "IMAP CHECK",    icon: <KeyRound className="w-4 h-4" /> },
             { id: "browser", label: "BROWSER CHECK", icon: <Globe className="w-4 h-4" /> },
+            { id: "device",  label: "DEVICE CHECK",  icon: <ShieldAlert className="w-4 h-4" /> },
           ] as { id: Mode; label: string; icon: React.ReactNode }[]).map(m => (
             <button key={m.id} onClick={() => setMode(m.id)}
               className={cn(
@@ -74,7 +75,7 @@ export default function Home() {
           ))}
         </div>
 
-        {mode === "smtp" ? <SmtpChecker /> : mode === "login" ? <LoginChecker /> : <BrowserChecker />}
+        {mode === "smtp" ? <SmtpChecker /> : mode === "login" ? <LoginChecker /> : mode === "browser" ? <BrowserChecker /> : <DeviceChecker />}
       </div>
     </div>
   );
@@ -1685,6 +1686,241 @@ function BrowserChecker() {
           </div>
         </Card>
       </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── DEVICE CHECKER ───────────────────────── */
+function DeviceChecker() {
+  const [status, setStatus]       = useState<"idle"|"running"|"done"|"error">("idle");
+  const [logs,   setLogs]         = useState<string[]>([]);
+  const [shots,  setShots]        = useState<{ label: string; b64: string }[]>([]);
+  const [errMsg, setErrMsg]       = useState("");
+  const abortRef                  = useRef<AbortController | null>(null);
+  const logEndRef                 = useRef<HTMLDivElement | null>(null);
+
+  // Auto-scroll logs
+  useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
+
+  const runCheck = async () => {
+    setStatus("running");
+    setLogs([]);
+    setShots([]);
+    setErrMsg("");
+
+    abortRef.current?.abort();
+    const abort = new AbortController();
+    abortRef.current = abort;
+
+    try {
+      const resp = await fetch("/api/device-check/run", {
+        method: "POST",
+        signal: abort.signal,
+      });
+      if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+
+      const reader  = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const blocks = buf.split("\n\n"); buf = blocks.pop() ?? "";
+        for (const block of blocks) {
+          const lines = block.split("\n");
+          const eventLine = lines.find(l => l.startsWith("event: "));
+          const dataLine  = lines.find(l => l.startsWith("data: "));
+          if (!eventLine || !dataLine) continue;
+          const event = eventLine.slice(7).trim();
+          const data  = dataLine.slice(6);
+
+          if (event === "log") {
+            try { setLogs(p => [...p, JSON.parse(data)]); } catch { setLogs(p => [...p, data]); }
+          } else if (event === "screenshot") {
+            // data = "label:base64"
+            const colonIdx = data.indexOf(":");
+            if (colonIdx !== -1) {
+              const label = data.slice(0, colonIdx);
+              const b64   = data.slice(colonIdx + 1);
+              setShots(p => [...p, { label, b64 }]);
+            }
+          } else if (event === "done") {
+            setStatus("done");
+          } else if (event === "error") {
+            let msg = data;
+            try { msg = JSON.parse(data); } catch {}
+            setErrMsg(msg);
+            setStatus("error");
+          } else if (event === "close") {
+            // stream ended
+          }
+        }
+      }
+      if (status !== "error") setStatus("done");
+    } catch (err: any) {
+      if (err?.name === "AbortError") return;
+      setErrMsg(err?.message ?? "Unknown error");
+      setStatus("error");
+    }
+  };
+
+  const stopCheck = () => {
+    abortRef.current?.abort();
+    setStatus("idle");
+    setLogs(p => [...p, "Stopped by user."]);
+  };
+
+  const shotLabels: Record<string, string> = {
+    homepage:  "1 · Homepage (Suspect Score)",
+    breakdown: "2 · Score Breakdown Panel",
+    scrolled:  "3 · Breakdown (Scrolled)",
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Header card */}
+      <Card className="bg-card/60 border-border">
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div className="flex items-center gap-3">
+              <div className="bg-purple-500/10 p-2 rounded-lg border border-purple-500/20">
+                <ShieldAlert className="w-5 h-5 text-purple-400" />
+              </div>
+              <div>
+                <CardTitle className="text-base font-mono">DEVICE CHECK</CardTitle>
+                <p className="text-xs text-muted-foreground font-mono mt-0.5">
+                  Pixel 6 · Android 14 · Chrome 138 · fingerprint.com suspect score
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {status === "running" && (
+                <Badge variant="outline" className="font-mono text-[10px] border-blue-500/40 text-blue-400 bg-blue-400/10 flex items-center gap-1">
+                  <Loader2 className="w-3 h-3 animate-spin" /> RUNNING
+                </Badge>
+              )}
+              {status === "done" && (
+                <Badge variant="outline" className="font-mono text-[10px] border-green-500/40 text-green-400 bg-green-400/10 flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3" /> DONE
+                </Badge>
+              )}
+              {status === "error" && (
+                <Badge variant="outline" className="font-mono text-[10px] border-red-500/40 text-red-400 bg-red-400/10 flex items-center gap-1">
+                  <XCircle className="w-3 h-3" /> ERROR
+                </Badge>
+              )}
+              {status === "running" ? (
+                <Button size="sm" variant="outline" onClick={stopCheck}
+                  className="font-mono text-xs border-red-500/40 text-red-400 hover:bg-red-500/10">
+                  STOP
+                </Button>
+              ) : (
+                <Button size="sm" onClick={runCheck}
+                  className="font-mono text-xs bg-purple-600 hover:bg-purple-700 text-white">
+                  {status === "idle" ? "RUN CHECK" : "RUN AGAIN"}
+                </Button>
+              )}
+            </div>
+          </div>
+        </CardHeader>
+
+        <CardContent className="pt-0 space-y-1 pb-3">
+          <p className="text-xs text-muted-foreground font-mono leading-relaxed">
+            Opens <span className="text-purple-400">fingerprint.com</span> using the same browser setup as the Gmail checker (Pixel 6 profile + proxy + CDP overrides),
+            clicks "See how this is calculated", and returns screenshots so you can see the suspect score.
+          </p>
+          {status === "idle" && logs.length === 0 && (
+            <p className="text-xs text-muted-foreground/50 font-mono pt-1">
+              ⚠ This takes ~50s — Chrome launches in the background with Xvfb.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Main content — logs + screenshots */}
+      {(logs.length > 0 || shots.length > 0) && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Log terminal */}
+          <Card className="bg-card/40 border-border">
+            <CardHeader className="py-2 px-4 border-b border-border">
+              <span className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">
+                <Terminal className="w-3 h-3 inline mr-1 opacity-60" />Terminal Output
+              </span>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="h-[340px] overflow-y-auto bg-black/40 rounded-b-lg p-3 font-mono text-xs space-y-0.5">
+                {logs.map((line, i) => (
+                  <div key={i} className={cn(
+                    "leading-relaxed",
+                    line.startsWith("WARNING") ? "text-yellow-400" :
+                    line.startsWith("[stderr]") ? "text-orange-400" :
+                    line.includes("✓") || line.includes("Done") || line.includes("DONE") ? "text-green-400" :
+                    line.startsWith("ERROR") ? "text-red-400" :
+                    "text-slate-300"
+                  )}>
+                    <span className="text-slate-600 mr-2 select-none">{String(i+1).padStart(3,"0")}</span>
+                    {line}
+                  </div>
+                ))}
+                {status === "running" && (
+                  <div className="text-blue-400 flex items-center gap-1 pt-1">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <span className="animate-pulse">running…</span>
+                  </div>
+                )}
+                {errMsg && (
+                  <div className="text-red-400 pt-1">❌ {errMsg}</div>
+                )}
+                <div ref={logEndRef} />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Screenshots */}
+          <Card className="bg-card/40 border-border">
+            <CardHeader className="py-2 px-4 border-b border-border">
+              <span className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">
+                <Activity className="w-3 h-3 inline mr-1 opacity-60" />Screenshots
+              </span>
+            </CardHeader>
+            <CardContent className="p-3 space-y-3 max-h-[340px] overflow-y-auto">
+              {shots.length === 0 ? (
+                <div className="h-[280px] flex items-center justify-center text-muted-foreground/40 font-mono text-xs">
+                  {status === "running" ? (
+                    <span className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin" /> Waiting for screenshots…
+                    </span>
+                  ) : "No screenshots yet"}
+                </div>
+              ) : shots.map((shot, i) => (
+                <div key={i} className="space-y-1">
+                  <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">
+                    {shotLabels[shot.label] ?? shot.label}
+                  </p>
+                  <img
+                    src={`data:image/png;base64,${shot.b64}`}
+                    alt={shot.label}
+                    className="w-full rounded-md border border-border shadow-sm"
+                  />
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Empty / ready state */}
+      {status === "idle" && logs.length === 0 && (
+        <Card className="bg-card/20 border-border border-dashed">
+          <CardContent className="py-16 flex flex-col items-center justify-center gap-3 text-muted-foreground/50">
+            <ShieldAlert className="w-10 h-10 opacity-30" />
+            <p className="font-mono text-sm">Click RUN CHECK to start the audit</p>
+            <p className="font-mono text-xs opacity-60">fingerprint.com will open in a headless Pixel 6 browser</p>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
