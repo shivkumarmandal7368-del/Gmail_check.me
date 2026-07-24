@@ -1216,18 +1216,41 @@ def make_stealth_js(fp: dict) -> str:
         _tz_offset = 300   # CDT fallback
     return f"""
 (function(){{var _nts=Function.prototype.toString,_ntm=new WeakMap();Function.prototype.toString=function(){{return _ntm.has(this)?_ntm.get(this):_nts.call(this);}};_ntm.set(Function.prototype.toString,'function toString() {{ [native code] }}');Object.defineProperty(window,'__nr',{{value:function(fn,n,g){{if(fn&&typeof fn==='function')_ntm.set(fn,'function '+(g?'get ':'')+n+'() {{ [native code] }}');}},configurable:true,enumerable:false,writable:false}});}})();
-Object.defineProperty(navigator,'webdriver',{{get:()=>undefined}});
-Object.defineProperty(navigator,'plugins',{{get:()=>{{var p=[];p.length=0;return p;}}}});
-Object.defineProperty(navigator,'languages',{{get:()=>['{lg}','en']}});
-try{{Object.defineProperty(navigator,'language',{{get:()=>'{lg}'}});}}catch(e){{}}
+(function(){{
+  // Override on Navigator.prototype, not the navigator instance.
+  // fingerprint.com's tampering detector calls Object.getOwnPropertyDescriptor on
+  // both the instance and the prototype; instance-level overrides are flagged.
+  var _np=Object.getPrototypeOf(navigator);
+  // Delete webdriver from prototype entirely — instance-level presence is the
+  // single strongest tamper signal.
+  try{{delete _np.webdriver;}}catch(e){{}}
+  try{{
+    Object.defineProperty(_np,'webdriver',{{get:function(){{return undefined;}},configurable:true,enumerable:false}});
+    if(window.__nr){{var _wdd=Object.getOwnPropertyDescriptor(_np,'webdriver');if(_wdd&&_wdd.get)window.__nr(_wdd.get,'webdriver',true);}}
+  }}catch(e){{}}
+  // Helper: define on prototype with native-looking getter
+  function _pd(k,v){{
+    try{{
+      Object.defineProperty(_np,k,{{get:function(){{return v;}},configurable:true,enumerable:true}});
+      if(window.__nr){{var _d=Object.getOwnPropertyDescriptor(_np,k);if(_d&&_d.get)window.__nr(_d.get,k,true);}}
+    }}catch(e){{}}
+  }}
+  _pd('hardwareConcurrency',{fp['hwConcurrency']});
+  _pd('deviceMemory',{fp['deviceMemory']});
+  _pd('cookieEnabled',true);
+  _pd('doNotTrack',{dnt_val});
+  _pd('maxTouchPoints',{fp['maxTouchPoints']});
+  _pd('platform','{fp['platform']}');
+  _pd('vendor','Google Inc.');
+  _pd('appVersion','{av_str}');
+  try{{Object.defineProperty(_np,'plugins',{{get:function(){{var p=[];p.length=0;return p;}},configurable:true}});}}catch(e){{}}
+  try{{Object.defineProperty(_np,'languages',{{get:function(){{return['{lg}','en'];}},configurable:true}});}}catch(e){{}}
+  try{{Object.defineProperty(_np,'language',{{get:function(){{return'{lg}';}},configurable:true}});}}catch(e){{}}
+  try{{Object.defineProperty(_np,'globalPrivacyControl',{{get:function(){{return undefined;}},configurable:true}});}}catch(e){{}}
+}})();
 try{{Object.defineProperty(navigator,'userLanguage',{{get:()=>'{lg}'}});}}catch(e){{}}
 try{{Object.defineProperty(navigator,'browserLanguage',{{get:()=>'{lg}'}});}}catch(e){{}}
-try{{Object.defineProperty(navigator,'systemLanguage',{{get:()=>'{lg}'}});}}catch(e){{}} 
-Object.defineProperty(navigator,'hardwareConcurrency',{{get:()=>{fp['hwConcurrency']}}});
-Object.defineProperty(navigator,'deviceMemory',{{get:()=>{fp['deviceMemory']}}});
-Object.defineProperty(navigator,'cookieEnabled',{{get:()=>true}});
-Object.defineProperty(navigator,'doNotTrack',{{get:()=>{dnt_val}}});
-try{{Object.defineProperty(navigator,'globalPrivacyControl',{{get:()=>undefined}});}}catch(e){{}}
+try{{Object.defineProperty(navigator,'systemLanguage',{{get:()=>'{lg}'}});}}catch(e){{}}
 Object.defineProperty(screen,'width',      {{get:()=>{fp['screenW']}}});
 Object.defineProperty(screen,'height',     {{get:()=>{fp['screenH']}}});
 Object.defineProperty(screen,'availWidth', {{get:()=>{fp['screenW']}}});
@@ -1238,10 +1261,7 @@ try{{Object.defineProperty(screen,'isExtended',{{get:()=>false}});}}catch(e){{}}
 Object.defineProperty(window,'devicePixelRatio',{{get:()=>{fp['dpr']}}});
 Object.defineProperty(window,'innerWidth',  {{get:()=>{fp['screenW']}}});
 Object.defineProperty(window,'innerHeight', {{get:()=>{fp['availH']}}});
-Object.defineProperty(navigator,'maxTouchPoints',{{get:()=>{fp['maxTouchPoints']}}});
-Object.defineProperty(navigator,'platform',{{get:()=>'{fp['platform']}'}});
-Object.defineProperty(navigator,'vendor',  {{get:()=>'Google Inc.'}});
-Object.defineProperty(navigator,'appVersion',{{get:()=>'{av_str}'}});
+// maxTouchPoints, platform, vendor, appVersion now set on Navigator.prototype above
 try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable:true}});}}catch(e){{}}
 (function(){{
   var d={{brands:[{{brand:'Not(A;Brand',version:'8'}},{{brand:'Chromium',version:'138'}},{{brand:'Google Chrome',version:'138'}}],mobile:true,platform:'Android',
@@ -1393,7 +1413,7 @@ try{{
     try{{Object.defineProperty(_vvp,'scale',{{get:()=>1}});}}catch(e){{}}
   }}
 }}catch(e){{}}
-try{{Object.defineProperty(navigator,'appVersion',{{get:()=>'5.0 (Linux; Android {av}; {mdl}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{cv} Mobile Safari/537.36'}});}}catch(e){{}}
+// appVersion already set on Navigator.prototype above
 try{{Object.defineProperty(navigator,'onLine',{{get:()=>true}});}}catch(e){{}}
 try{{
   if(navigator.permissions&&navigator.permissions.query){{
@@ -1512,15 +1532,8 @@ try{{
 try{{
   Date.prototype.getTimezoneOffset=function(){{return {_tz_offset};}};
 }}catch(e){{}}
-try{{delete window.chrome.webstore;}}catch(e){{}}
 try{{delete window.chrome.cast;}}catch(e){{}}
-try{{
-  // Proxy extension may set a real extension ID on chrome.runtime.id —
-  // a strong bot-detection signal (real Android Chrome has no extensions).
-  // Force it to undefined even if the extension already set it.
-  if(window.chrome&&window.chrome.runtime)
-    Object.defineProperty(window.chrome.runtime,'id',{{get:function(){{return undefined;}},configurable:true}});
-}}catch(e){{}}
+// chrome.webstore, chrome.app, chrome.runtime.id cleaned in automation globals block above
 try{{
   if(window.speechSynthesis){{
     var _origGV=window.speechSynthesis.getVoices.bind(window.speechSynthesis);
@@ -1725,6 +1738,46 @@ try{{
     }};
   }}
 }}catch(e){{}}
+(function(){{
+  // ── Automation globals cleanup ─────────────────────────────────────────────
+  // CDP / Selenium / WebDriver leave window-level variables that fingerprinters
+  // enumerate. Delete every known automation trace on every new document.
+  var _bad=[
+    '__webdriver_evaluate','__selenium_evaluate','__webdriver_script_fn',
+    '__webdriver_script_func','__webdriver_script_function','__fxdriver_evaluate',
+    '__driver_unwrapped','__webdriver_unwrapped','__driver_evaluate',
+    '__selenium_unwrapped','__fxdriver_unwrapped','_Selenium_IDE_Recorder',
+    '_selenium','calledSelenium','$cdc_asdjflasutopfhvcZLmcfl_',
+    '__$webdriverAsyncExecutor','__lastWatirAlert','__lastWatirConfirm',
+    '__lastWatirPrompt','_WEBDRIVER_ELEM_CACHE','ChromeDriverw',
+    'cdc_adoQpoasnfa76pfcZLmcfl_Array',
+    'cdc_adoQpoasnfa76pfcZLmcfl_Promise',
+    'cdc_adoQpoasnfa76pfcZLmcfl_Symbol',
+    '__webdriverio_element','webdriverio'
+  ];
+  _bad.forEach(function(k){{try{{delete window[k];}}catch(e){{}}try{{delete document[k];}}catch(e){{}}}});
+  // Patch Error so stack traces never leak DevTools Protocol paths
+  try{{
+    var _origErr=Error;
+    function _PatchedError(){{
+      var e=new _origErr(...arguments);
+      if(e.stack)e.stack=e.stack.replace(/\s+at\s+__puppeteer[^\n]*/g,'').replace(/\s+at\s+__selenium[^\n]*/g,'').replace(/\s+at\s+__cdc[^\n]*/g,'');
+      return e;
+    }}
+    _PatchedError.prototype=_origErr.prototype;
+    _PatchedError.captureStackTrace=_origErr.captureStackTrace;
+    window.Error=_PatchedError;
+  }}catch(e){{}}
+  // DevTools open detection — spoof the property check
+  try{{Object.defineProperty(window,'__devtools_open__',{{get:function(){{return false;}},configurable:true}});}}catch(e){{}}
+  // Remove chrome.app and any extension runtime id — real Android Chrome has neither
+  try{{delete window.chrome.app;}}catch(e){{}}
+  try{{delete window.chrome.webstore;}}catch(e){{}}
+  try{{
+    if(window.chrome&&window.chrome.runtime)
+      Object.defineProperty(window.chrome.runtime,'id',{{get:function(){{return undefined;}},configurable:true}});
+  }}catch(e){{}}
+}})();
 """
 
 

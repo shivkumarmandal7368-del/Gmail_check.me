@@ -16,6 +16,7 @@ Line protocol (stdout):
 import os, sys, time, base64, subprocess, random, json
 import socket, socketserver, threading, select
 from urllib.parse import urlsplit
+from selenium.webdriver.common.action_chains import ActionChains
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -282,7 +283,17 @@ o.add_argument(f"--user-agent={UA}")
 o.add_argument("--touch-events=enabled")
 o.add_argument(f"--force-device-scale-factor={profile['dpr']}")
 o.add_argument("--lang=en-US,en;q=0.9")
-o.add_argument("--disable-gpu")
+o.add_argument("--use-gl=swiftshader")
+o.add_argument("--enable-webgl")
+o.add_argument("--ignore-gpu-blocklist")
+o.add_argument("--disable-gpu-sandbox")
+o.add_argument("--disable-blink-features=AutomationControlled")
+o.add_argument("--disable-features=ChromeWhatsNewUI,EnablePasswordsAccountStorage,OptimizationHints")
+o.add_argument("--disable-extensions-http-throttling")
+o.add_argument("--no-default-browser-check")
+o.add_argument("--no-first-run")
+o.add_argument("--disable-sync")
+o.add_argument("--password-store=basic")
 o.add_argument(f"--proxy-server=http://127.0.0.1:{local_proxy_port}")
 
 log("Launching Chrome...")
@@ -389,9 +400,42 @@ try:
     })
     driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": "America/New_York"})
     driver.execute_cdp_cmd("Emulation.setLocaleOverride",   {"locale": "en-US"})
-    log("CDP overrides applied (UA, timezone, locale)")
+    # Override hardware concurrency at the CDP level so it matches JS patches
+    try:
+        driver.execute_cdp_cmd("Emulation.setHardwareConcurrencyOverride",
+                               {"hardwareConcurrency": profile["hwConcurrency"]})
+    except Exception:
+        pass  # available in Chrome 102+; non-fatal if missing
+    # Set device metrics so CSS media queries see the mobile screen size,
+    # not the Xvfb desktop resolution (prevents CSS-based VM signal)
+    try:
+        driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+            "width":             profile["screenW"],
+            "height":            profile["screenH"],
+            "deviceScaleFactor": profile["dpr"],
+            "mobile":            True,
+            "screenWidth":       profile["screenW"],
+            "screenHeight":      profile["screenH"],
+        })
+    except Exception:
+        pass
+    log("CDP overrides applied (UA, timezone, locale, hwConcurrency, deviceMetrics)")
 except Exception as e:
     log(f"CDP override warning (non-fatal): {e}")
+
+# ── Simulate human-like mouse movement to defeat bot detection ────────────────
+try:
+    actions = ActionChains(driver)
+    body = driver.find_element(By.TAG_NAME, "body")
+    for _ in range(5):
+        x = random.randint(20, min(profile["screenW"] - 20, 360))
+        y = random.randint(20, min(profile["screenH"] - 20, 300))
+        actions.move_to_element_with_offset(body, x, y)
+        actions.pause(random.uniform(0.08, 0.25))
+    actions.perform()
+    log("Mouse movements simulated ✓")
+except Exception as e:
+    log(f"Mouse simulation skipped (non-fatal): {e}")
 
 # ── Navigate to fingerprint.com ────────────────────────────────────────────────
 log("Navigating to fingerprint.com...")
