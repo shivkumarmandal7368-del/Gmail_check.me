@@ -1923,6 +1923,17 @@ def get_chrome_version_main(chrome_path: str | None) -> int | None:
     configured = os.environ.get("CHROME_VERSION_MAIN")
     if configured and configured.isdigit():
         return int(configured)
+    version = get_chrome_version(chrome_path)
+    if version:
+        return int(version.split(".", 1)[0])
+    return None
+
+
+def get_chrome_version(chrome_path: str | None) -> str | None:
+    """Read the full installed browser version for UA/client-hint emulation."""
+    configured = os.environ.get("CHROME_VERSION_FULL")
+    if configured:
+        return configured
     if not chrome_path:
         return None
     try:
@@ -1930,8 +1941,8 @@ def get_chrome_version_main(chrome_path: str | None) -> int | None:
             [chrome_path, "--version"], encoding="utf8", stderr=subprocess.STDOUT
         )
         import re
-        match = re.search(r"\b(\d+)\.", output)
-        return int(match.group(1)) if match else None
+        match = re.search(r"\b(\d+\.\d+\.\d+\.\d+)\b", output)
+        return match.group(1) if match else None
     except Exception:
         return None
 
@@ -2114,6 +2125,7 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     headless = display is None
     chromium_path = get_chromium_path()
     chrome_version_main = get_chrome_version_main(chromium_path)
+    chrome_version_full = get_chrome_version(chromium_path)
     log(
         f"Chrome: {chromium_path}, version_main={chrome_version_main}, "
         f"headless={headless}, display={display}"
@@ -2154,6 +2166,10 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
 
     # ── Load or generate unique fingerprint (fresh_profile → always new) ──────
     fp = get_or_create_fingerprint(profile_dir, proxy=proxy)
+    if chrome_version_full:
+        # Keep the emulated Android UA/client hints aligned with the actual
+        # Chrome binary used by undetected-chromedriver.
+        fp["chromeVersion"] = chrome_version_full
     fp_summary = (f"{fp['model']} | {fp['webglRenderer']} | "
                   f"{fp['screenW']}x{fp['screenH']} dpr={fp['dpr']} | canvas={fp['canvasSeed']}")
     geo_info = (f"tz={fp.get('timezone','?')} lang={fp.get('language','?')} "

@@ -9,6 +9,8 @@ set -euo pipefail
 cache_root="${CHROME_FOR_TESTING_ROOT:-${HOME}/.cache/vanguard-mx/chrome-for-testing}"
 manifest_url="https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
 mkdir -p "${cache_root}"
+exec 9>"${cache_root}/.install.lock"
+flock 9
 
 read -r chrome_version chrome_url < <(
   python3 - "${manifest_url}" <<'PY'
@@ -34,12 +36,14 @@ chrome_dir="${cache_root}/${chrome_version}"
 chrome_binary="${chrome_dir}/chrome-linux64/chrome"
 if [[ ! -x "${chrome_binary}" ]]; then
   archive="${cache_root}/chrome-${chrome_version}.zip"
+  archive_part="${archive}.part.$$"
   temporary_dir="${cache_root}/.install-${chrome_version}-$$"
   rm -rf "${temporary_dir}"
   mkdir -p "${temporary_dir}"
   echo "[chrome-setup] Downloading Chrome for Testing ${chrome_version}" >&2
-  curl --fail --location --retry 3 --retry-delay 2 --output "${archive}.part" "${chrome_url}"
-  mv "${archive}.part" "${archive}"
+  curl --fail --location --retry 3 --retry-delay 2 --output "${archive_part}" "${chrome_url}"
+  test -s "${archive_part}"
+  mv "${archive_part}" "${archive}"
   unzip -q -o "${archive}" -d "${temporary_dir}"
   rm -rf "${chrome_dir}"
   mv "${temporary_dir}" "${chrome_dir}"
@@ -92,6 +96,7 @@ runtime_ld_library_path="${library_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 # stdout is deliberately shell-sourceable; diagnostics stay on stderr.
 printf 'export CHROME_BINARY=%q\n' "${chrome_binary}"
 printf 'export CHROME_VERSION_MAIN=%q\n' "${chrome_major}"
+printf 'export CHROME_VERSION_FULL=%q\n' "${chrome_version}"
 printf 'export LD_LIBRARY_PATH=%q\n' "${runtime_ld_library_path}"
 printf 'export CHROME_FOR_TESTING_ROOT=%q\n' "${cache_root}"
 echo "[chrome-setup] Ready: $(LD_LIBRARY_PATH="${runtime_ld_library_path}" "${chrome_binary}" --version)" >&2

@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 try:
     from gmail_uc_checker import (
         PHONE_PROFILES,
+        get_chrome_version,
         get_chrome_version_main,
         get_chromium_path,
         make_stealth_js,
@@ -55,10 +56,12 @@ try:
 except ValueError:
     device_index = 0
 
-profile = PHONE_PROFILES[device_index]
+profile = dict(PHONE_PROFILES[device_index])
 model   = profile["model"]
 android = profile["androidVersion"]
-chrome  = profile["chromeVersion"]
+chromium_path = get_chromium_path()
+chrome = get_chrome_version(chromium_path) or profile["chromeVersion"]
+profile["chromeVersion"] = chrome
 
 UA = (
     f"Mozilla/5.0 (Linux; Android {android}; {model}) "
@@ -289,8 +292,13 @@ o.add_argument("--use-gl=swiftshader")
 o.add_argument("--enable-webgl")
 o.add_argument("--ignore-gpu-blocklist")
 o.add_argument("--disable-gpu-sandbox")
+# Chrome for Testing 151 can disconnect its renderer under Xvfb when GPU
+# compositing is enabled. Keep WebGL emulation flags above for the profile
+# surface, but disable the unstable host GPU process for a reliable session.
+o.add_argument("--disable-gpu")
 o.add_argument("--disable-blink-features=AutomationControlled")
-o.add_argument("--disable-features=ChromeWhatsNewUI,EnablePasswordsAccountStorage,OptimizationHints")
+# Chrome 151 exits its renderer under Xvfb when this legacy feature bundle is
+# passed, so leave it unset for Device Check stability.
 o.add_argument("--disable-extensions-http-throttling")
 o.add_argument("--no-default-browser-check")
 o.add_argument("--no-first-run")
@@ -308,6 +316,8 @@ try:
         options=o,
         browser_executable_path=chromium_path,
         version_main=chrome_version_main,
+        use_subprocess=True,
+        log_level=1,
     )
 except Exception as e:
     print(f"ERROR:Chrome launch failed: {str(e)[:400]}", flush=True)

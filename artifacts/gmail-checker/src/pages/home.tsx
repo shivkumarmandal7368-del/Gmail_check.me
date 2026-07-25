@@ -1863,7 +1863,7 @@ function DeviceChecker() {
               ))}
             </select>
             <p className="text-[11px] font-mono text-muted-foreground/70 pl-1">
-              {selectedDevice.sub} · Chrome 138
+              {selectedDevice.sub} · Chrome for Testing (latest stable)
             </p>
           </CardContent>
         </Card>
