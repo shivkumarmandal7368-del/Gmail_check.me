@@ -52,6 +52,11 @@ export const CheckEmailsResponse = zod.object({
  */
 export const browserCheckEmailsBodyCredentialsMax = 50;
 
+export const browserCheckEmailsBodyConcurrencyMax = 10;
+
+export const browserCheckEmailsBodyDeviceIndexMin = 0;
+export const browserCheckEmailsBodyDeviceIndexMax = 51;
+
 
 
 export const BrowserCheckEmailsBody = zod.object({
@@ -60,7 +65,10 @@ export const BrowserCheckEmailsBody = zod.object({
   "password": zod.string(),
   "totp": zod.string().optional().describe('Base32 TOTP secret from the authenticator app setup (optional — for 2FA accounts)')
 })).max(browserCheckEmailsBodyCredentialsMax),
-  "proxy": zod.string().optional().describe('Proxy URL to route browser traffic through (e.g. http:\/\/user:pass@host:port or socks5:\/\/host:port)')
+  "proxy": zod.string().optional().describe('Proxy URL to route browser traffic through (e.g. http:\/\/user:pass@host:port or socks5:\/\/host:port)'),
+  "concurrency": zod.number().min(1).max(browserCheckEmailsBodyConcurrencyMax).optional().describe('Number of browser checks to run concurrently'),
+  "freshProfile": zod.boolean().optional().describe('Use a fresh browser device profile for each run'),
+  "deviceIndex": zod.number().min(browserCheckEmailsBodyDeviceIndexMin).max(browserCheckEmailsBodyDeviceIndexMax).optional().describe('PHONE_PROFILES index shared with Device Check')
 })
 
 export const BrowserCheckEmailsResponse = zod.object({

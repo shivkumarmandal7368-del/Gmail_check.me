@@ -26,6 +26,7 @@ export interface StartJobParams {
   proxies?: string[];
   concurrency: number;
   freshProfile: boolean;
+  deviceIndex?: number;
 }
 
 /**
@@ -109,6 +110,7 @@ export function resumeJob(jobId: string): boolean {
     proxies: job.proxies,
     concurrency: job.concurrency,
     freshProfile: job.freshProfile,
+    deviceIndex: job.deviceIndex,
   }, false);
   return true;
 }
@@ -120,7 +122,7 @@ async function runBackground(
   params: StartJobParams,
   signal: AbortSignal,
 ): Promise<void> {
-  const { credentials, proxy, proxies, concurrency, freshProfile } = params;
+  const { credentials, proxy, proxies, concurrency, freshProfile, deviceIndex } = params;
 
   await browserLoginCheck(
     credentials,
@@ -150,6 +152,17 @@ async function runBackground(
       });
     },
     signal,
+    deviceIndex,
+    // Python's stderr is forwarded to the browser UI terminal without
+    // persisting credentials or proxy passwords.
+    (email, line) => {
+      emitJobEvent(jobId, {
+        type: "log",
+        timestamp: Date.now(),
+        email,
+        message: line,
+      });
+    },
   );
 
   // Don't emit "done" if the job was already cancelled via abort

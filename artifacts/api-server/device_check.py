@@ -44,6 +44,7 @@ try:
         make_stealth_js,
         make_plugins_override_js,
         parse_proxy,
+        DEVICE_FINGERPRINT_SNAPSHOT_PATH,
     )
 except Exception as e:
     print(f"ERROR:Cannot import PHONE_PROFILES: {e}", flush=True)
@@ -379,7 +380,19 @@ device_fp.update({
     "doNotTrack": None,
     "lat": 39.8283,
     "lon": -98.5795,
+    "geoLocked": True,
+    "ip": proxy_exit,
 })
+# Keep an exact local handoff for Browser Check. This file contains only the
+# selected device fingerprint; it never contains account credentials or proxy
+# credentials.
+try:
+    with open(f"{DEVICE_FINGERPRINT_SNAPSHOT_PATH}.tmp", "w") as snapshot_file:
+        json.dump({**device_fp, "deviceIndex": device_index}, snapshot_file, indent=2)
+    os.replace(f"{DEVICE_FINGERPRINT_SNAPSHOT_PATH}.tmp", DEVICE_FINGERPRINT_SNAPSHOT_PATH)
+    log("Exact Device Check fingerprint saved for Browser Check ✓")
+except Exception as snapshot_error:
+    log(f"Device fingerprint handoff skipped (non-fatal): {snapshot_error}")
 log(
     f"Browser profile applied → {model} | Android {android} | "
     f"{profile['webglVendor']} {profile['webglRenderer']} | "

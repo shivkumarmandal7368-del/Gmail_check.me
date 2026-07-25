@@ -124,6 +124,21 @@ function randomSessionId(): string {
   return Math.random().toString(36).slice(2, 10); // e.g. "a3f9k2xb"
 }
 
+function redactBrowserLog(line: string): string {
+  return line
+    .replace(
+      /(entering\s+(?:totp|2fa)[^:]*:\s*)\d{4,8}/gi,
+      "$1[redacted]",
+    )
+    .replace(
+      /(https?:\/\/)([^/\s:@]+):([^@\s]+)@/gi,
+      "$1[proxy-user]:[redacted]@",
+    )
+    // Keep the live terminal useful without ever exposing TOTP/password-like
+    // numeric codes emitted by the Python login flow.
+    .replace(/(?<!\d)\d{6,8}(?!\d)/g, "[redacted]");
+}
+
 async function checkOneAccount(
   email: string,
   password: string,
@@ -132,6 +147,8 @@ async function checkOneAccount(
   freshProfile = false,
   proxyForIpCheck?: string, // original URL (no sticky suffix) — used for pre-flight IP fetch via requests
   killSet?: Set<ChildProcess>, // shared set — caller kills all procs on abort
+  deviceIndex?: number,     // selected PHONE_PROFILES index; shared with Device Check
+  onLog?: (email: string, line: string) => void,
 ): Promise<BrowserLoginResult> {
   let totpCode: string | null = null;
   if (totpSecret) {
@@ -146,6 +163,7 @@ async function checkOneAccount(
     proxy: proxy ?? null,
     proxyForIpCheck: proxyForIpCheck ?? proxy ?? null,
     freshProfile,
+    deviceIndex: Number.isInteger(deviceIndex) ? deviceIndex : null,
   });
 
   console.log(`[BROWSER] ${email} — spawning Python UC checker`);
@@ -191,6 +209,12 @@ async function checkOneAccount(
       stderr += line;
       // Forward Python logs to our server stdout
       process.stdout.write(line);
+      // Also stream the same progress into the browser-check terminal.
+      // Split chunks because stderr data events are not guaranteed to be line-delimited.
+      for (const raw of line.split(/\r?\n/)) {
+        const trimmed = raw.trim();
+        if (trimmed) onLog?.(email, redactBrowserLog(trimmed));
+      }
     });
 
     proc.stdin.write(input, "utf8");
@@ -273,6 +297,8 @@ export async function browserLoginCheck(
   freshProfile = false,        // wipe Chrome profile + fingerprint before each check
   onAccountStart?: (email: string) => void,  // fires just before Python spawns (for SSE "checking" badge)
   signal?: AbortSignal,        // abort signal — checked before each new account starts
+  deviceIndex?: number,        // selected PHONE_PROFILES index — same profile as Device Check
+  onLog?: (email: string, line: string) => void, // Python progress for the browser terminal
 ): Promise<BrowserLoginResult[]> {
   // Proxy selection: rotation list takes priority over single proxy
   const getProxy = (idx: number): string | undefined => {
@@ -323,6 +349,8 @@ export async function browserLoginCheck(
         cred.email, cred.password, cred.totp,
         assignedProxy, freshProfile, baseProxy,
         killSet,  // pass kill-set so proc is registered for immediate SIGKILL on abort
+        deviceIndex,
+        onLog,
       ).catch(
         (err: unknown) => ({
           email: cred.email,

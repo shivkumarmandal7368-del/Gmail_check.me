@@ -37,7 +37,10 @@ router.post("/jobs", (req: Request, res: Response) => {
     return;
   }
 
-  const { credentials, proxy } = parsed.data;
+  const { credentials } = parsed.data;
+  // Match Device Check: use the configured residential proxy when the user
+  // does not provide an inline proxy for this browser job.
+  const proxy = parsed.data.proxy ?? process.env.PROXY_URL;
   if (credentials.length === 0) {
     res.status(400).json({ error: "No credentials provided" });
     return;
@@ -55,6 +58,13 @@ router.post("/jobs", (req: Request, res: Response) => {
     : [];
 
   const freshProfile = req.body.freshProfile === true;
+  const deviceIndex =
+    typeof req.body.deviceIndex === "number" &&
+    Number.isInteger(req.body.deviceIndex) &&
+    req.body.deviceIndex >= 0 &&
+    req.body.deviceIndex < 52
+      ? req.body.deviceIndex
+      : undefined;
 
   const jobId = startJob({
     credentials: credentials as Array<{ email: string; password: string; totp?: string }>,
@@ -62,6 +72,7 @@ router.post("/jobs", (req: Request, res: Response) => {
     proxies: proxies.length > 0 ? proxies : undefined,
     concurrency,
     freshProfile,
+    deviceIndex,
   });
 
   res.json({ jobId });
@@ -80,6 +91,7 @@ router.get("/jobs", (_req: Request, res: Response) => {
     completed: j.results.length,
     concurrency: j.concurrency,
     freshProfile: j.freshProfile,
+    deviceIndex: j.deviceIndex ?? null,
     errorMessage: j.errorMessage ?? null,
   }));
   res.json({ jobs });
@@ -228,6 +240,7 @@ function sanitizeJob(job: Job): object {
     total: job.total,
     concurrency: job.concurrency,
     freshProfile: job.freshProfile,
+    deviceIndex: job.deviceIndex ?? null,
     checkingEmails: job.checkingEmails,
     results: job.results,
     /** Number of events logged so far — used by the frontend for ?since=N */
@@ -237,6 +250,13 @@ function sanitizeJob(job: Job): object {
     credentialEmails: job.credentials.map(c => c.email),
     proxy: job.proxy ? maskProxy(job.proxy) : null,
     proxiesCount: job.proxies?.length ?? 0,
+    logs: job.events
+      .filter(event => event.type === "log")
+      .slice(-500)
+      .map(event => ({
+        email: typeof event.email === "string" ? event.email : undefined,
+        message: typeof event.message === "string" ? event.message : "",
+      })),
   };
 }
 

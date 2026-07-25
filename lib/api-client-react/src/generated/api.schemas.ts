@@ -82,6 +82,20 @@ export interface BrowserCheckInput {
   credentials: LoginCredential[];
   /** Proxy URL to route browser traffic through (e.g. http://user:pass@host:port or socks5://host:port) */
   proxy?: string;
+  /**
+     * Number of browser checks to run concurrently
+     * @minimum 1
+     * @maximum 10
+     */
+  concurrency?: number;
+  /** Use a fresh browser device profile for each run */
+  freshProfile?: boolean;
+  /**
+     * PHONE_PROFILES index shared with Device Check
+     * @minimum 0
+     * @maximum 51
+     */
+  deviceIndex?: number;
 }
 
 /**

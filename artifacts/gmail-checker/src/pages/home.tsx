@@ -455,7 +455,7 @@ function BrowserChecker() {
   // ── localStorage keys ────────────────────────────────────────────────────
   const LS = {
     input: "vbc_input", proxy: "vbc_proxy", concurrency: "vbc_conc",
-    fresh: "vbc_fresh", results: "vbc_results", total: "vbc_total",
+    fresh: "vbc_fresh", device: "vbc_device", results: "vbc_results", total: "vbc_total",
     active: "vbc_active", savedAt: "vbc_saved_at", jobId: "vbc_job_id",
     creds: "vbc_creds",
   } as const;
@@ -467,6 +467,7 @@ function BrowserChecker() {
   const [proxyText,    setProxyText]    = useState<string>(() => lsGet(LS.proxy, ""));
   const [concurrency,  setConcurrency]  = useState<number>(() => lsGet(LS.concurrency, 3));
   const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, false));
+  const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
   const [selectedUnknown, setSelectedUnknown] = useState<Set<string>>(new Set());
   const [total,        setTotal]        = useState<number>(() => lsGet(LS.total, 0));
@@ -494,6 +495,7 @@ function BrowserChecker() {
   const [proxyCheckState, setProxyCheckState] = useState<"idle"|"checking"|"ok"|"fail">("idle");
   const [proxyExitIp,     setProxyExitIp]     = useState<string>("");
   const [proxyCheckError, setProxyCheckError] = useState<string>("");
+  const [browserLogs, setBrowserLogs] = useState<Array<{ email?: string; message: string }>>([]);
 
   // refs
   const sseAbortRef      = useRef<AbortController | null>(null);
@@ -514,6 +516,7 @@ function BrowserChecker() {
   useEffect(() => { try { localStorage.setItem(LS.proxy,       JSON.stringify(proxyText));    } catch {} }, [proxyText]);
   useEffect(() => { try { localStorage.setItem(LS.concurrency, JSON.stringify(concurrency));  } catch {} }, [concurrency]);
   useEffect(() => { try { localStorage.setItem(LS.fresh,       JSON.stringify(freshProfile)); } catch {} }, [freshProfile]);
+  useEffect(() => { try { localStorage.setItem(LS.device,      JSON.stringify(deviceIndex));  } catch {} }, [deviceIndex]);
   useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
   useEffect(() => { try { localStorage.setItem(LS.total,       JSON.stringify(total));        } catch {} }, [total]);
   useEffect(() => { try { if (jobId) localStorage.setItem(LS.jobId, jobId); else localStorage.removeItem(LS.jobId); } catch {} }, [jobId]);
@@ -598,6 +601,12 @@ function BrowserChecker() {
     }).filter(Boolean) as Array<{ email: string; password: string; totp?: string }>;
 
   const applyJobState = (job: any) => {
+    setBrowserLogs(
+      (job.logs ?? []).map((entry: any) => ({
+        email: typeof entry.email === "string" ? entry.email : undefined,
+        message: String(entry.message ?? ""),
+      })).filter((entry: { message: string }) => entry.message),
+    );
     setResults(prev => {
       const merged = [...prev];
       for (const r of (job.results ?? [])) {
@@ -763,7 +772,12 @@ function BrowserChecker() {
   };
 
   const handleJobEvent = (evt: any) => {
-    if (evt.type === "checking") {
+    if (evt.type === "log") {
+      setBrowserLogs(prev => [
+        ...prev,
+        { email: typeof evt.email === "string" ? evt.email : undefined, message: String(evt.message ?? "") },
+      ].slice(-500));
+    } else if (evt.type === "checking") {
       setResults(prev => prev.some(r => r.email === evt.email) ? prev :
         [...prev, { email: evt.email, status: "checking" as const, reason: "Browser running…", totpCode: null }]);
     } else if (evt.type === "result") {
@@ -812,7 +826,7 @@ function BrowserChecker() {
     return JSON.stringify({
       credentials: creds,
       ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
-      concurrency, freshProfile,
+      concurrency, freshProfile, deviceIndex,
     });
   };
 
@@ -952,6 +966,7 @@ function BrowserChecker() {
     setProxyText("");
     setConcurrency(3);
     setFreshProfile(false);
+    setDeviceIndex(0);
   };
 
   const startRetryJob = async (creds: Array<{ email: string; password: string; totp?: string }>) => {
@@ -1061,6 +1076,7 @@ function BrowserChecker() {
     reconnecting: { text: "⟳ Reconnecting…",    cls: "text-yellow-400" },
     disconnected: { text: "✕ Disconnected",      cls: "text-red-400/70" },
   };
+  const selectedDevice = DEVICE_PROFILES[deviceIndex] ?? DEVICE_PROFILES[0];
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1182,6 +1198,26 @@ function BrowserChecker() {
             </div>
 
             {/* Fresh device toggle */}
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-mono uppercase tracking-widest text-purple-400/80 flex items-center gap-1">
+                <Smartphone className="w-3 h-3" /> Device Check Fingerprint
+              </label>
+              <select
+                value={deviceIndex}
+                onChange={e => setDeviceIndex(Number(e.target.value))}
+                disabled={isChecking}
+                className="w-full bg-background/50 border border-purple-500/40 rounded-md px-3 py-2 text-xs font-mono text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50 disabled:opacity-50"
+              >
+                {DEVICE_PROFILES.map(d => (
+                  <option key={d.index} value={d.index}>{d.label} · {d.sub}</option>
+                ))}
+              </select>
+              <p className="text-[10px] text-purple-300/60 font-mono leading-relaxed">
+                Browser Check isi profile ko use karega: {selectedDevice.label} · {selectedDevice.sub}. Exact latest fingerprint ke liye pehle Device Check RUN karein.
+              </p>
+            </div>
+
+            {/* Fresh device toggle */}
             <button onClick={() => !isChecking && setFreshProfile(f => !f)} disabled={isChecking}
               className={cn("w-full rounded-lg border p-3 text-left transition-colors",
                 freshProfile ? "border-blue-500/40 bg-blue-500/5" : "border-border bg-card/30 opacity-60")}>
@@ -1233,6 +1269,42 @@ function BrowserChecker() {
             </Button>
           </CardContent>
         </Card>
+
+        {(browserLogs.length > 0 || isChecking) && (
+          <Card className="border-border bg-card/40">
+            <CardHeader className="py-2 px-4 border-b border-border flex flex-row items-center justify-between">
+              <CardTitle className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase flex items-center gap-1.5">
+                <Terminal className="w-3 h-3 opacity-60" /> Browser Terminal
+              </CardTitle>
+              <span className="text-[10px] font-mono text-muted-foreground/50">{browserLogs.length} lines</span>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="h-[260px] overflow-y-auto bg-black/50 rounded-b-lg p-3 font-mono text-[10px] space-y-0.5">
+                {browserLogs.map((entry, i) => (
+                  <div key={`${i}-${entry.message}`} className={cn(
+                    "leading-relaxed break-words",
+                    entry.message.includes("ERROR") ? "text-red-400" :
+                    entry.message.includes("WARNING") || entry.message.includes("⚠") ? "text-yellow-400" :
+                    entry.message.includes("✓") || entry.message.includes("opened") ? "text-green-400" :
+                    "text-slate-300",
+                  )}>
+                    <span className="text-slate-600 mr-2 select-none">{String(i + 1).padStart(3, "0")}</span>
+                    {entry.email && <span className="text-purple-400/70 mr-2">[{entry.email}]</span>}
+                    {entry.message}
+                  </div>
+                ))}
+                {browserLogs.length === 0 && (
+                  <div className="text-slate-500">Browser process starting…</div>
+                )}
+                {isChecking && (
+                  <div className="text-blue-400 flex items-center gap-1 pt-1">
+                    <Loader2 className="w-3 h-3 animate-spin" /> live output…
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {(results.length > 0 || isChecking) && (
           <div className="grid grid-cols-3 md:grid-cols-5 gap-2">
@@ -1753,7 +1825,15 @@ const DEVICE_PROFILES = [
 ];
 
 function DeviceChecker() {
-  const [deviceIndex,  setDeviceIndex]  = useState(0);
+  const [deviceIndex,  setDeviceIndex]  = useState(() => {
+    try {
+      const saved = localStorage.getItem("vbc_device");
+      const parsed = saved ? JSON.parse(saved) : 0;
+      return Number.isInteger(parsed) && parsed >= 0 && parsed < DEVICE_PROFILES.length ? parsed : 0;
+    } catch {
+      return 0;
+    }
+  });
   const [proxyText,    setProxyText]    = useState("");
   const [proxyMode,    setProxyMode]    = useState<"secret"|"custom">("secret");
   const [status,       setStatus]       = useState<"idle"|"running"|"done"|"error">("idle");
@@ -1764,6 +1844,9 @@ function DeviceChecker() {
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
+  useEffect(() => {
+    try { localStorage.setItem("vbc_device", JSON.stringify(deviceIndex)); } catch {}
+  }, [deviceIndex]);
 
   const runCheck = async () => {
     setStatus("running");

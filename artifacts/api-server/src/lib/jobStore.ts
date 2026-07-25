@@ -55,6 +55,8 @@ export interface Job {
   proxies?: string[];
   concurrency: number;
   freshProfile: boolean;
+  /** Selected PHONE_PROFILES index shared with Device Check. */
+  deviceIndex?: number;
 
   /** Progress */
   total: number;
@@ -144,6 +146,7 @@ export function createJob(params: {
   proxies?: string[];
   concurrency: number;
   freshProfile: boolean;
+  deviceIndex?: number;
 }): Job {
   const id = randomBytes(8).toString("hex");
   const job: Job = {

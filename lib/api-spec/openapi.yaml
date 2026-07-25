@@ -249,6 +249,19 @@ components:
         proxy:
           type: string
           description: "Proxy URL to route browser traffic through (e.g. http://user:pass@host:port or socks5://host:port)"
+        concurrency:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: "Number of browser checks to run concurrently"
+        freshProfile:
+          type: boolean
+          description: "Use a fresh browser device profile for each run"
+        deviceIndex:
+          type: integer
+          minimum: 0
+          maximum: 51
+          description: "PHONE_PROFILES index shared with Device Check"
 
     BrowserLoginResult:
       type: object
