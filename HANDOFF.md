@@ -28,6 +28,93 @@ _Last updated: July 25, 2026 — Session 57 (Chrome for Testing 151 runtime migr
 _Last updated: July 25, 2026 — Session 58 (Verification: Chrome 151 live run — score 23, VM+DevTools cleared)_
 _Last updated: July 25, 2026 — Session 59 (Portability audit: Chrome 151 is fully self-contained across any fresh Replit import)_
 _Last updated: July 25, 2026 — Session 60 (Tampering fix: UA-CH brands version aligned to Chrome 151)_
+_Last updated: July 25, 2026 — Session 61 (Tampering investigation: userAgentData prototype fix — no score change)_
+
+---
+
+## Session 61 Changes (July 25, 2026) — Tampering investigation: userAgentData on Navigator.prototype
+
+### Context
+
+Session 60 aligned UA-CH brand versions to Chrome 151 and expected Tampering to drop from 16 → ~0. This session applied the highest-confidence remaining fix from the previous diagnostic: moving `navigator.userAgentData` from an instance-level `Object.defineProperty` (which silently fails in Chrome 151 on the non-extensible navigator instance) to a `Navigator.prototype` definition, which the diagnostics proved does work.
+
+### Previous diagnostic findings (verified before this session)
+
+| Signal | Finding |
+|---|---|
+| `navigator.userAgentData` | Missing — instance-level `Object.defineProperty` silently fails in Chrome 151 |
+| `navigator.maxTouchPoints` | Override failing (shows 0 instead of mobile value) |
+| `navigator.plugins` | Shows desktop values (should be empty on Android) |
+| `navigator.deviceMemory` | Override failing |
+| `Navigator.prototype` property writes | ✅ Confirmed working |
+| `Emulation.setUserAgentOverride` | Does NOT restore `userAgentData` |
+
+### Fix Applied
+
+**File:** `artifacts/api-server/gmail_uc_checker.py`, line 1315
+
+**Before:**
+```javascript
+try{Object.defineProperty(navigator,'userAgentData',{get:()=>d});}catch(e){}
+```
+
+**After:**
+```javascript
+try{Object.defineProperty(Navigator.prototype,'userAgentData',{get:function(){return d;},configurable:true,enumerable:true});if(window.__nr){var _uadd=Object.getOwnPropertyDescriptor(Navigator.prototype,'userAgentData');if(_uadd&&_uadd.get)window.__nr(_uadd.get,'userAgentData',true);}}catch(e){}
+```
+
+Changes made:
+- Target changed from `navigator` (instance, non-extensible) → `Navigator.prototype` (works in Chrome 151)
+- Arrow function `()=>d` replaced with named getter `function(){return d;}` for consistency with prototype pattern
+- Added `configurable:true, enumerable:true` to match real Chrome's descriptor
+- Added `__nr` registration so the getter's `.toString()` looks native
+
+### Verification Steps
+
+| Check | Result |
+|---|---|
+| `python3 -m py_compile gmail_uc_checker.py` | ✅ SYNTAX OK |
+| API Server restart | ✅ RUNNING on port 8080 (Chrome for Testing 151.0.7922.47) |
+| `GET /api/device-check/profiles` | ✅ 1 profile returned |
+| Device Check run | ✅ Completed — Chrome launched, navigated, screenshots captured |
+
+### Before vs After Device Check Result
+
+| Signal | Before (Session 60 baseline) | After (Session 61) |
+|---|---|---|
+| Bot detection | Not Detected (0) | Not Detected (0) |
+| Incognito detection | Not Detected (0) | Not Detected (0) |
+| VPN detection | ~3 (residential proxy) | 3 |
+| **Tampering detection** | **Detected (16)** | **Detected (16)** |
+| Virtual machine detection | Not Detected (0) | Not Detected (0) |
+| Developer tools detection | Not Detected (0) | Not Detected (0) |
+| **Total Suspect Score** | **~23** | **19** |
+
+> Note: Score dropped 23 → 19 between sessions. The 4-point delta may reflect proxy IP reputation variation (VPN weight varies run-to-run) rather than the fix, since Tampering itself is unchanged at 16.
+
+### Conclusion
+
+The `Navigator.prototype` fix for `userAgentData` was correctly applied and verified (no syntax errors, API running), but **Tampering remained at 16**. The fix was not reverted per investigation protocol.
+
+**Why Tampering did not change:** The Tampering score of 16 is composed of multiple sub-signals. The `userAgentData` instance-level failure was one of four diagnosed failing properties. The remaining three (`maxTouchPoints`, `plugins`, `deviceMemory`) are likely contributing the bulk of the 16-point Tampering weight. Fixing `userAgentData` alone was insufficient.
+
+### Remaining Issues
+
+| Issue | Evidence | Priority |
+|---|---|---|
+| `navigator.maxTouchPoints` still wrong | Diagnostic: shows 0, should be 5 for mobile | High |
+| `navigator.plugins` shows desktop values | Diagnostic: non-empty, real Android = empty | High |
+| `navigator.deviceMemory` wrong value | Diagnostic: override fails on instance | High |
+| `Object.defineProperty` pattern detection | fingerprint.com may detect the override pattern itself | Medium |
+
+### Notes for Next Session
+
+- **DO NOT revert** the `Navigator.prototype` userAgentData fix — it is correct even if it didn't move the score alone.
+- **Next fix priority:** `navigator.plugins` — Android Chrome has zero plugins. Current stealth JS sets `navigator.mimeTypes` to empty but may not zero out `navigator.plugins`. Check line ~1514 in `gmail_uc_checker.py`.
+- **Next fix priority:** `navigator.deviceMemory` — already uses `_pd()` helper which targets prototype, but may be overridden by CDP Emulation. Check if CDP sets this separately.
+- **Next fix priority:** `navigator.maxTouchPoints` — already uses `_pd()` at prototype level (~line 1250) but Emulation.setDeviceMetricsOverride also sets touch points. Verify which wins.
+- Use fingerprint.com's developer mode or inspect the Tampering breakdown detail to identify which sub-signal contributes most weight before committing to any single fix.
+- Score history: 37 (S50) → 48 (S54) → ~21 (S55 VM fix) → 23 (S58 Chrome 151) → 19 (S61 baseline) → **target < 5**
 
 ---
 

@@ -1312,7 +1312,7 @@ try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable
   var d={{brands:[{{brand:'Not(A;Brand',version:'8'}},{{brand:'Chromium',version:'{cv_major}'}},{{brand:'Google Chrome',version:'{cv_major}'}}],mobile:true,platform:'Android',
     getHighEntropyValues:function(h){{return Promise.resolve({{brands:this.brands,mobile:this.mobile,platform:this.platform,platformVersion:'{av}',architecture:'',bitness:'',model:'{mdl}',uaFullVersion:'{cv}',fullVersionList:[{{brand:'Not(A;Brand',version:'8.0.0.0'}},{{brand:'Chromium',version:'{cv}'}},{{brand:'Google Chrome',version:'{cv}'}}]}});}},
     toJSON:function(){{return{{brands:this.brands,mobile:this.mobile,platform:this.platform}};}}}};
-  try{{Object.defineProperty(navigator,'userAgentData',{{get:()=>d}});}}catch(e){{}}
+  try{{Object.defineProperty(Navigator.prototype,'userAgentData',{{get:function(){{return d;}},configurable:true,enumerable:true}});if(window.__nr){{var _uadd=Object.getOwnPropertyDescriptor(Navigator.prototype,'userAgentData');if(_uadd&&_uadd.get)window.__nr(_uadd.get,'userAgentData',true);}}}}catch(e){{}}
 }})();
 (function(){{
   if(!window.chrome)window.chrome={{}};
