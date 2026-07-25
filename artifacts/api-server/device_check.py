@@ -147,9 +147,13 @@ try:
     ).json().get("ip")
     proxy_session = requests.Session()
     proxy_session.trust_env = False
+    # Force http:// scheme for proxy connection — residential proxies only do HTTP
+    _pu = PROXY_URL
+    if _pu.startswith("https://"):
+        _pu = "http://" + _pu[8:]
     proxy_exit = proxy_session.get(
-        "https://api.ipify.org?format=json",
-        proxies={"http": PROXY_URL, "https": PROXY_URL},
+        "http://api.ipify.org?format=json",
+        proxies={"http": _pu, "https": _pu},
         timeout=15,
     ).json().get("ip")
     if not proxy_exit:

@@ -12,25 +12,9 @@ mkdir -p "${cache_root}"
 exec 9>"${cache_root}/.install.lock"
 flock 9
 
-read -r chrome_version chrome_url < <(
-  python3 - "${manifest_url}" <<'PY'
-import json
-import sys
-import urllib.request
-
-with urllib.request.urlopen(sys.argv[1], timeout=20) as response:
-    manifest = json.load(response)
-
-stable = manifest["channels"]["Stable"]
-version = stable["version"]
-url = next(
-    item["url"]
-    for item in stable["downloads"]["chrome"]
-    if item["platform"] == "linux64"
-)
-print(version, url)
-PY
-)
+# ── Pinned to Chrome 149 (residential-proxy compatibility) ───────────────────
+chrome_version="149.0.7827.155"
+chrome_url="https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.155/linux64/chrome-linux64.zip"
 
 chrome_dir="${cache_root}/${chrome_version}"
 chrome_binary="${chrome_dir}/chrome-linux64/chrome"

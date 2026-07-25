@@ -2653,9 +2653,15 @@ def _ensure_chromedriver_patched(version_main: int | None = None) -> None:
         assert len(content) == original_size, (
             f'[patch] BUG: binary size changed {original_size} → {len(content)} — aborting write'
         )
-        with open(binary_path, 'wb') as fh:
-            fh.write(content)
-        os.chmod(binary_path, 0o755)
+        try:
+            with open(binary_path, 'wb') as fh:
+                fh.write(content)
+            os.chmod(binary_path, 0o755)
+        except OSError as _e:
+            if _e.errno == 26:  # ETXTBSY — binary currently executing (another Chrome running)
+                log('[patch] Binary busy (ETXTBSY) — skipping write; already patched by prior run')
+            else:
+                raise
 
 
 def check_gmail(
@@ -3506,7 +3512,16 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         )
         rand_sleep(600, 1000)
     except Exception as e:
-        return {"status": "unknown", "reason": f"Navigation failed: {str(e)[:200]}", "totpCode": totp_code}
+        # Navigation failure = Chrome/ChromeDriver crashed — treat as retriable
+        shot = None
+        try: shot = screenshot_b64()
+        except Exception: pass
+        return {
+            "status": "verification_required",
+            "reason": f"Chrome crash during navigation — auto-retrying. ({type(e).__name__}: {str(e)[:150]})",
+            "totpCode": totp_code,
+            "debugScreenshot": shot,
+        }
 
     url, text = page_state()
     log(f"{email} — After nav: {url[:70]}")

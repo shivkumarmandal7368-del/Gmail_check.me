@@ -26,9 +26,13 @@ router.post("/proxy/check", (req, res) => {
 import sys, json, requests
 proxy_url = sys.stdin.readline().strip()
 try:
+    # Force http:// scheme — residential proxies only do plain HTTP CONNECT
+    _pu = proxy_url
+    if _pu.startswith("https://"):
+        _pu = "http://" + _pu[8:]
     r = requests.get(
-        "https://api.ipify.org?format=json",
-        proxies={"http": proxy_url, "https": proxy_url},
+        "http://api.ipify.org?format=json",
+        proxies={"http": _pu, "https": _pu},
         timeout=12,
     )
     r.raise_for_status()
