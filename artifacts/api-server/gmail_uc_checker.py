@@ -1181,6 +1181,7 @@ def make_stealth_js(fp: dict) -> str:
     wgl1_js = _json.dumps(_wgl1)
     wgl2_js = _json.dumps(_wgl2)
     cv   = fp["chromeVersion"]
+    cv_major = cv.split(".")[0]   # e.g. "151" — used in UA-CH brands low-entropy array
     av   = fp["androidVersion"]
     mdl  = fp["model"].replace("'", "\\'")
     tz   = fp.get("timezone", "America/New_York").replace("'", "\\'")
@@ -1308,7 +1309,7 @@ def make_stealth_js(fp: dict) -> str:
 // maxTouchPoints, platform, vendor, appVersion now set on Navigator.prototype above
 try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable:true}});}}catch(e){{}}
 (function(){{
-  var d={{brands:[{{brand:'Not(A;Brand',version:'8'}},{{brand:'Chromium',version:'138'}},{{brand:'Google Chrome',version:'138'}}],mobile:true,platform:'Android',
+  var d={{brands:[{{brand:'Not(A;Brand',version:'8'}},{{brand:'Chromium',version:'{cv_major}'}},{{brand:'Google Chrome',version:'{cv_major}'}}],mobile:true,platform:'Android',
     getHighEntropyValues:function(h){{return Promise.resolve({{brands:this.brands,mobile:this.mobile,platform:this.platform,platformVersion:'{av}',architecture:'',bitness:'',model:'{mdl}',uaFullVersion:'{cv}',fullVersionList:[{{brand:'Not(A;Brand',version:'8.0.0.0'}},{{brand:'Chromium',version:'{cv}'}},{{brand:'Google Chrome',version:'{cv}'}}]}});}},
     toJSON:function(){{return{{brands:this.brands,mobile:this.mobile,platform:this.platform}};}}}};
   try{{Object.defineProperty(navigator,'userAgentData',{{get:()=>d}});}}catch(e){{}}
@@ -2350,8 +2351,8 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             "userAgentMetadata": {
                 "brands": [
                     {"brand": "Not(A;Brand",   "version": "8"},
-                    {"brand": "Chromium",       "version": "138"},
-                    {"brand": "Google Chrome",  "version": "138"},
+                    {"brand": "Chromium",       "version": fp["chromeVersion"].split(".")[0]},
+                    {"brand": "Google Chrome",  "version": fp["chromeVersion"].split(".")[0]},
                 ],
                 "fullVersion": fp["chromeVersion"],
                 "platform": "Android",

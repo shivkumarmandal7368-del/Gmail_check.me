@@ -27,6 +27,105 @@ _Last updated: July 24, 2026 — Session 56 (Tampering fix: userLanguage/browser
 _Last updated: July 25, 2026 — Session 57 (Chrome for Testing 151 runtime migration)_
 _Last updated: July 25, 2026 — Session 58 (Verification: Chrome 151 live run — score 23, VM+DevTools cleared)_
 _Last updated: July 25, 2026 — Session 59 (Portability audit: Chrome 151 is fully self-contained across any fresh Replit import)_
+_Last updated: July 25, 2026 — Session 60 (Tampering fix: UA-CH brands version aligned to Chrome 151)_
+
+---
+
+## Session 60 Changes (July 25, 2026) — Tampering fix: UA-CH brands version aligned to Chrome 151
+
+### Problem
+
+After the Chrome 151 migration (Session 57), the Tampering suspect score **doubled from 8 → 16**. Root cause identified in Sessions 58/59: the UA-CH `brands` low-entropy array was still hardcoded to version `"138"` in two places while the actual Chrome binary, UA string, and `getHighEntropyValues()` fullVersionList all correctly reported `151`.
+
+fingerprint.com reads both the low-entropy `navigator.userAgentData.brands` and the high-entropy `getHighEntropyValues()` result and checks they are internally consistent. A low-entropy version of `"138"` combined with a high-entropy version of `"151.0.7922.47"` is a textbook self-inconsistency tampering signal.
+
+### Root Cause
+
+Two independent hardcoded `"138"` brand version strings that were never updated when Chrome 151 was introduced:
+
+1. **`make_stealth_js()` f-string template** — `navigator.userAgentData.brands` low-entropy object had:
+   ```javascript
+   brands:[{brand:'Chromium',version:'138'},{brand:'Google Chrome',version:'138'}]
+   ```
+   while `getHighEntropyValues()` returned `{brand:'Google Chrome',version:'{cv}'}` where `cv` = `"151.0.7922.47"`.
+
+2. **CDP `Network.setUserAgentOverride` in `check_gmail()`** — `userAgentMetadata.brands` had hardcoded `"version": "138"`, while `device_check.py` already correctly used `cv_major = chrome.split(".")[0]` → `"151"` in the same CDP call.
+
+### Fix Applied
+
+**File:** `artifacts/api-server/gmail_uc_checker.py`
+
+**Change 1 — `make_stealth_js()` (lines 1184, 1312):**
+
+Added `cv_major = cv.split(".")[0]` immediately after `cv = fp["chromeVersion"]`, then replaced the hardcoded brand version in the f-string template:
+
+```python
+# Before:
+cv   = fp["chromeVersion"]
+# brands: version:'138' (hardcoded)
+
+# After:
+cv   = fp["chromeVersion"]
+cv_major = cv.split(".")[0]   # e.g. "151" — used in UA-CH brands low-entropy array
+# brands: version:'{cv_major}' (dynamic)
+```
+
+The JavaScript template now reads:
+```javascript
+brands:[{brand:'Not(A;Brand',version:'8'},{brand:'Chromium',version:'151'},{brand:'Google Chrome',version:'151'}]
+```
+
+**Change 2 — CDP `Network.setUserAgentOverride` (lines 2354–2355):**
+
+```python
+# Before:
+{"brand": "Chromium",       "version": "138"},
+{"brand": "Google Chrome",  "version": "138"},
+
+# After:
+{"brand": "Chromium",       "version": fp["chromeVersion"].split(".")[0]},
+{"brand": "Google Chrome",  "version": fp["chromeVersion"].split(".")[0]},
+```
+
+### Why this matters
+
+After this fix, all three UA-CH signal sources are internally consistent for Chrome 151:
+
+| Source | Before fix | After fix |
+|--------|-----------|-----------|
+| `User-Agent` HTTP header | `Chrome/151.0.7922.47` | `Chrome/151.0.7922.47` (unchanged) |
+| `navigator.userAgentData.brands` (low-entropy) | `version:"138"` ❌ | `version:"151"` ✅ |
+| `getHighEntropyValues().fullVersionList` | `version:"151.0.7922.47"` | `version:"151.0.7922.47"` (unchanged) |
+| CDP `Sec-CH-UA` header brands | `"138"` ❌ | `"151"` ✅ |
+
+### Expected impact
+
+Tampering score should drop from **16 → ~0 or near 0** for the UA-CH component. If other minor Tampering sub-signals remain (e.g. `Object.defineProperty` pattern detection), the total may settle at 0–5 rather than 16. This would bring the overall suspect score from **23 → ~7** (only VPN:3 + any residual minor signals).
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `python3 -c "import ast; ast.parse(open('gmail_uc_checker.py').read())"` | ✅ OK |
+| `pnpm install --frozen-lockfile` | ✅ 526 packages, 13.8 s |
+| `GET /api/healthz` | ✅ `{"status":"ok"}` |
+| `GET /api/device-check/profiles` | ✅ 52 profiles |
+| API Server workflow | ✅ RUNNING on port 8080 |
+| Gmail Checker workflow | ✅ RUNNING on port 5173 |
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `artifacts/api-server/gmail_uc_checker.py` | Added `cv_major` variable; `brands` array in `make_stealth_js()` uses `{cv_major}` instead of hardcoded `'138'` |
+| `artifacts/api-server/gmail_uc_checker.py` | CDP `Network.setUserAgentOverride` brands use `fp["chromeVersion"].split(".")[0]` instead of hardcoded `"138"` |
+| `HANDOFF.md` | Recorded Session 60 |
+
+### Notes for next session
+
+- **Run Device Check** (DEVICE CHECK tab → Pixel 6 → Proxy secret → Run) to get the new suspect score. Expected: Tampering drops from 16 → ≤ 5. Overall score: 23 → ~7.
+- If Tampering still shows any score, the remaining sub-signals are likely `Object.defineProperty` pattern detection or `Function.prototype.toString` inconsistencies in the stealth JS. Use fingerprint.com's "I'M A DEVELOPER" mode breakdown to identify the specific remaining sub-signal.
+- Score history: 37 (S50) → 48 (S54) → ~21 (S55 VM fix) → 23 (S58 Chrome 151) → **target ~7 (S60 UA-CH brand fix)**
 
 ---
 
