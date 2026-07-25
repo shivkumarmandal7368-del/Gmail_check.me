@@ -1245,18 +1245,61 @@ def make_stealth_js(fp: dict) -> str:
   }}
   _pd('hardwareConcurrency',{fp['hwConcurrency']});
   _pd('deviceMemory',{fp['deviceMemory']});
+  // Also attempt instance-level override for deviceMemory — in Chrome 151 this is
+  // a [SecureContext] attribute; the prototype descriptor may be non-configurable
+  // or the instance own-property may shadow it. Belt-and-suspenders both levels.
+  try{{Object.defineProperty(navigator,'deviceMemory',{{get:function(){{return {fp['deviceMemory']};}},configurable:true,enumerable:true}});}}catch(e){{}}
   _pd('cookieEnabled',true);
   _pd('doNotTrack',{dnt_val});
   _pd('maxTouchPoints',{fp['maxTouchPoints']});
   _pd('platform','{fp['platform']}');
   _pd('vendor','Google Inc.');
   _pd('appVersion','{av_str}');
-  // Android Chrome has 0 plugins.
-  // CONFIRMED: Object.defineProperty(PluginArray.prototype,'length',...) is silently rejected by
-  // Chrome 151 at runtime — native C++ getter is retained regardless of configurable:true.
-  // Fix: plain object with explicit length:0 — no PluginArray.prototype inheritance needed.
-  // instanceof PluginArray becomes false, but the length mismatch (5 vs 0) is the tamper signal.
-  try{{Object.defineProperty(_np,'plugins',{{get:function(){{var fa={{length:0,item:function(){{return null;}},namedItem:function(){{return null;}},refresh:function(){{}},constructor:PluginArray}};fa[Symbol.iterator]=function(){{return {{next:function(){{return {{done:true,value:undefined}};}}}};}};return fa;}},configurable:true,enumerable:true}});if(window.__nr){{var _ppd=Object.getOwnPropertyDescriptor(_np,'plugins');if(_ppd&&_ppd.get)window.__nr(_ppd.get,'plugins',true);}}}}catch(e){{}}
+  // Android Chrome: 0 plugins, 0 mimeTypes.
+  //
+  // Confirmed root causes (runtime diagnostic):
+  //   (a) navigator instance is non-extensible — instance-level defineProperty rejected
+  //   (b) bare `navigator` identifier bypasses window.navigator getter in V8 — replacing
+  //       window.navigator does NOT affect navigator.plugins via bare identifier
+  //   (c) Object.getPrototypeOf(navigator) may be a MIXIN prototype, not Navigator.prototype
+  //       — overriding _np at the direct-proto level misses the real getter location
+  //
+  // Fix — two layers applied unconditionally (not try/catch fallback):
+  //   L1: Walk the FULL prototype chain of navigator; override plugins/mimeTypes at every
+  //       level that owns them. Explicitly include Navigator.prototype (global JS constructor)
+  //       which may not equal the direct Object.getPrototypeOf(navigator).
+  //   L2: Replace window.navigator for code paths that use window.navigator explicitly.
+  (function(){{
+    var _fp={{length:0,item:function(){{return null;}},namedItem:function(){{return null;}},refresh:function(){{}}}};
+    _fp[Symbol.iterator]=function(){{return{{next:function(){{return{{done:true,value:undefined}};}}}};}}; 
+    var _fm={{length:0,item:function(){{return null;}},namedItem:function(){{return null;}}}};
+    _fm[Symbol.iterator]=function(){{return{{next:function(){{return{{done:true,value:undefined}};}}}};}}; 
+    var _gp=function(){{return _fp;}};
+    var _gm=function(){{return _fm;}};
+    if(window.__nr){{window.__nr(_gp,'plugins',true);window.__nr(_gm,'mimeTypes',true);}}
+    // ── L1: override on every prototype level that owns the property ───────────
+    var _chain=[];
+    var _ptr=Object.getPrototypeOf(navigator);
+    while(_ptr&&_ptr!==Object.prototype){{_chain.push(_ptr);_ptr=Object.getPrototypeOf(_ptr);}}
+    if(_chain.indexOf(Navigator.prototype)<0)_chain.push(Navigator.prototype);
+    _chain.forEach(function(pr){{
+      if(Object.getOwnPropertyDescriptor(pr,'plugins')){{
+        try{{Object.defineProperty(pr,'plugins',{{get:_gp,configurable:true,enumerable:true}});}}catch(e){{}}
+      }}
+      if(Object.getOwnPropertyDescriptor(pr,'mimeTypes')){{
+        try{{Object.defineProperty(pr,'mimeTypes',{{get:_gm,configurable:true,enumerable:true}});}}catch(e){{}}
+      }}
+    }});
+    // ── L2: replace window.navigator for window.navigator.plugins access paths ─
+    try{{
+      var _rn=navigator;
+      var _fn=Object.create(_rn);
+      Object.defineProperty(_fn,'plugins',{{get:_gp,configurable:true,enumerable:true}});
+      Object.defineProperty(_fn,'mimeTypes',{{get:_gm,configurable:true,enumerable:true}});
+      Object.defineProperty(_fn,'deviceMemory',{{get:function(){{return {fp['deviceMemory']};}},configurable:true,enumerable:true}});
+      Object.defineProperty(window,'navigator',{{get:function(){{return _fn;}},configurable:true,enumerable:true}});
+    }}catch(e3){{}}
+  }})();
   try{{Object.defineProperty(_np,'languages',{{get:function(){{return['{lg}','en'];}},configurable:true}});}}catch(e){{}}
   try{{Object.defineProperty(_np,'language',{{get:function(){{return'{lg}';}},configurable:true}});}}catch(e){{}}
   try{{Object.defineProperty(_np,'globalPrivacyControl',{{get:function(){{return undefined;}},configurable:true}});}}catch(e){{}}

@@ -94,11 +94,11 @@ except ImportError as e:
     sys.exit(1)
 
 # ── Proxy — PROXY_OVERRIDE env takes priority over Proxy secret ───────────────
-PROXY_URL = os.environ.get("PROXY_OVERRIDE", "").strip() or os.environ.get("Proxy", "").strip()
+PROXY_URL = os.environ.get("PROXY_OVERRIDE", "").strip() or os.environ.get("PROXY_URL", "").strip() or os.environ.get("Proxy", "").strip()
 if not PROXY_URL:
     print(
         "ERROR:No proxy configured. Select Custom and enter the residential proxy URL, "
-        "or configure the Proxy secret before running Device Check.",
+        "or configure the PROXY_URL secret before running Device Check.",
         flush=True,
     )
     xvfb.terminate()
@@ -511,8 +511,9 @@ try:
                 is_js_fn:     typeof ma_desc.get === 'function',
                 toString:     ma_desc.get ? ma_desc.get.toString().substring(0,120) : null
             } : 'no own desc',
-            nav_plugins_own:  np_own  ? 'HAS OWN PROP' : 'no own',
-            nav_plugins_proto: np_prot ? (typeof np_prot.get === 'function' ? 'js-getter' : 'non-getter') : 'not found',
+            nav_plugins_own:  np_own  ? (typeof np_own.get === 'function' ? 'own-js-getter:'+np_own.get.toString().substring(0,60) : 'own-value') : 'no own',
+            nav_plugins_proto: np_prot ? (typeof np_prot.get === 'function' ? 'proto-js-getter:cfg='+np_prot.configurable+':'+np_prot.get.toString().substring(0,60) : 'non-getter') : 'not found',
+            window_nav_replaced: (function(){ try{ return Object.getOwnPropertyDescriptor(window,'navigator') ? (typeof Object.getOwnPropertyDescriptor(window,'navigator').get === 'function' ? 'yes-getter' : 'value') : 'not-own'; }catch(e){return 'err:'+e;} })(),
             userAgentData: navigator.userAgentData ? JSON.stringify({
                 mobile:   navigator.userAgentData.mobile,
                 platform: navigator.userAgentData.platform,
