@@ -42,6 +42,7 @@ try:
         get_chrome_version_main,
         get_chromium_path,
         make_stealth_js,
+        make_plugins_override_js,
         parse_proxy,
     )
 except Exception as e:
@@ -386,6 +387,11 @@ log(
 try:
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": make_stealth_js(device_fp),
+    })
+    # Second-pass inject: plugins/mimeTypes override runs after main stealth JS
+    # so that Chrome's C++ has already made Navigator.prototype.plugins configurable.
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": make_plugins_override_js(),
     })
     log("Device fingerprint patches injected ✓")
 except Exception as e:

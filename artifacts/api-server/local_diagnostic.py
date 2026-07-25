@@ -24,6 +24,7 @@ from gmail_uc_checker import (
     get_chrome_version_main,
     get_chromium_path,
     make_stealth_js,
+    make_plugins_override_js,
     parse_proxy,
     _find_free_port,
 )
@@ -236,6 +237,11 @@ print("Chrome launched ✓\n")
 try:
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
                            {"source": make_stealth_js(profile)})
+    # Second-pass inject: plugins/mimeTypes override (must run after main stealth JS
+    # because Chrome's C++ only makes Navigator.prototype.plugins configurable after
+    # the first injected script finishes). See make_plugins_override_js().
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
+                           {"source": make_plugins_override_js()})
     print("Stealth JS injected ✓")
 except Exception as e:
     print(f"ERROR: Stealth JS injection failed: {e}")

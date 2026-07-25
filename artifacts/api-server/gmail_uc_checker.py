@@ -1256,50 +1256,10 @@ def make_stealth_js(fp: dict) -> str:
   _pd('vendor','Google Inc.');
   _pd('appVersion','{av_str}');
   // Android Chrome: 0 plugins, 0 mimeTypes.
-  //
-  // Confirmed root causes (runtime diagnostic):
-  //   (a) navigator instance is non-extensible — instance-level defineProperty rejected
-  //   (b) bare `navigator` identifier bypasses window.navigator getter in V8 — replacing
-  //       window.navigator does NOT affect navigator.plugins via bare identifier
-  //   (c) Object.getPrototypeOf(navigator) may be a MIXIN prototype, not Navigator.prototype
-  //       — overriding _np at the direct-proto level misses the real getter location
-  //
-  // Fix — two layers applied unconditionally (not try/catch fallback):
-  //   L1: Walk the FULL prototype chain of navigator; override plugins/mimeTypes at every
-  //       level that owns them. Explicitly include Navigator.prototype (global JS constructor)
-  //       which may not equal the direct Object.getPrototypeOf(navigator).
-  //   L2: Replace window.navigator for code paths that use window.navigator explicitly.
-  (function(){{
-    var _fp={{length:0,item:function(){{return null;}},namedItem:function(){{return null;}},refresh:function(){{}}}};
-    _fp[Symbol.iterator]=function(){{return{{next:function(){{return{{done:true,value:undefined}};}}}};}}; 
-    var _fm={{length:0,item:function(){{return null;}},namedItem:function(){{return null;}}}};
-    _fm[Symbol.iterator]=function(){{return{{next:function(){{return{{done:true,value:undefined}};}}}};}}; 
-    var _gp=function(){{return _fp;}};
-    var _gm=function(){{return _fm;}};
-    if(window.__nr){{window.__nr(_gp,'plugins',true);window.__nr(_gm,'mimeTypes',true);}}
-    // ── L1: override on every prototype level that owns the property ───────────
-    var _chain=[];
-    var _ptr=Object.getPrototypeOf(navigator);
-    while(_ptr&&_ptr!==Object.prototype){{_chain.push(_ptr);_ptr=Object.getPrototypeOf(_ptr);}}
-    if(_chain.indexOf(Navigator.prototype)<0)_chain.push(Navigator.prototype);
-    _chain.forEach(function(pr){{
-      if(Object.getOwnPropertyDescriptor(pr,'plugins')){{
-        try{{Object.defineProperty(pr,'plugins',{{get:_gp,configurable:true,enumerable:true}});}}catch(e){{}}
-      }}
-      if(Object.getOwnPropertyDescriptor(pr,'mimeTypes')){{
-        try{{Object.defineProperty(pr,'mimeTypes',{{get:_gm,configurable:true,enumerable:true}});}}catch(e){{}}
-      }}
-    }});
-    // ── L2: replace window.navigator for window.navigator.plugins access paths ─
-    try{{
-      var _rn=navigator;
-      var _fn=Object.create(_rn);
-      Object.defineProperty(_fn,'plugins',{{get:_gp,configurable:true,enumerable:true}});
-      Object.defineProperty(_fn,'mimeTypes',{{get:_gm,configurable:true,enumerable:true}});
-      Object.defineProperty(_fn,'deviceMemory',{{get:function(){{return {fp['deviceMemory']};}},configurable:true,enumerable:true}});
-      Object.defineProperty(window,'navigator',{{get:function(){{return _fn;}},configurable:true,enumerable:true}});
-    }}catch(e3){{}}
-  }})();
+  // Verified fix: direct Navigator.prototype getter — confirmed working in Chrome 151 runtime probe.
+  // Do NOT use window.navigator replacement or prototype chain walking.
+  try{{Object.defineProperty(Navigator.prototype,'plugins',{{get:function(){{var fp={{length:0,item:function(){{return null;}},namedItem:function(){{return null;}},refresh:function(){{}}}};fp[Symbol.iterator]=function(){{return{{next:function(){{return{{done:true,value:undefined}};}}}};}};return fp;}},configurable:true,enumerable:true}});}}catch(e){{}}
+  try{{Object.defineProperty(Navigator.prototype,'mimeTypes',{{get:function(){{var fm={{length:0,item:function(){{return null;}},namedItem:function(){{return null;}}}};fm[Symbol.iterator]=function(){{return{{next:function(){{return{{done:true,value:undefined}};}}}};}};return fm;}},configurable:true,enumerable:true}});}}catch(e){{}}
   try{{Object.defineProperty(_np,'languages',{{get:function(){{return['{lg}','en'];}},configurable:true}});}}catch(e){{}}
   try{{Object.defineProperty(_np,'language',{{get:function(){{return'{lg}';}},configurable:true}});}}catch(e){{}}
   try{{Object.defineProperty(_np,'globalPrivacyControl',{{get:function(){{return undefined;}},configurable:true}});}}catch(e){{}}
@@ -1568,12 +1528,6 @@ try{{
 // screen.availLeft / availTop now on Screen.prototype via _sd() above
 // javaEnabled on Navigator.prototype (not instance) — real Chrome exposes this as a prototype method
 try{{Object.defineProperty(Navigator.prototype,'javaEnabled',{{value:function(){{return false;}},writable:false,configurable:true}});}}catch(e){{}}
-// CONFIRMED: MimeTypeArray.prototype.length override also silently rejected by Chrome 151.
-// Fix: plain object with explicit length:0, no MimeTypeArray.prototype inheritance.
-try{{
-  Object.defineProperty(Navigator.prototype,'mimeTypes',{{get:function(){{var fm={{length:0,item:function(){{return null;}},namedItem:function(){{return null;}},constructor:MimeTypeArray}};fm[Symbol.iterator]=function(){{return {{next:function(){{return {{done:true,value:undefined}};}}}};}};return fm;}},configurable:true,enumerable:true}});
-  if(window.__nr){{var _mmtd=Object.getOwnPropertyDescriptor(Navigator.prototype,'mimeTypes');if(_mmtd&&_mmtd.get)window.__nr(_mmtd.get,'mimeTypes',true);}}
-}}catch(e){{}}
 try{{document.hasFocus=function(){{return true;}};}}catch(e){{}}
 try{{
   Object.defineProperty(navigator,'share',{{value:function(data){{return Promise.resolve();}},writable:false,configurable:true}});
@@ -1978,6 +1932,50 @@ def get_chromium_path() -> str | None:
         except Exception:
             pass
     return None
+
+
+def make_plugins_override_js() -> str:
+    """Second-pass inject: override Navigator.prototype.plugins and .mimeTypes.
+
+    Must be injected as a SEPARATE addScriptToEvaluateOnNewDocument call AFTER
+    the main stealth JS. Chrome's C++ initializes Navigator.prototype.plugins as
+    non-configurable during the first injected script's execution window, then
+    makes it configurable shortly after. A second injected script runs after that
+    transition and can successfully override both properties.
+
+    Do NOT merge this into make_stealth_js() — the timing split is intentional
+    and required for the override to take effect.
+    """
+    return r"""
+(function() {
+  // Navigator.prototype.plugins / mimeTypes — second-pass override.
+  // By the time this (second) addScriptToEvaluateOnNewDocument script runs,
+  // Chrome has already installed the native configurable getter on
+  // Navigator.prototype.  We can safely redefine it here.
+  try {
+    Object.defineProperty(Navigator.prototype, 'plugins', {
+      get: function() {
+        var fp = {length:0, item:function(){return null;}, namedItem:function(){return null;}, refresh:function(){}};
+        fp[Symbol.iterator] = function(){return {next:function(){return {done:true,value:undefined};}};};
+        return fp;
+      },
+      configurable: true,
+      enumerable:   true
+    });
+  } catch(e) {}
+  try {
+    Object.defineProperty(Navigator.prototype, 'mimeTypes', {
+      get: function() {
+        var fm = {length:0, item:function(){return null;}, namedItem:function(){return null;}};
+        fm[Symbol.iterator] = function(){return {next:function(){return {done:true,value:undefined};}};};
+        return fm;
+      },
+      configurable: true,
+      enumerable:   true
+    });
+  } catch(e) {}
+})();
+"""
 
 
 def get_chrome_version_main(chrome_path: str | None) -> int | None:
@@ -2398,6 +2396,11 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     try:
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
                                {"source": make_stealth_js(fp)})
+        # Second-pass inject: plugins/mimeTypes override must run after main stealth JS
+        # because Chrome's C++ only makes Navigator.prototype.plugins configurable
+        # after the first injected script completes. See make_plugins_override_js().
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
+                               {"source": make_plugins_override_js()})
         log("Stealth JS injected via CDP")
     except Exception as e:
         log(f"Stealth JS warning: {e}")
