@@ -31,7 +31,7 @@ Both workflows are pre-configured and start automatically:
 
 If workflows fail after a fresh import, restart both. If deps are missing:
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 pip install -r artifacts/api-server/requirements.txt
 ```
 
@@ -63,7 +63,8 @@ source /tmp/chrome-env.sh
 
 ## Environment / Secrets
 
-No Replit secrets required. The proxy password is entered manually in the UI each time.
+The browser checker uses the configured `PROXY_URL` secret by default. A proxy
+can also be entered manually in the UI for a one-off run.
 
 **Proxy format (enter in UI):**
 ```

@@ -18,3 +18,21 @@ id = "UpdEjq8DA7sQoAeD4_Lbb"
 uri = "file://dc_3_scrolled.png"
 type = "image"
 title = "Score — Breakdown Scrolled"
+
+[[outputs]]
+id = "DN0dQF_oIjI_GdeaasFVT"
+uri = "file://screenshots/browser-result-verification-required.jpeg"
+type = "image"
+title = "Browser result — verification required"
+
+[[outputs]]
+id = "_MuqZ6oBgfvPIRpCVRASD"
+uri = "file://screenshots/browser-result-open.jpeg"
+type = "image"
+title = "Browser result — open mailbox"
+
+[[outputs]]
+id = "BvqRY0K36lycQDfQDndJ9"
+uri = "file://screenshots/browser-check-ui.jpg"
+type = "image"
+title = "Browser Check UI — verified preview"
