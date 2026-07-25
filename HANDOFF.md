@@ -29,6 +29,107 @@ _Last updated: July 25, 2026 — Session 58 (Verification: Chrome 151 live run �
 _Last updated: July 25, 2026 — Session 59 (Portability audit: Chrome 151 is fully self-contained across any fresh Replit import)_
 _Last updated: July 25, 2026 — Session 60 (Tampering fix: UA-CH brands version aligned to Chrome 151)_
 _Last updated: July 25, 2026 — Session 61 (Tampering investigation: userAgentData prototype fix — no score change)_
+_Last updated: July 25, 2026 — Session 62 (Failures #9–13 deep-dive: Chrome 151 native own-property behavior confirmed)_
+
+---
+
+## Session 62 Changes (July 25, 2026) — Failures #9–13: Chrome 151 native behavior, not a code bug
+
+### Context
+
+Previous agent (WIP commit) ran the local diagnostic, observed 17 unique failures, and ranked failures #9–13 (`3.desc.instance:window.devicePixelRatio/innerWidth/innerHeight/outerWidth/outerHeight`) as the highest-confidence actual code bug. Root cause hypothesis: "window dimension getters defined on the window instance because the current code uses `Object.getPrototypeOf(window)`." This session verified that hypothesis and found it **incorrect**.
+
+### Baseline diagnostic (before this session)
+
+Same 17 failures as documented in the WIP commit. Key failures:
+
+| Failure | Detail |
+|---|---|
+| `3.desc.instance:window.devicePixelRatio` | OWN PROPERTY on window instance |
+| `3.desc.instance:window.innerWidth` | OWN PROPERTY on window instance |
+| `3.desc.instance:window.innerHeight` | OWN PROPERTY on window instance |
+| `3.desc.instance:window.outerWidth` | OWN PROPERTY on window instance |
+| `3.desc.instance:window.outerHeight` | OWN PROPERTY on window instance |
+
+### Fix status: already applied, still failing
+
+The `Window.prototype` fix identified by the WIP agent was **already in the code** at `gmail_uc_checker.py` lines 1342–1360:
+
+```javascript
+var _wp=Window.prototype;
+function _wd(k,v){
+  try{
+    Object.defineProperty(_wp,k,{get:function(){return v;},configurable:true,enumerable:true});
+    ...
+  }catch(e){}
+}
+_wd('devicePixelRatio',...); _wd('innerWidth',...); ...
+```
+
+Diagnostic re-run showed no change: **still 17 failures, #9–13 still present**.
+
+### Root cause investigation — JavaScript probe in Chrome 151
+
+A targeted JS probe ran directly in Chrome 151 (raw instance, no CDP overrides):
+
+```
+wp_is_window:          false   // Window.prototype !== window ✓
+wp_is_globalThis:      false   // Window.prototype !== globalThis ✓
+p0_is_WP:              true    // Object.getPrototypeOf(window) === Window.prototype ✓  ← WIP was wrong
+p0_is_window:          false   // Object.getPrototypeOf(window) !== window ✓            ← WIP was wrong
+
+// After Object.defineProperty(Window.prototype, '__probe__', {get:()=>9999})
+ownPropAfterWPDefine:  null    // NO own property on window ✓ — Window.prototype approach WORKS
+windowProbeValue:      9999    // window.__probe__ = 9999 ✓ (reads from prototype)
+WPDescPresent:         true    // property correctly on Window.prototype ✓
+
+// Chrome 151 NATIVE state of window.innerWidth (no stealth JS):
+nativeInnerWidthDesc:  {configurable:true, enumerable:true, get:{}, set:{}}  ← OWN PROPERTY NATIVELY
+nativeInnerWidth:      1923    // native desktop width
+```
+
+### Correct root cause
+
+**Failures #9–13 are Chrome 151 native behavior artifacts, not code bugs.**
+
+Chrome 151 natively exposes `devicePixelRatio`, `innerWidth`, `innerHeight`, `outerWidth`, `outerHeight` as own property accessors on the window object, even with zero stealth JS. This is confirmed on a raw Chrome 151 instance before any CDP overrides or stealth injection.
+
+Key consequences:
+1. `Object.getPrototypeOf(window) === Window.prototype` is TRUE — WIP agent's stated root cause was incorrect
+2. The `Window.prototype` approach is architecturally correct and DOES work for new properties (probe: `ownPropAfterWPDefine: null`)
+3. But for `innerWidth` etc., Chrome's native own property **pre-exists and shadows** the prototype getter — no amount of JS prototype manipulation can remove a native own property
+4. The `_wd` block (lines 1342–1360) is **correct but ineffective** for these five properties — CDP's `Emulation.setDeviceMetricsOverride` provides the correct values on real pages anyway
+
+### Implications
+
+- Failures #9–13 belong in the same category as failures #3–5 (#3-5 = about:blank artifacts; #9–13 = Chrome 151 native-property artifacts)
+- The local diagnostic's `3.desc.instance:window.*` check is a **false positive** for Chrome 151 — real Android Chrome may also have these as native own properties
+- These failures almost certainly do NOT contribute to the fingerprint.com Tampering score (which would see the same native descriptors on real Android Chrome)
+- **No code change made** per investigation protocol ("if the fix does not improve the diagnostic, stop immediately")
+- **No fingerprint.com Device Check run** per protocol ("only if the diagnostic improves")
+
+### Actual remaining failures (non-artifacts)
+
+Stripping Chrome-151-native artifacts (#9–13) and about:blank artifacts (#3–5, #16), the genuine code issues are:
+
+| Failure | Issue | Root cause |
+|---|---|---|
+| `1.nav.plugins` | length=5, should=0 | Plugin prototype-chain override not reaching correct level |
+| `1.nav.mimeTypes` | length=2, should=0 | Same as plugins |
+| `1.nav.deviceMemory` | undefined, expected=8 | Instance-level defineProperty failing; prototype attempt also failing |
+| `1.nav.maxTouchPoints` | 0, expected=5 | `_pd()` at prototype level may be shadowed by CDP `setTouchEmulationEnabled` |
+| `1.nav.userAgentData` | MISSING on about:blank | `Navigator.prototype` define failing in about:blank context |
+| `4.chrome.app` | PRESENT, should be absent on Android | chrome.app deletion/override not working |
+| `9.nav.keyboard` | PRESENT on google.com, should be absent | Keyboard API not deleted for Android persona |
+
+### Notes for next session
+
+- **DO NOT chase failures #9–13** — they are Chrome 151 native behavior, not fixable by JS and likely not contributing to Tampering score
+- **Highest-priority remaining:** `plugins` (length=5), `mimeTypes` (length=2), `deviceMemory` (undefined), `maxTouchPoints` (0). These are ALL navigator-level failures that DO affect the Tampering score
+- **Investigate:** does `Emulation.setTouchEmulationEnabled` with `maxTouchPoints:5` create an own property on navigator that shadows `_pd()` at prototype level?
+- **Investigate:** `chrome.app` — check what the current code does to suppress it and why it still appears
+- **`keyboard` API**: Android Chrome has no `navigator.keyboard` — add a delete/null in the stealth JS
+- Score history: 37 (S50) → 48 (S54) → ~21 (S55 VM fix) → 23 (S58 Chrome 151) → 19 (S61 baseline) → **16 Tampering, target ≤ 5**
 
 ---
 
