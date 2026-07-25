@@ -76,6 +76,61 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _cleanup_stale_xvfb_locks():
+    """
+    Remove stale Xvfb lock files left by crashed/killed processes.
+
+    X11 lock files (/tmp/.XN-lock) contain the PID of the owning Xvfb
+    process as an ASCII string.  When Xvfb is SIGKILLed or crashes its
+    lock file is NOT removed.  _find_free_display() then thinks all those
+    displays are still occupied and keeps allocating new ones (100, 101,
+    102, …) until none are left, causing Chrome to fail with
+    "invalid session id" on startup.
+
+    This function scans displays :100–:299, reads the PID from each lock
+    file, and removes any file whose owning PID is no longer alive.
+    Orphaned Xvfb processes (alive but whose Chrome child is gone) are
+    also killed so the display number can be reused immediately.
+    """
+    for n in range(100, 300):
+        lock_path = f"/tmp/.X{n}-lock"
+        if not os.path.exists(lock_path):
+            continue
+        try:
+            pid_str = open(lock_path).read().strip()
+            pid = int(pid_str)
+        except Exception:
+            # Unreadable / non-numeric lock file — treat as stale
+            try:
+                os.remove(lock_path)
+                log(f"Removed unreadable Xvfb lock :{n}")
+            except Exception:
+                pass
+            continue
+
+        # Check if the owning process is alive
+        try:
+            os.kill(pid, 0)
+            # Process is alive — leave the lock alone
+        except ProcessLookupError:
+            # PID is dead — lock file is stale
+            try:
+                os.remove(lock_path)
+                log(f"Removed stale Xvfb lock :{n} (dead pid={pid})")
+            except Exception:
+                pass
+            # Also clean up the X11 Unix socket if present
+            for sock in (f"/tmp/.X11-unix/X{n}",):
+                try:
+                    if os.path.exists(sock):
+                        os.remove(sock)
+                except Exception:
+                    pass
+        except PermissionError:
+            # PID exists but belongs to another user — leave it
+            pass
+
+
 def _find_free_display() -> int:
     """Find a free X display number by checking Xvfb lock files (/tmp/.XN-lock)."""
     for n in range(100, 300):
@@ -2556,6 +2611,7 @@ def check_gmail(
     _disp_lock_fd = open(_DISPLAY_ALLOC_LOCK, "w")
     try:
         fcntl.flock(_disp_lock_fd, fcntl.LOCK_EX)
+        _cleanup_stale_xvfb_locks()  # remove dead-PID lock files before picking a display
         _disp_num = _find_free_display()
         try:
             _xvfb_proc = subprocess.Popen(

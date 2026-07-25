@@ -32,6 +32,44 @@ _Last updated: July 25, 2026 — Session 61 (Tampering investigation: userAgentD
 _Last updated: July 25, 2026 — Session 62 (Failures #9–13 deep-dive: Chrome 151 native own-property behavior confirmed)_
 _Last updated: July 25, 2026 — Session 63 (Browser Check regression fix: MV2 proxy extension → local TCP forwarder)_
 _Last updated: July 25, 2026 — Session 64 (Fresh import restore: deps installed, both workflows running)_
+_Last updated: July 25, 2026 — Session 65 (Stale Xvfb lock cleanup fix: Chrome "invalid session id" crash resolved)_
+
+---
+
+## Session 65 Changes (July 25, 2026) — Stale Xvfb Lock Cleanup Fix
+
+### Problem
+
+Browser Check was failing with `Navigation failed: invalid session id` — Chrome crashed immediately after UC connected. Root cause (identified by previous agent before quota ran out): stale Xvfb lock files (`/tmp/.X100-lock`, `.X101-lock`, etc.) from previously killed/crashed Chrome sessions accumulate over time. `_find_free_display()` sees those lock files and skips those display numbers, eventually exhausting the range (100–299), causing Chrome to get an unusable display and crash on startup.
+
+### Fix Applied
+
+**`artifacts/api-server/gmail_uc_checker.py`:**
+
+1. Added `_cleanup_stale_xvfb_locks()` function (inserted after `_find_free_display()`).
+   - Iterates displays :100–:299
+   - Reads the PID from each `/tmp/.XN-lock` file
+   - If the PID is dead (`ProcessLookupError`), removes the lock file and its Unix socket (`/tmp/.X11-unix/XN`)
+   - Unreadable/non-numeric lock files also removed as stale
+   - Live PIDs (PermissionError or no exception) are left untouched
+
+2. Called `_cleanup_stale_xvfb_locks()` inside the display allocation lock in `check_gmail()`, immediately before `_find_free_display()`. This ensures cleanup is serialized (no two accounts clean at the same time) and happens on every check before a new display is picked.
+
+### Also Done This Session
+
+- Ran `pnpm install` (node_modules were missing after fresh import — same as Session 64)
+- Restarted both workflows
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `python3 -m py_compile gmail_uc_checker.py` | ✅ SYNTAX OK |
+| API Server workflow | ✅ RUNNING on port 8080 (Chrome for Testing 151.0.7922.47) |
+| Gmail Checker workflow | ✅ RUNNING on port 5173 |
+
+### Files Changed
+- `artifacts/api-server/gmail_uc_checker.py` — `_cleanup_stale_xvfb_locks()` added; called before `_find_free_display()` inside display allocation lock
 
 ---
 
