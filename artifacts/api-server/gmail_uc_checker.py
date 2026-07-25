@@ -1348,7 +1348,14 @@ try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable
       window.__nr(window.chrome.runtime.onMessage.hasListener,'hasListener');
     }}
   }}
+  // chrome.app must be absent on Android Chrome — delete it, then defineProperty
+  // as a fallback in case the property is non-configurable (delete returns false silently).
   try{{delete window.chrome.app;}}catch(e){{}}
+  try{{
+    if(window.chrome.app!==undefined){{
+      Object.defineProperty(window.chrome,'app',{{get:function(){{return undefined;}},configurable:true,enumerable:false}});
+    }}
+  }}catch(e){{}}
   if(!window.chrome.loadTimes){{var _lt=Date.now()/1000;window.chrome.loadTimes=function(){{var _t=Date.now()/1000;return{{requestTime:_t-0.5,startLoadTime:_t-0.5,commitLoadTime:_t-0.3,finishDocumentLoadTime:_t-0.1,finishLoadTime:_t,firstPaintTime:_lt-0.25,firstPaintAfterLoadTime:_lt-0.18,navigationType:'Other',wasFetchedViaSpdy:false,wasNpnNegotiated:false,npnNegotiatedProtocol:'',wasAlternateProtocolAvailable:false,connectionInfo:''}}}};if(window.__nr)window.__nr(window.chrome.loadTimes,'loadTimes');}}
   if(!window.chrome.csi)window.chrome.csi=function(){{return{{startE:Date.now()-1000,onloadT:Date.now()-500,pageT:500,tran:15}}}};
 }})();
@@ -1391,8 +1398,10 @@ try{{
   Object.defineProperty(navigator,'mozConnection',{{get:()=>undefined}});
   Object.defineProperty(navigator,'webkitConnection',{{get:()=>undefined}});
 }}catch(e){{}}
-// keyboard: Android Chrome doesn't expose the Keyboard API — undefined on prototype
-try{{Object.defineProperty(Navigator.prototype,'keyboard',{{get:function(){{return undefined;}},configurable:true}});}}catch(e){{}}
+// keyboard: Android Chrome doesn't expose the Keyboard API.
+// Try delete first, then defineProperty as a fallback for non-configurable descriptors.
+try{{delete Navigator.prototype.keyboard;}}catch(e){{}}
+try{{Object.defineProperty(Navigator.prototype,'keyboard',{{get:function(){{return undefined;}},configurable:true,enumerable:false}});}}catch(e){{}}
 // pdfViewerEnabled: exists on Navigator.prototype in Chrome 113+ — must be on prototype, not instance
 try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function(){{return true;}},configurable:true,enumerable:true}});}}catch(e){{}}
 (function(){{
@@ -1873,8 +1882,14 @@ try{{
   }}catch(e){{}}
   // DevTools open detection — spoof the property check
   try{{Object.defineProperty(window,'__devtools_open__',{{get:function(){{return false;}},configurable:true}});}}catch(e){{}}
-  // Remove chrome.app and any extension runtime id — real Android Chrome has neither
+  // Remove chrome.app and any extension runtime id — real Android Chrome has neither.
+  // Use defineProperty as a fallback in case delete fails on non-configurable descriptors.
   try{{delete window.chrome.app;}}catch(e){{}}
+  try{{
+    if(window.chrome&&window.chrome.app!==undefined){{
+      Object.defineProperty(window.chrome,'app',{{get:function(){{return undefined;}},configurable:true,enumerable:false}});
+    }}
+  }}catch(e){{}}
   try{{delete window.chrome.webstore;}}catch(e){{}}
   try{{
     if(window.chrome&&window.chrome.runtime)
@@ -1899,10 +1914,10 @@ try{{
   // Prevent document-level webdriver property exposure
   try{{Object.defineProperty(document,'__webdriver_script_fn',{{get:function(){{return undefined;}},configurable:true}});}}catch(e){{}}
 }})();
-// Tampering fix: remove window.__nr from window so fingerprint.com cannot detect it via
-// Object.getOwnPropertyNames(window). The underlying WeakMap stays alive in the IIFE
-// closure — all already-registered functions keep their native-looking toString().
-try{{delete window.__nr;}}catch(e){{}}
+// NOTE: window.__nr is intentionally NOT deleted here.
+// The second addScriptToEvaluateOnNewDocument (make_plugins_override_js) needs it
+// to register the plugins/mimeTypes getters as native-looking. That second script
+// deletes window.__nr at its own end, after registration is complete.
 """
 
 
@@ -1943,37 +1958,64 @@ def make_plugins_override_js() -> str:
     makes it configurable shortly after. A second injected script runs after that
     transition and can successfully override both properties.
 
+    Also responsible for deleting window.__nr at the end (make_stealth_js no
+    longer does it so that __nr is available here for native-toString registration
+    of the plugins/mimeTypes getters).
+
     Do NOT merge this into make_stealth_js() — the timing split is intentional
     and required for the override to take effect.
     """
     return r"""
 (function() {
-  // Navigator.prototype.plugins / mimeTypes — second-pass override.
-  // By the time this (second) addScriptToEvaluateOnNewDocument script runs,
-  // Chrome has already installed the native configurable getter on
-  // Navigator.prototype.  We can safely redefine it here.
+  // ── Capture native PluginArray/MimeTypeArray prototypes BEFORE overriding ──
+  // Object.create(nativeProto) makes our fake objects pass `instanceof PluginArray`
+  // checks and share the correct prototype chain — a plain {} would not.
+  var _nativePP  = null;
+  var _nativeMTP = null;
+  try { _nativePP  = Object.getPrototypeOf(navigator.plugins);  } catch(e) {}
+  try { _nativeMTP = Object.getPrototypeOf(navigator.mimeTypes); } catch(e) {}
+
+  // ── plugins override ────────────────────────────────────────────────────────
   try {
+    // Stable singleton — same reference on every access (not a new object each time).
+    var _fp = _nativePP ? Object.create(_nativePP) : {};
+    Object.defineProperties(_fp, {
+      length:    { value: 0,                       writable: false, enumerable: true,  configurable: true },
+      item:      { value: function(){ return null; }, writable: true,  enumerable: false, configurable: true },
+      namedItem: { value: function(){ return null; }, writable: true,  enumerable: false, configurable: true },
+      refresh:   { value: function(){},               writable: true,  enumerable: false, configurable: true },
+    });
+    try { _fp[Symbol.iterator] = function(){ return { next: function(){ return { done: true, value: undefined }; } }; }; } catch(e) {}
+    var _fpGet = function(){ return _fp; };
+    // Register with __nr so Function.prototype.toString returns '[native code]'
+    if (window.__nr) { try { window.__nr(_fpGet, 'get plugins', true); } catch(e) {} }
     Object.defineProperty(Navigator.prototype, 'plugins', {
-      get: function() {
-        var fp = {length:0, item:function(){return null;}, namedItem:function(){return null;}, refresh:function(){}};
-        fp[Symbol.iterator] = function(){return {next:function(){return {done:true,value:undefined};}};};
-        return fp;
-      },
-      configurable: true,
-      enumerable:   true
+      get: _fpGet, configurable: true, enumerable: true
     });
   } catch(e) {}
+
+  // ── mimeTypes override ──────────────────────────────────────────────────────
   try {
+    var _fm = _nativeMTP ? Object.create(_nativeMTP) : {};
+    Object.defineProperties(_fm, {
+      length:    { value: 0,                       writable: false, enumerable: true,  configurable: true },
+      item:      { value: function(){ return null; }, writable: true,  enumerable: false, configurable: true },
+      namedItem: { value: function(){ return null; }, writable: true,  enumerable: false, configurable: true },
+    });
+    try { _fm[Symbol.iterator] = function(){ return { next: function(){ return { done: true, value: undefined }; } }; }; } catch(e) {}
+    var _fmGet = function(){ return _fm; };
+    if (window.__nr) { try { window.__nr(_fmGet, 'get mimeTypes', true); } catch(e) {} }
     Object.defineProperty(Navigator.prototype, 'mimeTypes', {
-      get: function() {
-        var fm = {length:0, item:function(){return null;}, namedItem:function(){return null;}};
-        fm[Symbol.iterator] = function(){return {next:function(){return {done:true,value:undefined};}};};
-        return fm;
-      },
-      configurable: true,
-      enumerable:   true
+      get: _fmGet, configurable: true, enumerable: true
     });
   } catch(e) {}
+
+  // ── Clean up __nr ───────────────────────────────────────────────────────────
+  // make_stealth_js left window.__nr alive so this script could use it above.
+  // Now that registration is complete, delete it so fingerprint.com cannot find
+  // it via Object.getOwnPropertyNames(window). The WeakMap closure keeps all
+  // already-registered functions returning '[native code]' from toString().
+  try { delete window.__nr; } catch(e) {}
 })();
 """
 

@@ -293,10 +293,11 @@ o.add_argument("--use-gl=swiftshader")
 o.add_argument("--enable-webgl")
 o.add_argument("--ignore-gpu-blocklist")
 o.add_argument("--disable-gpu-sandbox")
-# Chrome for Testing 151 can disconnect its renderer under Xvfb when GPU
-# compositing is enabled. Keep WebGL emulation flags above for the profile
-# surface, but disable the unstable host GPU process for a reliable session.
-o.add_argument("--disable-gpu")
+# Disable GPU-backed PAGE COMPOSITING (the source of renderer crashes under Xvfb)
+# while keeping the GPU process alive for WebGL.
+# --disable-gpu would kill the GPU process entirely, making WebGL unavailable
+# and causing fingerprint.com's VM detector to fire (WebGL context = null is a VM signal).
+o.add_argument("--disable-gpu-compositing")
 o.add_argument("--disable-blink-features=AutomationControlled")
 # Chrome 151 exits its renderer under Xvfb when this legacy feature bundle is
 # passed, so leave it unset for Device Check stability.
@@ -402,28 +403,13 @@ except Exception as e:
 
 # ── CDP overrides (mirrors checker startup block) ──────────────────────────────
 cv_major = chrome.split(".")[0]
+    # NOTE: Network.enable + Network.setUserAgentOverride intentionally removed.
+    # Activating the CDP Network domain leaves a detectable trace that fingerprint.com
+    # uses for its "developer tools" signal (weight 8). Emulation.setUserAgentOverride
+    # (below) covers both the JS navigator.userAgent and the HTTP User-Agent header,
+    # including Sec-CH-UA via userAgentMetadata, making Network.setUserAgentOverride
+    # redundant. Avoid enabling any CDP domain that is not strictly necessary.
 try:
-    driver.execute_cdp_cmd("Network.enable", {})
-    driver.execute_cdp_cmd("Network.setUserAgentOverride", {
-        "userAgent": UA,
-        "acceptLanguage": "en-US,en;q=0.9",
-        "platform": profile["platform"],
-        "userAgentMetadata": {
-            "brands": [
-                {"brand": "Not(A;Brand",  "version": "8"},
-                {"brand": "Chromium",      "version": cv_major},
-                {"brand": "Google Chrome", "version": cv_major},
-            ],
-            "fullVersion": chrome,
-            "platform": "Android",
-            "platformVersion": android,
-            "architecture": "",
-            "model": model,
-            "mobile": True,
-            "bitness": "",
-            "wow64": False,
-        },
-    })
     driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": "America/New_York"})
     driver.execute_cdp_cmd("Emulation.setLocaleOverride",   {"locale": "en-US"})
     # Override hardware concurrency at the CDP level so it matches JS patches

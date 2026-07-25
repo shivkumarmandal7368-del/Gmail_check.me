@@ -201,10 +201,10 @@ o.add_argument("--use-gl=swiftshader")
 o.add_argument("--enable-webgl")
 o.add_argument("--ignore-gpu-blocklist")
 o.add_argument("--disable-gpu-sandbox")
-# REQUIRED for Chrome 151 stability under Xvfb (device_check.py comment):
-# "Chrome for Testing 151 can disconnect its renderer under Xvfb when GPU
-#  compositing is enabled."
-o.add_argument("--disable-gpu")
+# Disable GPU-backed PAGE COMPOSITING to prevent renderer crashes under Xvfb,
+# while keeping the GPU process alive so WebGL remains available.
+# --disable-gpu would kill the GPU process entirely, making WebGL unavailable.
+o.add_argument("--disable-gpu-compositing")
 o.add_argument("--disable-blink-features=AutomationControlled")
 o.add_argument("--disable-extensions-http-throttling")
 o.add_argument("--no-default-browser-check")
@@ -259,23 +259,10 @@ def _cdp(cmd, params, label):
         print(f"  ✗ {label}: {str(e).splitlines()[0]}")
 
 print("Applying CDP overrides:")
-_cdp("Network.enable", {}, "Network.enable")
-_cdp("Network.setUserAgentOverride", {
-    "userAgent": UA,
-    "acceptLanguage": f"{profile['language']},en;q=0.9",
-    "platform": profile["platform"],
-    "userAgentMetadata": {
-        "brands": [
-            {"brand": "Not(A;Brand",  "version": "8"},
-            {"brand": "Chromium",     "version": cv_major},
-            {"brand": "Google Chrome","version": cv_major},
-        ],
-        "fullVersion": chrome_full, "platform": "Android",
-        "platformVersion": profile["androidVersion"],
-        "architecture": "", "model": profile["model"], "mobile": True,
-        "bitness": "", "wow64": False,
-    },
-}, "Network.setUserAgentOverride")
+# Network.enable + Network.setUserAgentOverride intentionally omitted.
+# Activating the CDP Network domain leaves a detectable trace that fingerprint.com
+# uses for "developer tools" detection (weight 8). Emulation.setUserAgentOverride
+# handles both navigator.userAgent and HTTP headers including Sec-CH-UA.
 _cdp("Emulation.setTimezoneOverride", {"timezoneId": profile["timezone"]}, "Emulation.setTimezoneOverride")
 _cdp("Emulation.setLocaleOverride",   {"locale": profile["language"]},     "Emulation.setLocaleOverride")
 _cdp("Emulation.setHardwareConcurrencyOverride",
@@ -295,6 +282,23 @@ _cdp("Emulation.setUserAgentOverride", {
     "userAgent": UA,
     "acceptLanguage": f"{profile['language']},en;q=0.9",
     "platform": profile["platform"],
+    # CRITICAL: must include userAgentMetadata — omitting it causes Chrome 151 to
+    # clear navigator.userAgentData.brands to [], mobile→false, platform→''.
+    "userAgentMetadata": {
+        "brands": [
+            {"brand": "Not(A;Brand",   "version": "8"},
+            {"brand": "Chromium",      "version": cv_major},
+            {"brand": "Google Chrome", "version": cv_major},
+        ],
+        "fullVersion": chrome_full,
+        "platform": "Android",
+        "platformVersion": profile["androidVersion"],
+        "architecture": "",
+        "model": profile["model"],
+        "mobile": True,
+        "bitness": "",
+        "wow64": False,
+    },
 }, "Emulation.setUserAgentOverride")
 print()
 
