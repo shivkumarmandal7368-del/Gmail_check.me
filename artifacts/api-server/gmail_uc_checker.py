@@ -985,8 +985,12 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
         _pass   = quote(_parsed.password or "", safe="")
         _host   = _parsed.hostname or ""
         _port   = _parsed.port or 6060
-        _scheme = _parsed.scheme or "http"
-        _safe_proxy = f"{_scheme}://{_user}:{_pass}@{_host}:{_port}"
+        # Force http:// scheme for the proxy connection itself.
+        # If PROXY_URL uses https:// scheme, requests tries to SSL-connect to the
+        # proxy host — causing HTTPSConnectionPool errors even for plain HTTP
+        # target URLs. The underlying proxy is always HTTP; only the target may
+        # differ. Chrome routes HTTPS traffic via its own local TCP forwarder.
+        _safe_proxy = f"http://{_user}:{_pass}@{_host}:{_port}"
         proxies = {"http": _safe_proxy, "https": _safe_proxy}
     except Exception as _parse_err:
         log(f"{tag} Failed to parse proxy URL: {_parse_err}")
@@ -1036,10 +1040,10 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
         except Exception as _e1:
             log(f"{tag} ip-api.com failed: {_e1}")
 
-        # ── Service 2: ipwho.is (HTTPS, comprehensive fallback) ───────────────
+        # ── Service 2: ipwho.is (HTTP fallback, comprehensive) ───────────────
         try:
             log(f"{tag} [2/3] ipwho.is attempt {_attempt}/{_retries}")
-            r2 = req.get("https://ipwho.is/", proxies=proxies, timeout=15)
+            r2 = req.get("http://ipwho.is/", proxies=proxies, timeout=15)
             d2 = r2.json()
             if d2.get("success"):
                 tz2  = (d2.get("timezone") or {}).get("id") or d2.get("timezone")
@@ -1058,10 +1062,10 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
         except Exception as _e2:
             log(f"{tag} ipwho.is failed: {_e2}")
 
-        # ── Service 3: ipinfo.io (HTTPS, minimal but very reliable) ──────────
+        # ── Service 3: ipinfo.io (HTTP, minimal but very reliable) ──────────
         try:
             log(f"{tag} [3/3] ipinfo.io attempt {_attempt}/{_retries}")
-            r3 = req.get("https://ipinfo.io/json", proxies=proxies, timeout=15)
+            r3 = req.get("http://ipinfo.io/json", proxies=proxies, timeout=15)
             d3 = r3.json()
             if d3.get("ip") and not d3.get("bogon"):
                 cc3  = d3.get("country", "US")
@@ -2783,6 +2787,10 @@ def check_gmail(
     options.add_argument("--touch-events=enabled")
     # Match the fingerprint DPR so window.devicePixelRatio equals screen.dpr
     options.add_argument(f"--force-device-scale-factor={fp['dpr']}")
+    # Chrome 151 removed Emulation.setDeviceMemoryOverride CDP command.
+    # Use the Chrome flag instead so navigator.deviceMemory reports the correct
+    # spoofed value (instead of undefined which is a strong automation signal).
+    options.add_argument(f"--force-device-memory={fp['deviceMemory']}")
     # VM detection fix: SwiftShader renders via GPU-like pipeline instead of --disable-gpu
     # which exposes software rendering signals. These flags make WebGL work and match
     # what real Android Chrome reports (device_check.py uses the same set).
@@ -3666,43 +3674,25 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     else:
         email_field.send_keys(Keys.ENTER)
 
-    # Wait for URL to advance past the email page (proxy latency can be 2-4s).
-    # Poll until URL changes or timeout — more reliable than a fixed sleep.
-    _pre_email_url = driver.current_url
+    # Wait for any URL change that signals automation rejection or a challenge page.
+    # Google's sign-in is an SPA: after typing email + clicking Next, the URL
+    # STAYS at /v3/signin/identifier while the password field appears in-place.
+    # We only break early if Google navigates away (rejected or challenge).
+    # If the URL doesn't change (normal SPA case), we time out and proceed to
+    # Step 3 which looks for the password field directly.
     _nav_deadline = time.time() + 8
     while time.time() < _nav_deadline:
         try:
             _cur = driver.current_url
-            if _cur != _pre_email_url and "signin/identifier" not in _cur:
+            if "signin/rejected" in _cur or ("signin/" in _cur and "identifier" not in _cur):
                 break
         except Exception:
             pass
         time.sleep(0.25)
-    rand_sleep(300, 600)  # small extra settle after URL change
+    rand_sleep(300, 600)  # brief settle
 
     url, text = page_state()
     log(f"{email} — After email submit: {url[:70]}")
-
-    # ── Identifier-page stall fix ────────────────────────────────────────────
-    # If Google never navigated past the email page, the proxy IP was detected
-    # at the email step (silent CAPTCHA or block). Falls to unknown otherwise.
-    # Classify as verification_required so auto-retry fires with a fresh proxy IP.
-    #
-    # BUG FIX: Must check URL PATH only, not the full URL string.
-    # The ?continue=https://mail.google.com/... query parameter contains
-    # "mail.google.com" as plain text, which caused the old condition
-    # `"mail.google.com" not in url` to be False — silently bypassing this
-    # stall check and falling through to "Password field not found" instead.
-    _url_path = url.split("?")[0]  # strip query string before checking
-    if "signin/identifier" in _url_path and "challenge" not in _url_path:
-        shot = screenshot_b64()
-        log(f"{email} — Identifier stall: page did not advance past email field (automation detected at email step)")
-        return {
-            "status": "verification_required",
-            "reason": "automation detected at email step — page did not advance past email field. Auto-retrying with fresh proxy IP.",
-            "totpCode": totp_code,
-            "debugScreenshot": shot,
-        }
 
     if "signin/rejected" in url:
         shot = screenshot_b64()
