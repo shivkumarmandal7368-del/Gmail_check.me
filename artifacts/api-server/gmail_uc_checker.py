@@ -2490,13 +2490,32 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
     # navigator.platform at the CDP emulation layer — deeper than Network.setUserAgentOverride.
     # fingerprint.com compares the CDP-emulation-reported platform against the JS-reported
     # platform; both must agree on "Linux armv8l" to avoid a VM mismatch signal.
+    # CRITICAL: Must include userAgentMetadata here too — calling Emulation.setUserAgentOverride
+    # WITHOUT userAgentMetadata causes Chrome 151 to clear navigator.userAgentData.brands to [],
+    # mobile to false, and platform to '' — a major Tampering signal that overrides both
+    # Network.setUserAgentOverride metadata AND our JS-level Navigator.prototype.userAgentData fix.
     try:
         driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
             "userAgent":      MOBILE_UA,
             "acceptLanguage": f"{fp['language']},en;q=0.9",
             "platform":       fp["platform"],
+            "userAgentMetadata": {
+                "brands": [
+                    {"brand": "Not(A;Brand",   "version": "8"},
+                    {"brand": "Chromium",      "version": fp["chromeVersion"].split(".")[0]},
+                    {"brand": "Google Chrome", "version": fp["chromeVersion"].split(".")[0]},
+                ],
+                "fullVersion": fp["chromeVersion"],
+                "platform": "Android",
+                "platformVersion": fp["androidVersion"],
+                "architecture": "",
+                "model": fp["model"],
+                "mobile": True,
+                "bitness": "",
+                "wow64": False,
+            },
         })
-        log(f"CDP Emulation UA override set → platform={fp['platform']}")
+        log(f"CDP Emulation UA override set → platform={fp['platform']} (with userAgentMetadata)")
     except Exception as e:
         log(f"CDP Emulation UA override warning (non-fatal): {e}")
 

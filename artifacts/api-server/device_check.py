@@ -454,11 +454,28 @@ try:
     # at the CDP emulation level (deeper than Network.setUserAgentOverride).
     # fingerprint.com compares CDP-level platform against JS-reported platform —
     # both must agree on "Linux armv8l" to avoid the VM mismatch signal.
+    # CRITICAL: Must include userAgentMetadata — omitting it causes Chrome 151 to
+    # clear navigator.userAgentData.brands to [], mobile→false, platform→'' (Tampering signal).
     try:
         driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
             "userAgent": UA,
             "acceptLanguage": "en-US,en;q=0.9",
             "platform": profile["platform"],
+            "userAgentMetadata": {
+                "brands": [
+                    {"brand": "Not(A;Brand",   "version": "8"},
+                    {"brand": "Chromium",      "version": cv_major},
+                    {"brand": "Google Chrome", "version": cv_major},
+                ],
+                "fullVersion": chrome,
+                "platform": "Android",
+                "platformVersion": android,
+                "architecture": "",
+                "model": model,
+                "mobile": True,
+                "bitness": "",
+                "wow64": False,
+            },
         })
     except Exception:
         pass
