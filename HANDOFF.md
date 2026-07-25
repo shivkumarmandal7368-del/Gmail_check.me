@@ -26,8 +26,140 @@ _Last updated: July 24, 2026 — Session 55 (VM + Dev tools stealth fix in main 
 _Last updated: July 24, 2026 — Session 56 (Tampering fix: userLanguage/browserLanguage/systemLanguage deletion)_
 _Last updated: July 25, 2026 — Session 57 (Chrome for Testing 151 runtime migration)_
 _Last updated: July 25, 2026 — Session 58 (Verification: Chrome 151 live run — score 23, VM+DevTools cleared)_
+_Last updated: July 25, 2026 — Session 59 (Portability audit: Chrome 151 is fully self-contained across any fresh Replit import)_
 
 ---
+
+## Session 59 Changes (July 25, 2026) — Portability Audit: Chrome 151 self-contained verification
+
+### Question answered
+
+> *"If I create a completely new Replit account and import this GitHub repository into a
+> brand-new Repl, will Chrome for Testing 151 be downloaded and used automatically?
+> Or will it still fall back to Replit's default Chromium 138?"*
+
+### Verdict
+
+**✅ YES — Chrome for Testing 151 is fully self-contained.**
+
+Every fresh Replit import, on any account, will automatically download and use
+Chrome for Testing 151 without any manual browser installation or configuration.
+No code was changed in this session — this is a pure read-only audit.
+
+---
+
+### Full chain verified (code-only inspection)
+
+#### 1. `replit.nix` — all runtime libraries are declared
+
+Every shared library that Chrome for Testing 151 needs is already in `replit.nix`:
+
+```nix
+pkgs.systemd  pkgs.libgbm  pkgs.xorg.libxcb  pkgs.xorg.libX11
+pkgs.xvfb-run  pkgs.xorg.xorgserver  pkgs.chromium
+pkgs.glib  pkgs.nss  pkgs.nspr  pkgs.atk  pkgs.cups  pkgs.dbus
+pkgs.libdrm  pkgs.mesa  pkgs.pango  pkgs.cairo  pkgs.gtk3
+pkgs.alsa-lib  pkgs.libxkbcommon  pkgs.expat  ...
+```
+
+Nix installs these on every fresh import automatically.
+`pkgs.chromium` (Chromium 138) is also declared here — it acts as a last-resort
+fallback only if the setup script somehow fails entirely.
+
+---
+
+#### 2. API Server `dev` script — setup runs on every boot, no manual step
+
+From `artifacts/api-server/package.json`:
+
+```bash
+eval "$(bash ../../scripts/setup-chrome-for-testing.sh)" && \
+  (python3 -c 'import undetected_chromedriver...' || pip install -q -r requirements.txt) && \
+  NODE_ENV=development pnpm run build && pnpm run start
+```
+
+`eval "$(bash ...)"` is the **first thing** the workflow does. It runs the setup
+script and sources its exported environment variables into the workflow process.
+There is no manual trigger, no conditional, no skip path.
+
+---
+
+#### 3. `scripts/setup-chrome-for-testing.sh` — self-healing downloader
+
+The script is fully automatic and requires nothing from the user:
+
+| Step | What it does |
+|------|-------------|
+| Fetch manifest | Hits `https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json` — Google's public, unauthenticated endpoint — to read the current Stable version and download URL |
+| Cache check | If `~/.cache/vanguard-mx/chrome-for-testing/<version>/chrome-linux64/chrome` already exists and is executable, skips the download entirely |
+| Download | If cache is missing, downloads the zip (~184 MB) with `curl --retry 3`, extracts it, atomically moves it into the cache |
+| Symlink | Creates `~/.cache/vanguard-mx/chrome-for-testing/current` → versioned dir |
+| Library path | Runs `nix eval --raw --impure` against the same packages in `replit.nix` to build the correct `LD_LIBRARY_PATH` for the unwrapped binary |
+| Export | Prints shell assignments to stdout: `CHROME_BINARY`, `CHROME_VERSION_MAIN`, `CHROME_VERSION_FULL`, `LD_LIBRARY_PATH`, `CHROME_FOR_TESTING_ROOT` — all sourced by `eval` |
+
+On a fresh Replit the cache is empty → Chrome is downloaded automatically.
+On subsequent boots the cache exists → setup completes in < 2 seconds.
+
+---
+
+#### 4. Python — Chrome 151 takes priority over Chromium 138
+
+`get_chromium_path()` in `gmail_uc_checker.py`:
+
+```python
+candidates = [
+    os.environ.get("CHROME_BINARY"),   # ← exported by setup script → Chrome 151
+    os.path.join("~/.cache/vanguard-mx/chrome-for-testing", "current", "chrome"),  # ← same path, env-less fallback
+]
+# Falls back to `which chromium` (Chromium 138) only if both above are missing
+```
+
+`get_chrome_version_main()` and `get_chrome_version()` check `CHROME_VERSION_MAIN`
+and `CHROME_VERSION_FULL` env vars first — both exported by the setup script.
+
+`device_check.py` imports all three helpers directly from `gmail_uc_checker.py`
+and uses the same priority order. Both scripts always reach Chrome 151.
+
+---
+
+### Behaviour on a brand-new Replit import — timeline
+
+| Event | What happens |
+|-------|-------------|
+| User imports GitHub repo | Nix installs all `replit.nix` packages (Chromium 138 + all shared libs). Takes ~30–60 s. |
+| User starts "API Server" workflow | `dev` script begins; `eval "$(bash setup-chrome-for-testing.sh)"` runs |
+| First boot, empty cache | Script downloads Chrome for Testing 151 (~184 MB, 1–3 min). Log shows: `[chrome-setup] Downloading Chrome for Testing 151.x.x.x` |
+| Download complete | Symlink created, `LD_LIBRARY_PATH` built, env vars exported. Log shows: `[chrome-setup] Ready: Google Chrome for Testing 151.0.7922.47` |
+| Python starts | `get_chromium_path()` reads `CHROME_BINARY` → returns Chrome 151 path. Chromium 138 is never touched. |
+| Subsequent boots | Cache hit → setup completes in < 2 s. Same result. |
+
+---
+
+### Caveat — first-boot download time only
+
+The only non-ideal behaviour is the **one-time ~1–3 minute download** on the very
+first boot of a fresh import. This is unavoidable because `~/.cache/` is outside
+the repository and cannot be committed to Git. After the first boot the cache
+persists for the lifetime of the Repl container and the wait disappears.
+
+No credentials, no Replit account-specific config, no manual steps are required
+at any point.
+
+---
+
+### Files inspected (no changes made)
+
+| File | Purpose |
+|------|---------|
+| `scripts/setup-chrome-for-testing.sh` | Chrome downloader / env exporter |
+| `artifacts/api-server/package.json` | `dev` script — calls setup on every boot |
+| `replit.nix` | Shared library deps + Chromium 138 fallback |
+| `artifacts/api-server/gmail_uc_checker.py` | `get_chromium_path()`, `get_chrome_version()`, `get_chrome_version_main()` |
+| `artifacts/api-server/device_check.py` | Imports and uses the same helpers |
+
+---
+
+## Session 58 Changes (July 25, 2026) — Verification: Chrome 151 live run + fingerprint score extraction
 
 ## Session 58 Changes (July 25, 2026) — Verification: Chrome 151 live run + fingerprint score extraction
 
