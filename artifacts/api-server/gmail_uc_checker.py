@@ -19,6 +19,9 @@ import subprocess
 import tempfile
 import fcntl
 import socket
+import threading
+import socketserver
+import select as _select
 import signal as _signal
 
 # ── SIGTERM handler — called by Node.js on pause/cancel ───────────────────────
@@ -2064,10 +2067,108 @@ def parse_proxy(proxy_url: str) -> dict | None:
         return None
 
 
+class _LocalProxyHandler(socketserver.BaseRequestHandler):
+    """Authenticating TCP forwarder — injects Proxy-Authorization for every request.
+
+    Replaces the MV2 Chrome extension approach.  Chrome for Testing 151 crashes
+    when an MV2 extension is loaded under Xvfb; a plain TCP proxy has no such
+    restriction and is indistinguishable from a real residential proxy endpoint.
+    """
+
+    def handle(self):
+        client = self.request
+        client.settimeout(30)
+        srv = self.server  # type: ignore[attr-defined]
+        uh, up, auth = srv.upstream_host, srv.upstream_port, srv.auth_b64
+        try:
+            data = b""
+            while b"\r\n\r\n" not in data and len(data) < 128 * 1024:
+                chunk = client.recv(8192)
+                if not chunk:
+                    break
+                data += chunk
+            if not data:
+                return
+            head, _, rest = data.partition(b"\r\n\r\n")
+            lines = head.split(b"\r\n")
+            first = lines[0].decode("latin1")
+            parts = first.split(" ", 2)
+            if len(parts) != 3:
+                return
+            method, target, version = parts
+            headers = []
+            for line in lines[1:]:
+                if b":" in line:
+                    k, v = line.split(b":", 1)
+                    headers.append((k.decode("latin1"), v.decode("latin1").lstrip()))
+            auth_hdr = f"Proxy-Authorization: Basic {auth}"
+            if method.upper() == "CONNECT":
+                remote = socket.create_connection((uh, up), timeout=20)
+                remote.sendall(
+                    f"CONNECT {target} {version}\r\nHost: {target}\r\n"
+                    f"{auth_hdr}\r\nProxy-Connection: Keep-Alive\r\n\r\n".encode()
+                )
+                resp = b""
+                while b"\r\n\r\n" not in resp and len(resp) < 4096:
+                    chunk = remote.recv(4096)
+                    if not chunk:
+                        break
+                    resp += chunk
+                client.sendall(resp)
+                if not (resp.startswith(b"HTTP/1.1 200") or resp.startswith(b"HTTP/1.0 200")):
+                    remote.close()
+                    return
+            else:
+                remote = socket.create_connection((uh, up), timeout=20)
+                out = [first.encode("latin1")]
+                has_auth = False
+                for hk, hv in headers:
+                    if hk.lower() == "proxy-authorization":
+                        has_auth = True
+                        out.append(auth_hdr.encode("latin1"))
+                    else:
+                        out.append(f"{hk}: {hv}".encode("latin1"))
+                if not has_auth:
+                    out.append(auth_hdr.encode("latin1"))
+                remote.sendall(b"\r\n".join(out) + b"\r\n\r\n" + rest)
+            # Bidirectional relay
+            sockets = [client, remote]
+            while True:
+                r, _, ex = _select.select(sockets, [], sockets, 30)
+                if ex:
+                    break
+                if not r:
+                    continue
+                for s in r:
+                    d = s.recv(65536)
+                    if not d:
+                        return
+                    (remote if s is client else client).sendall(d)
+        except Exception:
+            pass
+
+
+class _ThreadedLocalProxy(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def _start_local_proxy(host: str, port: int, username: str, password: str):
+    """Start a local authenticating TCP forwarder. Returns (server, local_port)."""
+    server = _ThreadedLocalProxy(("127.0.0.1", 0), _LocalProxyHandler)
+    server.upstream_host = host  # type: ignore[attr-defined]
+    server.upstream_port = port  # type: ignore[attr-defined]
+    server.auth_b64 = base64.b64encode(f"{username}:{password}".encode()).decode()  # type: ignore[attr-defined]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_address[1]
+
+
 def make_proxy_extension(host: str, port: int, username: str, password: str) -> str:
     """
     Build a Manifest-V2 Chrome extension zip that handles proxy auth.
     Returns the path to the zip file (caller must delete it).
+    NOTE: No longer used — Chrome 151 crashes when MV2 extensions are loaded
+    under Xvfb. Kept for reference. Use _start_local_proxy() instead.
     """
     manifest = json.dumps({
         "version": "1.0.0",
@@ -2286,7 +2387,10 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
 
     options = uc.ChromeOptions()
     options.add_argument(f"--user-data-dir={profile_dir}")
-    proxy_ext_path: str | None = None
+    # TCP forwarder replaces MV2 extension — Chrome for Testing 151 crashes when
+    # an MV2 extension is loaded under Xvfb.  A local socketserver proxy has no
+    # such restriction and authenticates every request to the upstream proxy.
+    _local_proxy_server = None
 
     # Proxy configuration
     if proxy:
@@ -2294,15 +2398,12 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         if proxy_info and proxy_info["host"]:
             log(f"Proxy: {proxy_info['host']}:{proxy_info['port']} user={proxy_info.get('username')}")
             if proxy_info.get("username"):
-                # Chrome 112+ new headless mode supports extensions — always
-                # load the auth extension when credentials are present so proxy
-                # auth works in both Xvfb and headless modes.
-                proxy_ext_path = make_proxy_extension(
+                _local_proxy_server, _local_proxy_port = _start_local_proxy(
                     proxy_info["host"], proxy_info["port"],
                     proxy_info["username"], proxy_info.get("password") or ""
                 )
-                options.add_extension(proxy_ext_path)
-                log(f"Proxy auth extension loaded (headless={headless})")
+                options.add_argument(f"--proxy-server=http://127.0.0.1:{_local_proxy_port}")
+                log(f"Local authenticated proxy on 127.0.0.1:{_local_proxy_port} (Chrome 151 MV2 crash fix)")
             else:
                 options.add_argument(
                     f'--proxy-server=http://{proxy_info["host"]}:{proxy_info["port"]}'
@@ -2420,7 +2521,12 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             _session_lock_fd.close()
         except Exception:
             pass
-        _cleanup(proxy_ext_path, _xvfb_proc)
+        _cleanup(None, _xvfb_proc)
+        if _local_proxy_server is not None:
+            try:
+                _local_proxy_server.shutdown()
+            except Exception:
+                pass
         return {
             "status": "unknown",
             "reason": f"Chrome launch failed: {str(e)[:300]}",
@@ -2617,7 +2723,12 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             driver.quit()
         except Exception:
             pass
-        _cleanup(proxy_ext_path, _xvfb_proc)
+        _cleanup(None, _xvfb_proc)
+        if _local_proxy_server is not None:
+            try:
+                _local_proxy_server.shutdown()
+            except Exception:
+                pass
         # Release Chrome session slot — next queued account can now start its Chrome
         try:
             fcntl.flock(_session_lock_fd, fcntl.LOCK_UN)

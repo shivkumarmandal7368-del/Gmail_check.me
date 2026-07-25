@@ -30,6 +30,84 @@ _Last updated: July 25, 2026 — Session 59 (Portability audit: Chrome 151 is fu
 _Last updated: July 25, 2026 — Session 60 (Tampering fix: UA-CH brands version aligned to Chrome 151)_
 _Last updated: July 25, 2026 — Session 61 (Tampering investigation: userAgentData prototype fix — no score change)_
 _Last updated: July 25, 2026 — Session 62 (Failures #9–13 deep-dive: Chrome 151 native own-property behavior confirmed)_
+_Last updated: July 25, 2026 — Session 63 (Browser Check regression fix: MV2 proxy extension → local TCP forwarder)_
+
+---
+
+## Session 63 Changes (July 25, 2026) — Browser Check Regression Fix
+
+### Problem
+Browser Check was returning errors. The exact symptom: Chrome crashed on launch when a proxy with authentication credentials was provided.
+
+### Root Cause
+`gmail_uc_checker.py` was still using the MV2 (Manifest V2) Chrome extension approach for proxy authentication (`make_proxy_extension()` → `options.add_extension()`). Both `device_check.py` and `local_diagnostic.py` had already been updated in the WIP commit to use a local TCP forwarder instead — but `gmail_uc_checker.py` was missed.
+
+The exact note was already present in `local_diagnostic.py` line 91:
+```
+# Chrome for Testing 151 crashes when loading MV2 proxy extensions under Xvfb.
+# Use a local TCP forwarder that injects Proxy-Authorization on every request.
+```
+
+### Fix Applied
+**`artifacts/api-server/gmail_uc_checker.py`:**
+
+1. Added missing imports: `threading`, `socketserver`, `select as _select`
+
+2. Added `_LocalProxyHandler` (socketserver.BaseRequestHandler) and `_ThreadedLocalProxy` (socketserver.ThreadingTCPServer) classes — same authenticating TCP forwarder approach as `device_check.py`.
+
+3. Added `_start_local_proxy(host, port, username, password) → (server, local_port)` helper.
+
+4. In `check_gmail()`, replaced:
+   - `proxy_ext_path = make_proxy_extension(...)` + `options.add_extension(proxy_ext_path)`
+   - With: `_local_proxy_server, port = _start_local_proxy(...)` + `options.add_argument(f"--proxy-server=http://127.0.0.1:{port}")`
+
+5. Both cleanup paths (`_cleanup(proxy_ext_path, ...)` on Chrome launch failure and in the `finally` block) updated to pass `None` for the file path and call `_local_proxy_server.shutdown()` instead.
+
+### Local Diagnostic Results (Session 63)
+
+```
+about:blank: PASS 63  FAIL 13  WARN 2  TOTAL 78
+google.com:  PASS 70  FAIL 10  WARN 0  TOTAL 80
+
+14 unique failures:
+  • 1.nav.deviceMemory         (undefined, expected 8)
+  • 1.nav.maxTouchPoints       (0, expected 5)
+  • 1.nav.userAgentData        (MISSING on about:blank)
+  • 2.toString:plugins getter  (EXPOSES JS — __nr not registering getter)
+  • 2.toString:mimeTypes getter (EXPOSES JS — __nr not registering getter)
+  • 3.desc.instance:window.devicePixelRatio/innerWidth/innerHeight/outerWidth/outerHeight
+    (Chrome 151 native own-property behavior — confirmed unfixable, not a code bug)
+  • 4.chrome.app               (PRESENT, should be absent on Android)
+  • 5.webgl.context            (unavailable — GPU flags under investigation)
+  • 6.window.innerWidth        (iw=980 vs screenW=412)
+  • 9.nav.keyboard             (PRESENT, Android Chrome has none)
+```
+
+Improvement vs Session 62: 17 → 14 unique failures (−3).
+
+### Files Changed
+- `artifacts/api-server/gmail_uc_checker.py` — TCP forwarder classes + helper, proxy section rewrite, cleanup fix
+
+### What Was NOT Changed
+- `device_check.py` — already had the TCP forwarder fix
+- `local_diagnostic.py` — already had the TCP forwarder fix
+- All stealth JS in `make_stealth_js()` / `make_plugins_override_js()` — no changes
+- Chrome launch flags — no changes
+
+### Remaining High-Priority Issues
+
+| Issue | Details |
+|---|---|
+| `toString:plugins getter` | `__nr` registration for getter lambda not making it look native; `make_plugins_override_js()` fixed the length (now 0) but not the toString |
+| `toString:mimeTypes getter` | Same as above |
+| `nav.deviceMemory` | `Emulation.setDeviceMemoryOverride` unavailable in Chrome 151; JS prototype patch also failing |
+| `nav.maxTouchPoints` | CDP `setTouchEmulationEnabled` not propagating to JS; `_pd()` prototype patch being bypassed |
+| `chrome.app` | Removal code exists but not taking effect |
+| `nav.keyboard` | Deletion code exists but not taking effect |
+| `webgl.context` | `--use-gl=swiftshader --enable-webgl` not producing a usable context under Xvfb |
+| `window.innerWidth CSS mismatch` | Xvfb native window.innerWidth (980) doesn't match CDP-set screenW (412) |
+
+**DO NOT chase** failures `3.desc.instance:window.devicePixelRatio/innerWidth/innerHeight/outerWidth/outerHeight` — these are Chrome 151 native own-property behavior, confirmed unfixable via JS (Session 62 deep-dive).
 
 ---
 
