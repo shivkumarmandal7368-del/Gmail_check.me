@@ -42,3 +42,9 @@ id = "HYLBooWvdo075z4Uip4cC"
 uri = "file://screenshots/jamesrodgersfhi888-captured-result.png"
 type = "image"
 title = "Captured Google screen — password field not reached"
+
+[[outputs]]
+id = "whFM0a_OB3KgeIWkJY5Oi"
+uri = "file://attached_assets/debug_signin_rejected.png"
+type = "image"
+title = "Debug Screenshot — signin/rejected page"

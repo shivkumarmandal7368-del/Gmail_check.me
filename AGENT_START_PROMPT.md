@@ -11,7 +11,7 @@ Tum **Vanguard MX** project pe kaam kar rahe ho. Pehle kaam shuru karne se **`HA
 ReadFile: HANDOFF.md
 ```
 Poora padho. Sabse important sections:
-- **Session 17 Changes** (sabse upar near top) — UNRESOLVED bug jo tumhe fix karna hai
+- **Session 67 Changes** (sabse upar near top) — UNRESOLVED bug jo tumhe fix karna hai
 - **Architecture** — how Python/Node/Chrome interact
 - **Known Gotchas** — common mistakes
 
@@ -26,97 +26,94 @@ Dono workflows restart karo before any work:
 
 ### Step 3 — Ye kaam karo (priority order)
 
-#### 🔴 PRIORITY 1 — Concurrent Chrome crash fix (Session 17 — UNRESOLVED)
+#### 🔴 PRIORITY 1 — ChromeDriver cdc_ patch (Session 67 — UNRESOLVED)
 
-**Problem:** Jab 2 Gmail accounts ek saath check karte hain, ek fail hota hai:
-```
-HTTPConnectionPool(host='localhost', port=56445): Max retries exceeded
-[Errno 111] Connection refused
-```
-Ek ek karke check karne pe sab theek kaam karta hai.
+**Problem:** `signin/rejected` — Google immediately rejects after email submit. Root cause confirmed.
 
-**Root cause:** Chrome launch lock sirf startup ke liye hold hota hai (~1s). Phir 2 Chrome instances ek saath chalte hain → RAM khatam → OOM killer ek Chrome ko kill karta hai mid-session → ChromeDriver connection lost → `unknown` result.
+**Root cause:** ChromeDriver binary at `~/.local/share/undetected_chromedriver/undetected_chromedriver` has **11 occurrences** of `cdc_adoQpoasnfa76pfcZLmcfl_` still present. UC's patcher regex `{window.cdc...;}` does NOT match Chrome 151's binary format, so UC's auto-patch silently fails. These strings are injected as JavaScript variables (`window.cdc_adoQpoasnfa76pfcZLmcfl_Window`, etc.) into every page Chrome opens — Google reads them and immediately detects automation → `signin/rejected`.
 
-**Fix:** `artifacts/api-server/gmail_uc_checker.py` mein ek nayi lock add karo jo POORE Chrome session ke liye hold rahe.
+**Confirmed facts (do NOT re-investigate):**
+- `cdc_adoQpoasnfa76pfcZLmcfl_` count in binary: **11**
+- UC regex `{window.cdc...;}` match: **NONE** (UC's patcher is broken for Chrome 151)
+- `is_binary_patched()` returns **True** (marker present from a previous partial run) — so UC won't auto-re-patch on its own
+- MOBILE_UA is already Chrome 151 ✅ (line 2598 in gmail_uc_checker.py updates fp["chromeVersion"] before building UA)
+- Proxy (PROXY_URL secret) is working ✅ — T-Mobile residential IPs
 
-**EXACT fix (Session 17 mein detailed hai, yahan summary):**
-
-1. File mein `_CHROME_LAUNCH_LOCK_PATH` ke paas nayi constant add karo:
+**EXACT fix — run this Python script:**
 ```python
-_CHROME_SESSION_LOCK_PATH = "/tmp/gmail_checker_chrome_session.lock"
+import random, string
+binary_path = '/home/runner/.local/share/undetected_chromedriver/undetected_chromedriver'
+with open(binary_path, 'rb') as f:
+    content = f.read()
+old = b'cdc_adoQpoasnfa76pfcZLmcfl_'  # 28 bytes
+count_before = content.count(old)
+# Must be SAME length as old (28 bytes) — binary string replacement requires same size
+random.seed(99887)
+new = ('rvx_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=24))).encode()[:28]
+new_content = content.replace(old, new)
+with open(binary_path, 'wb') as f:
+    f.write(new_content)
+print(f'Replaced {count_before} occurrences → {new_content.count(old)} remaining')
 ```
 
-2. Chrome launch se PEHLE session lock acquire karo (line ~946 se pehle, jahan `_lock_fd` open hota hai):
+**After patching, ALSO add a permanent auto-patch in `gmail_uc_checker.py`** so it self-heals on every restart. Add this function near the top of `check_gmail()` — before the Chrome launch section — so a fresh UC download never leaves cdc_ strings:
+
 ```python
-_session_lock_fd = open(_CHROME_SESSION_LOCK_PATH, "w")
-log("Waiting for Chrome session slot…")
-fcntl.flock(_session_lock_fd, fcntl.LOCK_EX)
-log("Chrome session slot acquired")
+def _ensure_chromedriver_patched():
+    """Force-patch the UC chromedriver binary if cdc_ strings are present.
+    UC 3.5.5's built-in patcher uses a regex that doesn't match Chrome 151's
+    binary format, so we do the replacement manually here."""
+    import glob, random, string as _string
+    uc_dir = os.path.expanduser('~/.local/share/undetected_chromedriver/')
+    paths = glob.glob(uc_dir + '*chromedriver*')
+    old = b'cdc_adoQpoasnfa76pfcZLmcfl_'  # 28 bytes
+    random.seed(77331)
+    new = ('rvx_' + ''.join(random.choices(_string.ascii_lowercase + _string.digits, k=24))).encode()[:28]
+    for path in paths:
+        try:
+            with open(path, 'rb') as f:
+                content = f.read()
+            if old in content:
+                new_content = content.replace(old, new)
+                with open(path, 'wb') as f:
+                    f.write(new_content)
+                log(f'[patch] Patched {content.count(old)} cdc_ refs in {os.path.basename(path)}')
+            else:
+                log(f'[patch] {os.path.basename(path)} already clean')
+        except Exception as e:
+            log(f'[patch] Warning: {e}')
 ```
 
-3. `check_gmail()` ke main `try/finally` block mein (ya `_cleanup()` mein) session lock release karo:
-```python
-finally:
-    try:
-        fcntl.flock(_session_lock_fd, fcntl.LOCK_UN)
-        _session_lock_fd.close()
-    except Exception:
-        pass
-```
+Call `_ensure_chromedriver_patched()` inside `check_gmail()` right after the `import undetected_chromedriver as uc` block and before the Chrome options setup.
 
-4. Existing `_CHROME_LAUNCH_LOCK_PATH` logic BILKUL mat chhuo — woh display + port allocation ke liye hai aur sahi kaam karta hai.
-
-**Test karke verify karo:**
+**Test after fix:**
 ```bash
-curl -s -X POST http://localhost:8080/api/emails/browser-check \
+curl -s -X POST http://localhost:8080/api/jobs \
   -H "Content-Type: application/json" \
-  --max-time 600 \
-  -d '{
-    "credentials":[
-      {"email":"acct1@gmail.com","password":"pass1"},
-      {"email":"acct2@gmail.com","password":"pass2"}
-    ],
-    "proxy":"http://USER:PASS@rp.scrapegw.com:6060",
-    "concurrency":2,
-    "freshProfile":true
-  }'
+  -d '{"credentials":[{"email":"jamesrodgersfhi888@gmail.com","password":"HxyHGPeaPPPm","totp":"czln7pn6bjfr6drkhsrihokvj5adbgqx"}],"concurrency":1,"freshProfile":true}'
 ```
-Dono accounts ka result aana chahiye — koi `Connection refused` error nahi.
+Watch logs — should advance past "After email submit" to Step 3 (password) without `signin/rejected`.
 
 ---
 
-#### 🟡 PRIORITY 2 — v3/signin/TL=... page handling verify karo (Session 16)
+#### 🟡 PRIORITY 2 — Remaining Tampering signals (score = 16, target ≤ 5)
 
-**Background:** Google kabhi kabhi `https://accounts.google.com/v3/signin/TL=...` URL pe TOTP page dikhata hai (standard `challenge/totp` ke bajaye). Session 16 mein yeh fix hua tha lekin workflows fail/restart ke chakkar mein user ne bola abhi bhi `unknown` aa raha hai.
+After Priority 1 is fixed and Gmail login works, fix these remaining fingerprint.com tampering signals (from Session 66 diagnostic):
 
-**Fix already in code — sirf verify karo:**
-1. `gmail_uc_checker.py` line ~1626 check karo:
+| Signal | Current | Target | Notes |
+|--------|---------|--------|-------|
+| `nav.deviceMemory` | undefined | 8 | CDP `Emulation.setDeviceMemoryOverride` removed in Chrome 151. Try Chrome flag `--force-device-memory=8` in options |
+| `nav.maxTouchPoints` | 0 | 5 | CDP `Emulation.setTouchEmulationEnabled` IS being called but not propagating. Try calling it BEFORE stealth JS injection, not after |
+| `chrome.app` | present | absent | Code exists (line ~1571) but not taking effect in Chrome 151 |
+| `nav.keyboard` | present | absent | Code exists (line ~1621) but not taking effect |
+
+**For `nav.deviceMemory` Chrome flag approach:**
 ```python
-_on_totp_url = (
-    "challenge/totp" in url
-    or "challenge/ipp" in url
-    or ("v3/signin" in url and "v3/signin/identifier" not in url and "challenge" not in url)
-)
+options.add_argument("--force-device-memory=8")  # add to Chrome options in check_gmail()
 ```
 
-2. `classify()` function mein (line ~1125) check karo:
-```python
-if (
-    "v3/signin" in url
-    and "v3/signin/identifier" not in url
-    and "challenge" not in url
-    and any(x in _low for x in ["google authenticator", "verification code from", "authenticator app", "verify that it's you"])
-):
-    return {"status": "opened", ...}
-```
-
-3. Wrong TOTP fallback (line ~1860) check karo:
-```python
-if "v3/signin" in url and "challenge" not in url:
-    return {"status": "opened", ...}  # not wrong_password
-```
-
-Agar koi bhi missing hai toh add karo.
+**For `nav.maxTouchPoints` — try early CDP before page load:**
+Ensure `Emulation.setTouchEmulationEnabled` is called immediately after Chrome launches, before any `driver.get()`.
 
 ---
 
@@ -124,11 +121,12 @@ Agar koi bhi missing hai toh add karo.
 
 Har session ke baad HANDOFF.md mein apna session add karo:
 ```
-## Session 18 Changes (date) — [title]
+## Session 68 Changes (date) — [title]
 ### Problem
 ### Root Cause  
 ### Fix Applied
 ### Files Changed
+### Verification
 ```
 
 ---
@@ -137,10 +135,17 @@ Har session ke baad HANDOFF.md mein apna session add karo:
 
 | File | Kya hai |
 |---|---|
-| `artifacts/api-server/gmail_uc_checker.py` | Main Python Selenium script (~2200+ lines) |
+| `artifacts/api-server/gmail_uc_checker.py` | Main Python Selenium script (~4448 lines) |
 | `artifacts/api-server/src/lib/browserLoginChecker.ts` | Node wrapper — Python spawn, concurrency |
-| `artifacts/api-server/src/routes/emails.ts` | Express routes (SSE stream endpoint) |
-| `artifacts/gmail-checker/src/pages/home.tsx` | Full React frontend |
+| `artifacts/api-server/src/routes/jobs.ts` | Express routes (SSE stream endpoint) |
+| `artifacts/gmail-checker/src/pages/home.tsx` | Full React frontend (~2448 lines) |
+
+**Credential format:** `email:password:2FA_SECRET` (each line)
+**Test credential:** `jamesrodgersfhi888@gmail.com:HxyHGPeaPPPm:czln7pn6bjfr6drkhsrihokvj5adbgqx`
+
+**Secrets configured:**
+- `PROXY_URL` — rp.scrapegw.com residential proxy (set, working)
+- `SESSION_SECRET` — Express session secret
 
 **Workflows:**
 - API: `artifacts/api-server: API Server` → port 8080
@@ -154,6 +159,11 @@ pip install -r artifacts/api-server/requirements.txt
 **Node deps (agar missing ho):**
 ```bash
 pnpm install
+```
+
+**ChromeDriver binary location:**
+```
+~/.local/share/undetected_chromedriver/undetected_chromedriver
 ```
 
 ---
