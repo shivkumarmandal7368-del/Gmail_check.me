@@ -2686,8 +2686,8 @@ def check_gmail(
 
     # Ensure chromedriver binary exists, is free of cdc_ detection strings, and
     # has the UC is_binary_patched() sentinel so uc.Chrome()'s internal patcher
-    # skips re-downloading. Returns the path for driver_executable_path below.
-    _cd_binary_path = _ensure_chromedriver_patched(version_main=chrome_version_main)
+    # skips re-downloading (via the Patcher.auto() monkey-patch applied inside).
+    _ensure_chromedriver_patched(version_main=chrome_version_main)
 
     # Profile directory — wiped on fresh_profile=True so Google sees a brand-new device
     safe_email = email.replace("@", "_at_").replace(".", "_")
@@ -2848,15 +2848,12 @@ def check_gmail(
     _cd_port = _find_free_port()
     log(f"ChromeDriver port: {_cd_port}")
     try:
-        # Pass driver_executable_path so UC's internal Patcher sets
-        # _custom_exe_path=True → auto() calls is_binary_patched() → True
-        # → returns immediately, NO os.unlink() + re-download.
-        # This is the key fix: without this, uc.Chrome()'s internal patcher.auto()
-        # deletes and re-downloads the chromedriver, wiping our cdc_ patch.
+        # Patcher.auto() is monkey-patched inside _ensure_chromedriver_patched()
+        # to check is_binary_patched() first — so uc.Chrome()'s internal auto()
+        # call returns True immediately (no os.unlink() + re-download).
         driver = uc.Chrome(
             options=options,
             browser_executable_path=chromium_path,
-            driver_executable_path=_cd_binary_path,
             headless=headless,
             version_main=chrome_version_main,
             use_subprocess=True,
@@ -3686,11 +3683,18 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     url, text = page_state()
     log(f"{email} — After email submit: {url[:70]}")
 
-    # ── Identifier-page stall fix (Session 8) ────────────────────────────────
+    # ── Identifier-page stall fix ────────────────────────────────────────────
     # If Google never navigated past the email page, the proxy IP was detected
     # at the email step (silent CAPTCHA or block). Falls to unknown otherwise.
     # Classify as verification_required so auto-retry fires with a fresh proxy IP.
-    if ("signin/identifier" in url) and "challenge" not in url and "mail.google.com" not in url:
+    #
+    # BUG FIX: Must check URL PATH only, not the full URL string.
+    # The ?continue=https://mail.google.com/... query parameter contains
+    # "mail.google.com" as plain text, which caused the old condition
+    # `"mail.google.com" not in url` to be False — silently bypassing this
+    # stall check and falling through to "Password field not found" instead.
+    _url_path = url.split("?")[0]  # strip query string before checking
+    if "signin/identifier" in _url_path and "challenge" not in _url_path:
         shot = screenshot_b64()
         log(f"{email} — Identifier stall: page did not advance past email field (automation detected at email step)")
         return {
