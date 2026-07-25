@@ -2539,6 +2539,58 @@ def main():
 
 # ── Browser check ─────────────────────────────────────────────────────────────
 
+def _ensure_chromedriver_patched(version_main: int | None = None):
+    """Force-patch the UC chromedriver binary if cdc_ strings are present.
+    UC 3.5.5's built-in patcher uses a regex that doesn't match Chrome 151's
+    binary format, so we do the replacement manually here.
+
+    Pass version_main so we can call uc.Patcher.auto() first, guaranteeing the
+    binary exists before we try to patch it (UC downloads lazily otherwise).
+
+    Uses a local Random instance (not the global RNG) so fingerprint generation
+    and other per-run random-dependent behaviour are unaffected."""
+    import glob, string as _string
+    import random as _random_mod
+    import undetected_chromedriver as _uc
+
+    # Materialise the chromedriver binary if it isn't on disk yet.
+    # uc.Patcher.auto() is a no-op if the binary is already present and marked.
+    try:
+        patcher = _uc.Patcher(version_main=version_main)
+        patcher.auto()
+    except Exception as e:
+        raise RuntimeError(f'[patch] Failed to materialise chromedriver binary: {e}') from e
+
+    uc_dir = os.path.expanduser('~/.local/share/undetected_chromedriver/')
+    paths = glob.glob(uc_dir + '*chromedriver*')
+    if not paths:
+        raise RuntimeError(
+            f'[patch] No chromedriver binary found in {uc_dir} after patcher.auto() — '
+            'cannot verify cdc_ protection'
+        )
+
+    old = b'cdc_adoQpoasnfa76pfcZLmcfl_'  # 28 bytes
+    # Use a *local* RNG so global random state is never touched.
+    _rng = _random_mod.Random(77331)
+    new = ('rvx_' + ''.join(_rng.choices(_string.ascii_lowercase + _string.digits, k=24))).encode()[:28]
+    assert len(new) == 28, f"Replacement must be exactly 28 bytes, got {len(new)}"
+    for path in paths:
+        with open(path, 'rb') as f:
+            content = f.read()
+        if old in content:
+            new_content = content.replace(old, new)
+            with open(path, 'wb') as f:
+                f.write(new_content)
+            remaining = new_content.count(old)
+            if remaining:
+                raise RuntimeError(
+                    f'[patch] cdc_ patch incomplete: {remaining} occurrences still present in {path}'
+                )
+            log(f'[patch] Patched {content.count(old)} cdc_ refs in {os.path.basename(path)}')
+        else:
+            log(f'[patch] {os.path.basename(path)} already clean')
+
+
 def check_gmail(
     email: str,
     password: str,
@@ -2568,6 +2620,11 @@ def check_gmail(
         f"Chrome: {chromium_path}, version_main={chrome_version_main}, "
         f"headless={headless}, display={display}"
     )
+
+    # Ensure chromedriver binary exists and is free of cdc_ detection strings.
+    # Called here (after chrome_version_main is known) so uc.Patcher can
+    # download the correct driver version before we attempt to patch it.
+    _ensure_chromedriver_patched(version_main=chrome_version_main)
 
     # Profile directory — wiped on fresh_profile=True so Google sees a brand-new device
     safe_email = email.replace("@", "_at_").replace(".", "_")
