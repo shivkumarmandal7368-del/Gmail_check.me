@@ -28,7 +28,7 @@ import {
 } from "lucide-react"
 
 type SmtpFilter = "all" | "valid" | "invalid" | "disabled" | "catch_all" | "unknown";
-type Mode = "smtp" | "login" | "browser" | "device";
+type Mode = "smtp" | "login" | "browser" | "device" | "manual";
 type LoginList = "opened" | "not_opened" | "delete" | "unknown" | "fingerprint";
 
 export default function Home() {
@@ -62,6 +62,7 @@ export default function Home() {
             { id: "login",   label: "IMAP CHECK",    icon: <KeyRound className="w-4 h-4" /> },
             { id: "browser", label: "BROWSER CHECK", icon: <Globe className="w-4 h-4" /> },
             { id: "device",  label: "DEVICE CHECK",  icon: <ShieldAlert className="w-4 h-4" /> },
+            { id: "manual",  label: "MANUAL BROWSER", icon: <Smartphone className="w-4 h-4" /> },
           ] as { id: Mode; label: string; icon: React.ReactNode }[]).map(m => (
             <button key={m.id} onClick={() => setMode(m.id)}
               className={cn(
@@ -75,7 +76,7 @@ export default function Home() {
           ))}
         </div>
 
-        {mode === "smtp" ? <SmtpChecker /> : mode === "login" ? <LoginChecker /> : mode === "browser" ? <BrowserChecker /> : <DeviceChecker />}
+        {mode === "smtp" ? <SmtpChecker /> : mode === "login" ? <LoginChecker /> : mode === "browser" ? <BrowserChecker /> : mode === "device" ? <DeviceChecker /> : <ManualBrowser />}
       </div>
     </div>
   );
@@ -2126,6 +2127,221 @@ function DeviceChecker() {
           </CardContent>
         </Card>
       )}
+    </div>
+  );
+}
+
+/* ───────────────────────── MANUAL BROWSER ───────────────────────── */
+function ManualBrowser() {
+  const [deviceIndex, setDeviceIndex] = useState(() => {
+    try {
+      const saved = localStorage.getItem("vbc_device");
+      const parsed = saved ? JSON.parse(saved) : 0;
+      return Number.isInteger(parsed) && parsed >= 0 && parsed < DEVICE_PROFILES.length ? parsed : 0;
+    } catch { return 0; }
+  });
+  const [proxyText, setProxyText] = useState("");
+  const [useCustomProxy, setUseCustomProxy] = useState(false);
+  const [url, setUrl] = useState("https://accounts.google.com");
+  const [text, setText] = useState("");
+  const [status, setStatus] = useState<"idle" | "starting" | "running" | "error">("idle");
+  const [sessionId, setSessionId] = useState("");
+  const [logs, setLogs] = useState<string[]>([]);
+  const [shot, setShot] = useState<{ b64: string; screenW: number; screenH: number; title?: string; url?: string } | null>(null);
+  const [error, setError] = useState("");
+  const streamRef = useRef<EventSource | null>(null);
+  const shotRef = useRef<HTMLImageElement | null>(null);
+
+  const selectedDevice = DEVICE_PROFILES[deviceIndex] ?? DEVICE_PROFILES[0];
+
+  const closeStream = () => {
+    streamRef.current?.close();
+    streamRef.current = null;
+  };
+
+  const sendAction = async (action: Record<string, unknown>) => {
+    if (!sessionId || status !== "running") return;
+    try {
+      const response = await fetch(`/api/manual-browser/${sessionId}/action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(action),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error ?? `HTTP ${response.status}`);
+      }
+    } catch (err: any) {
+      setError(err?.message ?? "Browser action failed");
+    }
+  };
+
+  const start = async () => {
+    closeStream();
+    setStatus("starting"); setLogs([]); setShot(null); setError("");
+    try {
+      const response = await fetch("/api/manual-browser/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deviceIndex,
+          ...(useCustomProxy && proxyText.trim() ? { proxy: proxyText.trim() } : {}),
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? `HTTP ${response.status}`);
+      const id = payload.sessionId as string;
+      setSessionId(id);
+      const stream = new EventSource(`/api/manual-browser/${id}/stream`);
+      streamRef.current = stream;
+      stream.addEventListener("log", event => {
+        try { setLogs(prev => [...prev.slice(-99), JSON.parse((event as MessageEvent).data)]); }
+        catch { setLogs(prev => [...prev.slice(-99), (event as MessageEvent).data]); }
+      });
+      stream.addEventListener("ready", () => setStatus("running"));
+      stream.addEventListener("screenshot", event => {
+        try { setShot(JSON.parse((event as MessageEvent).data)); } catch {}
+      });
+      stream.addEventListener("error", event => {
+        const data = (event as MessageEvent).data;
+        if (data) {
+          try { setError(JSON.parse(data)); } catch { setError(data); }
+        }
+        setStatus("error");
+      });
+      stream.addEventListener("closed", () => {
+        setStatus(s => s === "error" ? s : "idle");
+        setLogs(prev => [...prev.slice(-99), "Browser session closed."]);
+      });
+    } catch (err: any) {
+      setError(err?.message ?? "Could not start manual browser");
+      setStatus("error");
+    }
+  };
+
+  const stop = async () => {
+    if (sessionId) {
+      try { await fetch(`/api/manual-browser/${sessionId}/stop`, { method: "POST" }); } catch {}
+    }
+    closeStream();
+    setStatus("idle");
+    setLogs(prev => [...prev, "Stopped by user."]);
+  };
+
+  const navigate = () => {
+    if (url.trim()) void sendAction({ action: "navigate", url: url.trim() });
+  };
+
+  const sendText = () => {
+    if (!text) return;
+    void sendAction({ action: "type", text });
+    setText("");
+  };
+
+  const clickScreenshot = (event: React.MouseEvent<HTMLImageElement>) => {
+    if (!shot || !shotRef.current) return;
+    const rect = shotRef.current.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * shot.screenW;
+    const y = ((event.clientY - rect.top) / rect.height) * shot.screenH;
+    void sendAction({ action: "click", x, y });
+  };
+
+  useEffect(() => () => closeStream(), []);
+
+  return (
+    <div className="space-y-4">
+      <Card className="bg-card/60 border-border">
+        <CardHeader className="py-3 px-4 border-b border-border">
+          <CardTitle className="text-xs font-mono tracking-widest uppercase flex items-center gap-2">
+            <Smartphone className="w-4 h-4 text-purple-400" /> Manual Browser
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-4 space-y-4">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <div className="space-y-1.5 lg:col-span-2">
+              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">Device profile</label>
+              <select value={deviceIndex} onChange={e => setDeviceIndex(Number(e.target.value))} disabled={status === "running"}
+                className="w-full bg-background/50 border border-purple-500/40 rounded-md px-3 py-2 text-xs font-mono text-foreground">
+                {DEVICE_PROFILES.map(d => <option key={d.index} value={d.index}>{d.label} · {d.sub}</option>)}
+              </select>
+              <p className="text-[10px] text-purple-300/60 font-mono">{selectedDevice.label} · {selectedDevice.sub}</p>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">Browser status</label>
+              <Badge variant="outline" className={cn("font-mono text-[10px] w-fit", status === "running" ? "text-green-400 border-green-500/40" : status === "error" ? "text-red-400 border-red-500/40" : "text-muted-foreground")}>
+                {status === "starting" && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
+                {status.toUpperCase()}
+              </Badge>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">URL</label>
+            <div className="flex gap-2">
+              <Input value={url} onChange={e => setUrl(e.target.value)} onKeyDown={e => e.key === "Enter" && navigate()}
+                disabled={status !== "running"} className="font-mono text-xs bg-background" placeholder="https://example.com" />
+              <Button onClick={navigate} disabled={status !== "running"} className="font-mono text-xs"><Globe className="w-3 h-3 mr-1" />OPEN</Button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">Proxy</label>
+              <button type="button" onClick={() => setUseCustomProxy(v => !v)} disabled={status !== "idle" && status !== "error"}
+                className="text-[10px] font-mono text-purple-300 hover:text-purple-200">{useCustomProxy ? "Use configured proxy secret" : "Use custom proxy for this session"}</button>
+              {useCustomProxy && <Textarea value={proxyText} onChange={e => setProxyText(e.target.value)} disabled={status !== "idle" && status !== "error"}
+                placeholder="http://user:pass@host:port" className="font-mono text-xs h-[58px] resize-none bg-background" />}
+              <p className="text-[10px] text-muted-foreground/60 font-mono">Custom proxy is used only when the session starts.</p>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">Focused field text</label>
+              <div className="flex gap-2">
+                <Input value={text} onChange={e => setText(e.target.value)} onKeyDown={e => e.key === "Enter" && sendText()}
+                  disabled={status !== "running"} type="text" autoComplete="off" className="font-mono text-xs bg-background" placeholder="Type, then click SEND" />
+                <Button onClick={sendText} disabled={status !== "running" || !text} variant="outline" className="font-mono text-xs">SEND</Button>
+              </div>
+              <p className="text-[10px] text-yellow-400/70 font-mono">Not saved or logged. For sensitive fields, type directly in the browser when possible.</p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {status === "running" || status === "starting" ? (
+              <Button onClick={stop} variant="destructive" className="font-mono text-xs"><XCircle className="w-3 h-3 mr-1" />STOP BROWSER</Button>
+            ) : (
+              <Button onClick={start} className="font-mono text-xs bg-purple-600 hover:bg-purple-700 text-white"><Globe className="w-3 h-3 mr-1" />START MANUAL BROWSER</Button>
+            )}
+            <Button onClick={() => void sendAction({ action: "key", key: "ENTER" })} disabled={status !== "running"} variant="outline" className="font-mono text-xs">ENTER</Button>
+            <Button onClick={() => void sendAction({ action: "key", key: "TAB" })} disabled={status !== "running"} variant="outline" className="font-mono text-xs">TAB</Button>
+            <Button onClick={() => void sendAction({ action: "screenshot" })} disabled={status !== "running"} variant="outline" className="font-mono text-xs">REFRESH SCREEN</Button>
+          </div>
+          {error && <p className="text-xs text-red-400 font-mono">❌ {error}</p>}
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px] gap-4">
+        <Card className="bg-card/40 border-border">
+          <CardHeader className="py-2 px-4 border-b border-border">
+            <span className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">Live browser screen — click the screen to interact</span>
+          </CardHeader>
+          <CardContent className="p-3 flex justify-center bg-black/20 min-h-[420px]">
+            {shot ? (
+              <img ref={shotRef} src={`data:image/png;base64,${shot.b64}`} alt="Manual browser screen"
+                onClick={clickScreenshot} className="max-w-full max-h-[680px] object-contain rounded-md border border-border cursor-crosshair" />
+            ) : (
+              <div className="flex items-center justify-center text-muted-foreground/40 font-mono text-xs">
+                {status === "starting" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Starting Chrome…</> : "Start the browser to see its screen"}
+              </div>
+            )}
+          </CardContent>
+          {shot && <div className="px-4 pb-3 text-[10px] text-muted-foreground/60 font-mono truncate">{shot.title || "Untitled"} · {shot.url || "about:blank"}</div>}
+        </Card>
+        <Card className="bg-card/40 border-border">
+          <CardHeader className="py-2 px-4 border-b border-border"><span className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">Session log</span></CardHeader>
+          <CardContent className="p-3 h-[420px] overflow-y-auto bg-black/30 font-mono text-xs space-y-1">
+            {logs.length ? logs.map((line, i) => <div key={i} className="text-slate-300 leading-relaxed"><span className="text-slate-600 mr-2">{String(i + 1).padStart(3, "0")}</span>{line}</div>) : <span className="text-muted-foreground/40">Awaiting browser session…</span>}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }

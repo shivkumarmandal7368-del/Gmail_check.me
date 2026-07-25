@@ -4,6 +4,7 @@ import emailsRouter from "./emails";
 import jobsRouter from "./jobs";
 import proxyRouter from "./proxy";
 import deviceCheckRouter from "./deviceCheck";
+import manualBrowserRouter from "./manualBrowser";
 
 const router: IRouter = Router();
 
@@ -12,5 +13,6 @@ router.use(emailsRouter);
 router.use(jobsRouter);
 router.use(proxyRouter);
 router.use(deviceCheckRouter);
+router.use(manualBrowserRouter);
 
 export default router;
