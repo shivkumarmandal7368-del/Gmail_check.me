@@ -2646,7 +2646,10 @@ def check_gmail(
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-features=ChromeWhatsNewUI,EnablePasswordsAccountStorage,OptimizationHints,AutofillServerCommunication,InterestFeedContentSuggestions")
+    # NOTE: --disable-features=ChromeWhatsNewUI,... intentionally removed —
+    # Chrome 151 exits its renderer under Xvfb when this legacy feature bundle is
+    # passed (same finding as device_check.py). Omitting it fixes the immediate
+    # "invalid session id" crash after launch.
     options.add_argument("--disable-sync")
     options.add_argument("--no-pings")
     # NOTE: --disable-background-networking, --disable-client-side-phishing-detection,
@@ -2663,10 +2666,19 @@ def check_gmail(
     # VM detection fix: SwiftShader renders via GPU-like pipeline instead of --disable-gpu
     # which exposes software rendering signals. These flags make WebGL work and match
     # what real Android Chrome reports (device_check.py uses the same set).
-    options.add_argument("--use-gl=swiftshader")
+    # Chrome 151+: --use-gl=swiftshader maps to gl=none,angle=none which is no longer
+    # an allowed implementation. Use --use-angle=swiftshader (gl=egl-angle,angle=swiftshader)
+    # which is the correct ANGLE-backed software renderer in Chrome 115+.
+    options.add_argument("--use-angle=swiftshader")
     options.add_argument("--enable-webgl")
     options.add_argument("--ignore-gpu-blocklist")
     options.add_argument("--disable-gpu-sandbox")
+    # Disable GPU-backed page compositing — the source of renderer crashes under Xvfb.
+    # Keeps the GPU process alive (so WebGL works) but offloads compositing to software.
+    # Mirrors device_check.py which uses this same flag for Chrome 151 Xvfb stability.
+    options.add_argument("--disable-gpu-compositing")
+    # Chrome 151 renderer stability fix (from device_check.py)
+    options.add_argument("--disable-extensions-http-throttling")
 
     log(f"Launching Chrome (UC)…")
 
