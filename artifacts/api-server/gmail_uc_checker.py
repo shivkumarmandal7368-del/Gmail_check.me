@@ -1341,7 +1341,11 @@ def make_stealth_js(fp: dict) -> str:
 }})();
 (function(){{
   // Tampering fix: window dimension properties on Window.prototype, not instance.
-  var _wp=Object.getPrototypeOf(window)||Window.prototype;
+  // CRITICAL: Object.getPrototypeOf(window) in Chrome 151's global-proxy context
+  // returns the proxy itself, not Window.prototype — causing defineProperty to land
+  // as a configurable own property on window (flagged by fingerprint.com as tampered).
+  // Use Window.prototype directly: it is always correct and avoids the proxy trap.
+  var _wp=Window.prototype;
   function _wd(k,v){{
     try{{
       Object.defineProperty(_wp,k,{{get:function(){{return v;}},configurable:true,enumerable:true}});
