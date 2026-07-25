@@ -27,6 +27,7 @@ from gmail_uc_checker import (
     make_plugins_override_js,
     parse_proxy,
     _find_free_port,
+    _cleanup_stale_chrome_artifacts,
 )
 
 # ── Device selection ────────────────────────────────────────────────────────────
@@ -172,6 +173,26 @@ if proxy_info and proxy_info.get("host"):
     threading.Thread(target=proxy_server_inst.serve_forever, daemon=True).start()
     local_proxy_port = proxy_server_inst.server_address[1]
     print(f"Local proxy forwarder ready on 127.0.0.1:{local_proxy_port}\n")
+
+# ── Pre-launch: clean stale Xvfb / Chrome artifacts ──────────────────────────
+# Removes dead-PID lock files, orphaned Xvfb processes, and Chrome singleton
+# files left by crashed prior sessions.  Must run before Xvfb starts so a
+# stale :92 lock can't block the fresh launch.
+_cleanup_stale_chrome_artifacts()
+# Also kill any stale Xvfb specifically on :92 (fixed display used here)
+for _p in ("/tmp/.X92-lock", "/tmp/.X11-unix/X92"):
+    if os.path.exists(_p) or os.path.islink(_p):
+        try:
+            if _p.endswith("-lock"):
+                _stale_pid = int(open(_p).read().strip())
+                try:
+                    os.kill(_stale_pid, 9)  # SIGKILL
+                except Exception:
+                    pass
+            os.remove(_p)
+            print(f"[cleanup] Removed stale artifact: {_p}")
+        except Exception:
+            pass
 
 # ── Xvfb ────────────────────────────────────────────────────────────────────────
 DISPLAY_NUM = ":92"

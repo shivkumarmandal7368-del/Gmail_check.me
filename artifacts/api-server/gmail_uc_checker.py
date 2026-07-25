@@ -76,59 +76,146 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _cleanup_stale_xvfb_locks():
+def _cleanup_stale_chrome_artifacts(profile_dir: str | None = None) -> None:
     """
-    Remove stale Xvfb lock files left by crashed/killed processes.
+    Comprehensive cleanup of stale Chrome / Xvfb runtime artifacts.
 
-    X11 lock files (/tmp/.XN-lock) contain the PID of the owning Xvfb
-    process as an ASCII string.  When Xvfb is SIGKILLed or crashes its
-    lock file is NOT removed.  _find_free_display() then thinks all those
-    displays are still occupied and keeps allocating new ones (100, 101,
-    102, …) until none are left, causing Chrome to fail with
-    "invalid session id" on startup.
+    Called before every Chrome launch to ensure a clean display and profile.
+    Safe to call concurrently — only touches dead / orphaned resources.
 
-    This function scans displays :100–:299, reads the PID from each lock
-    file, and removes any file whose owning PID is no longer alive.
-    Orphaned Xvfb processes (alive but whose Chrome child is gone) are
-    also killed so the display number can be reused immediately.
+    What is cleaned:
+      1. /tmp/.X{n}-lock files whose owning PID is dead → removed
+      2. Orphaned Xvfb processes (PID alive, but no process has DISPLAY=:{n})
+         → SIGTERM → SIGKILL → lock + socket removed
+      3. /tmp/.X11-unix/X{n} sockets paired with any removed lock
+      4. Chrome SingletonLock / SingletonSocket / SingletonCookie inside
+         the given profile_dir (if any are left from a prior crash)
+      5. Same singleton cleanup across ALL /tmp/gmail_checker_profiles/*
+         dirs whose SingletonLock symlink points to a dead PID
     """
+    import glob as _glob
+
+    # ── Pre-scan: which display numbers are currently in use? ────────────────
+    # Read /proc/*/environ once and collect every DISPLAY=:{n} value.
+    # Much faster than re-scanning /proc for each candidate display number.
+    _in_use_displays: set[int] = set()
+    for _env_path in _glob.glob("/proc/*/environ"):
+        try:
+            with open(_env_path, "rb") as _ef:
+                _env_data = _ef.read()
+            for _part in _env_data.split(b"\x00"):
+                if _part.startswith(b"DISPLAY=:"):
+                    try:
+                        _in_use_displays.add(int(_part[9:].split(b".")[0]))
+                    except ValueError:
+                        pass
+        except (PermissionError, FileNotFoundError, ProcessLookupError):
+            continue
+
+    # ── 1–3: Xvfb lock files and orphaned Xvfb processes (:100–:299) ────────
     for n in range(100, 300):
         lock_path = f"/tmp/.X{n}-lock"
+        sock_path = f"/tmp/.X11-unix/X{n}"
         if not os.path.exists(lock_path):
             continue
-        try:
-            pid_str = open(lock_path).read().strip()
-            pid = int(pid_str)
-        except Exception:
-            # Unreadable / non-numeric lock file — treat as stale
-            try:
-                os.remove(lock_path)
-                log(f"Removed unreadable Xvfb lock :{n}")
-            except Exception:
-                pass
-            continue
 
-        # Check if the owning process is alive
+        # Read the Xvfb PID from the lock file
         try:
-            os.kill(pid, 0)
-            # Process is alive — leave the lock alone
-        except ProcessLookupError:
-            # PID is dead — lock file is stale
-            try:
-                os.remove(lock_path)
-                log(f"Removed stale Xvfb lock :{n} (dead pid={pid})")
-            except Exception:
-                pass
-            # Also clean up the X11 Unix socket if present
-            for sock in (f"/tmp/.X11-unix/X{n}",):
+            pid = int(open(lock_path).read().strip())
+        except Exception:
+            # Unreadable / non-integer content — definitely stale
+            for _p in (lock_path, sock_path):
                 try:
-                    if os.path.exists(sock):
-                        os.remove(sock)
+                    if os.path.exists(_p) or os.path.islink(_p):
+                        os.remove(_p)
                 except Exception:
                     pass
+            log(f"[cleanup] Removed unreadable Xvfb lock :{n}")
+            continue
+
+        _pid_alive = True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            _pid_alive = False
         except PermissionError:
-            # PID exists but belongs to another user — leave it
-            pass
+            pass  # process alive, different user — treat as live
+
+        if not _pid_alive:
+            # Dead PID — lock file is certainly stale
+            for _p in (lock_path, sock_path):
+                try:
+                    if os.path.exists(_p) or os.path.islink(_p):
+                        os.remove(_p)
+                except Exception:
+                    pass
+            log(f"[cleanup] Removed stale Xvfb lock :{n} (dead pid={pid})")
+
+        elif n not in _in_use_displays:
+            # PID alive but no process has DISPLAY=:{n} — orphaned Xvfb
+            try:
+                os.kill(pid, _signal.SIGTERM)
+                time.sleep(0.1)
+                try:
+                    os.kill(pid, _signal.SIGKILL)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            for _p in (lock_path, sock_path):
+                try:
+                    if os.path.exists(_p) or os.path.islink(_p):
+                        os.remove(_p)
+                except Exception:
+                    pass
+            log(f"[cleanup] Killed orphaned Xvfb :{n} (pid={pid}, no active users)")
+
+    # ── 4: Chrome singleton files in the specific profile_dir ────────────────
+    if profile_dir:
+        for _name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            _p = os.path.join(profile_dir, _name)
+            if os.path.exists(_p) or os.path.islink(_p):
+                try:
+                    os.remove(_p)
+                    log(f"[cleanup] Removed stale {_name} from profile")
+                except Exception:
+                    pass
+
+    # ── 5: Abandoned gmail_checker profile directories ────────────────────────
+    _profiles_root = os.path.join(tempfile.gettempdir(), "gmail_checker_profiles")
+    if not os.path.isdir(_profiles_root):
+        return
+    for _entry in os.listdir(_profiles_root):
+        _pdir = os.path.join(_profiles_root, _entry)
+        if not os.path.isdir(_pdir):
+            continue
+        _singleton = os.path.join(_pdir, "SingletonLock")
+        if not (os.path.exists(_singleton) or os.path.islink(_singleton)):
+            continue
+        # SingletonLock is a symlink: hostname-PID
+        _skip = False
+        try:
+            _target = os.readlink(_singleton)
+            _lock_pid = int(_target.rsplit("-", 1)[-1])
+            try:
+                os.kill(_lock_pid, 0)
+                _skip = True   # PID alive → active Chrome, leave it
+            except ProcessLookupError:
+                pass           # PID dead → clean up
+            except PermissionError:
+                _skip = True   # different user → leave it
+        except Exception:
+            pass               # not a symlink or bad format → clean up
+        if _skip:
+            continue
+        for _name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            _p = os.path.join(_pdir, _name)
+            try:
+                if os.path.exists(_p) or os.path.islink(_p):
+                    os.remove(_p)
+            except Exception:
+                pass
+        log(f"[cleanup] Cleared stale singletons in abandoned profile: {_entry}")
 
 
 def _find_free_display() -> int:
@@ -2496,23 +2583,6 @@ def check_gmail(
 
     os.makedirs(profile_dir, exist_ok=True)
 
-    # ── Clean up Chrome crash/kill lock files from previous sessions ─────────
-    # If Chrome was SIGKILLed or crashed, it leaves SingletonLock / SingletonSocket
-    # behind. These prevent clean startup and can cause abnormal behavior that
-    # Google flags as suspicious (e.g. session-restore prompts, broken cookies).
-    _stale_locks = [
-        os.path.join(profile_dir, "SingletonLock"),
-        os.path.join(profile_dir, "SingletonSocket"),
-        os.path.join(profile_dir, "SingletonCookie"),
-    ]
-    for _lf in _stale_locks:
-        if os.path.exists(_lf) or os.path.islink(_lf):
-            try:
-                os.remove(_lf)
-                log(f"Removed stale Chrome lock: {os.path.basename(_lf)}")
-            except Exception:
-                pass
-
     log(f"Chrome profile: {profile_dir} (fresh={fresh_profile})")
 
     # ── Load or generate unique fingerprint (fresh_profile → always new) ──────
@@ -2611,7 +2681,7 @@ def check_gmail(
     _disp_lock_fd = open(_DISPLAY_ALLOC_LOCK, "w")
     try:
         fcntl.flock(_disp_lock_fd, fcntl.LOCK_EX)
-        _cleanup_stale_xvfb_locks()  # remove dead-PID lock files before picking a display
+        _cleanup_stale_chrome_artifacts(profile_dir)  # kills orphaned Xvfb, removes stale locks/singletons
         _disp_num = _find_free_display()
         try:
             _xvfb_proc = subprocess.Popen(

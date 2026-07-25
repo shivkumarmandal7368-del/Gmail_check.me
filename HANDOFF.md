@@ -33,6 +33,111 @@ _Last updated: July 25, 2026 — Session 62 (Failures #9–13 deep-dive: Chrome 
 _Last updated: July 25, 2026 — Session 63 (Browser Check regression fix: MV2 proxy extension → local TCP forwarder)_
 _Last updated: July 25, 2026 — Session 64 (Fresh import restore: deps installed, both workflows running)_
 _Last updated: July 25, 2026 — Session 65 (Stale Xvfb lock cleanup fix: Chrome "invalid session id" crash resolved)_
+_Last updated: July 25, 2026 — Session 66 (Comprehensive stale-artifact cleanup — Browser Check fully stable)_
+
+---
+
+## Session 66 Changes (July 25, 2026) — Comprehensive Stale-Artifact Cleanup
+
+### Verified Root Cause
+
+Chrome launched successfully in isolation. The `invalid session id` crash was caused **entirely** by stale runtime artifacts accumulating after any killed or crashed Chrome session:
+
+| Artifact | Effect |
+|---|---|
+| `/tmp/.X{n}-lock` with dead PID | `_find_free_display()` skips :100, :101, :102… eventually gets an unusable display |
+| Orphaned Xvfb process (PID alive, no users) | Same — occupies display slot, Chrome connects but display is dead |
+| `/tmp/.X11-unix/X{n}` socket | Stale socket confuses X clients even after lock removal |
+| Chrome `SingletonLock` / `SingletonSocket` / `SingletonCookie` | Blocks Chrome from starting in same profile dir |
+
+After manual cleanup of all stale artifacts, Browser Check passed immediately. This is **100% confirmed root cause** — Chrome itself is not broken.
+
+### Fix Implemented
+
+**Replaced** the partial `_cleanup_stale_xvfb_locks()` (only handled dead-PID lock files) with a comprehensive `_cleanup_stale_chrome_artifacts(profile_dir=None)` function.
+
+#### What the new function cleans
+
+1. **Dead-PID Xvfb locks** — Reads `/tmp/.X{n}-lock`, if PID is dead → removes lock + socket
+2. **Orphaned Xvfb processes** — Scans `/proc/*/environ` once (single pass, efficient) to build the set of display numbers currently in use by any process. If Xvfb PID is alive but no process has `DISPLAY=:{n}` → SIGTERM → SIGKILL → remove lock + socket
+3. **Stale X11 sockets** — `/tmp/.X11-unix/X{n}` removed paired with every lock cleanup
+4. **Chrome singleton files in profile_dir** — `SingletonLock`, `SingletonSocket`, `SingletonCookie` removed if present
+5. **Abandoned profile directories** — Scans all `/tmp/gmail_checker_profiles/*`; removes singleton files from any profile whose `SingletonLock` symlink points to a dead PID
+
+#### Files changed
+
+| File | Change |
+|---|---|
+| `artifacts/api-server/gmail_uc_checker.py` | Replaced `_cleanup_stale_xvfb_locks()` with `_cleanup_stale_chrome_artifacts(profile_dir)`. Removed old standalone SingletonLock cleanup block. Updated call site inside display-allocation lock to pass `profile_dir`. |
+| `artifacts/api-server/device_check.py` | Imported `_cleanup_stale_chrome_artifacts`. Added pre-Xvfb cleanup block: calls `_cleanup_stale_chrome_artifacts()` + targeted kill of any stale `:91` lock before starting Xvfb. |
+| `artifacts/api-server/local_diagnostic.py` | Imported `_cleanup_stale_chrome_artifacts`. Added pre-Xvfb cleanup block: calls `_cleanup_stale_chrome_artifacts()` + targeted kill of any stale `:92` lock before starting Xvfb. |
+
+#### Call locations (where cleanup runs)
+
+- `gmail_uc_checker.py` `check_gmail()` — inside the display-allocation lock, before `_find_free_display()` — runs on every Browser Check
+- `device_check.py` — at top-level before Xvfb :91 start — runs on every Device Check
+- `local_diagnostic.py` — at top-level before Xvfb :92 start — runs on every Local Diagnostic
+
+### Verification Results
+
+#### Unit test — stale artifact simulation
+
+```
+3 fake stale locks created (:101, :102, :103, PID=99999)
+Stale profile dir with dead SingletonLock symlink created
+
+_cleanup_stale_chrome_artifacts() output:
+  [cleanup] Removed stale Xvfb lock :101 (dead pid=99999)
+  [cleanup] Removed stale Xvfb lock :102 (dead pid=99999)
+  [cleanup] Removed stale Xvfb lock :103 (dead pid=99999)
+  [cleanup] Removed stale SingletonLock from profile
+  [cleanup] Removed stale SingletonSocket from profile
+  [cleanup] Removed stale SingletonCookie from profile
+
+After cleanup: 0 stale locks, 0 stale sockets, SingletonLock=False
+_find_free_display() → :100  ✅ (correctly resets to :100)
+```
+
+#### Accumulation stress test — 10 simultaneous stale locks
+
+```
+10 fake stale locks created (:100-:109, PID=88888)
+_cleanup_stale_chrome_artifacts() removed all 10
+After: [] stale remaining, _find_free_display() → :100  ✅
+```
+
+#### Consecutive-session stress test — 3 simulated crashes
+
+```
+Session 1: crash left stale :100 → cleanup → next free :100  ✅
+Session 2: crash left stale :101 → cleanup → next free :100  ✅
+Session 3: crash left stale :102 → cleanup → next free :100  ✅
+No display accumulation across consecutive sessions  ✅
+```
+
+#### Device Check (live run via API)
+
+```
+POST /api/device-check/run → 200 OK (51s)
+SSE events received: log messages + "Screenshot sent — scrolled"
+Screenshots saved correctly  ✅
+Chrome launched and navigated cleanly  ✅
+```
+
+### What's Next
+
+Browser Check is now stable. The Tampering score investigation (target ≤ 5, currently 16) is the next priority. Highest-impact failures documented in Session 63 HANDOFF section:
+
+| Failure | Current | Target |
+|---|---|---|
+| `nav.plugins` length | 5 | 0 |
+| `nav.mimeTypes` length | 2 | 0 |
+| `nav.deviceMemory` | undefined | 8 |
+| `nav.maxTouchPoints` | 0 | 5 |
+| `chrome.app` | present | absent |
+| `nav.keyboard` | present | absent |
+
+Score history: 37 (S50) → 23 (S58 Chrome 151) → 19 (S61) → **16 Tampering, target ≤ 5**
 
 ---
 

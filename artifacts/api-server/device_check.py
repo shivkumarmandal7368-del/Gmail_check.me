@@ -45,6 +45,7 @@ try:
         make_plugins_override_js,
         parse_proxy,
         DEVICE_FINGERPRINT_SNAPSHOT_PATH,
+        _cleanup_stale_chrome_artifacts,
     )
 except Exception as e:
     print(f"ERROR:Cannot import PHONE_PROFILES: {e}", flush=True)
@@ -70,6 +71,26 @@ UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     f"Chrome/{chrome} Mobile Safari/537.36"
 )
+
+# ── Pre-launch: clean stale Xvfb / Chrome artifacts ──────────────────────────
+# Removes dead-PID lock files, orphaned Xvfb processes, and Chrome singleton
+# files left by crashed prior sessions.  Must run before Xvfb starts so a
+# stale :91 lock can't block the fresh launch.
+_cleanup_stale_chrome_artifacts()
+# Also kill any stale Xvfb specifically on :91 (fixed display used here)
+for _p in ("/tmp/.X91-lock", "/tmp/.X11-unix/X91"):
+    if os.path.exists(_p) or os.path.islink(_p):
+        try:
+            if _p.endswith("-lock"):
+                _stale_pid = int(open(_p).read().strip())
+                try:
+                    os.kill(_stale_pid, 9)  # SIGKILL
+                except Exception:
+                    pass
+            os.remove(_p)
+            log(f"Removed stale artifact: {_p}")
+        except Exception:
+            pass
 
 # ── Start Xvfb on :91 ─────────────────────────────────────────────────────────
 DISPLAY_NUM = ":91"
