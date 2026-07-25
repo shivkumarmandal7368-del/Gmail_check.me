@@ -81,7 +81,7 @@ The 3rd field is the base32 TOTP secret (from Google Authenticator app setup), N
 
 ## Known Issues
 
-- **Concurrent Chrome crash (UNRESOLVED):** When 2+ accounts check simultaneously, one may fail with `Connection refused` due to OOM. Fix documented in `HANDOFF.md` Session 17. Workaround: use concurrency=1.
+- **Concurrent Chrome port conflict (RESOLVED):** `_find_free_port()` + `port=_cd_port` in `uc.Chrome()` call ensures each concurrent ChromeDriver gets its own port. Fix is live in `gmail_uc_checker.py`.
 - Browser Check requires a **residential proxy** — Replit's datacenter IP is blocked by Google.
 - Each check takes 35–120 seconds per account (intentional human-like delays).
 

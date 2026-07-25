@@ -31,6 +31,27 @@ _Last updated: July 25, 2026 — Session 60 (Tampering fix: UA-CH brands version
 _Last updated: July 25, 2026 — Session 61 (Tampering investigation: userAgentData prototype fix — no score change)_
 _Last updated: July 25, 2026 — Session 62 (Failures #9–13 deep-dive: Chrome 151 native own-property behavior confirmed)_
 _Last updated: July 25, 2026 — Session 63 (Browser Check regression fix: MV2 proxy extension → local TCP forwarder)_
+_Last updated: July 25, 2026 — Session 64 (Fresh import restore: deps installed, both workflows running)_
+
+---
+
+## Session 64 Changes (July 25, 2026) — Fresh Import Restore
+
+### What Was Done
+
+Project was imported fresh from GitHub. `node_modules` were missing — ran `pnpm install` to restore all JS dependencies. Both workflows restarted and confirmed running:
+
+| Workflow | Status |
+|---|---|
+| `artifacts/api-server: API Server` | ✅ RUNNING on port 8080 |
+| `artifacts/gmail-checker: web` | ✅ RUNNING on port 5173 |
+
+Chrome for Testing 151 cached and verified by `setup-chrome-for-testing.sh` on boot.
+
+The concurrent port-conflict fix (`_find_free_port()` + `port=_cd_port` in `uc.Chrome()`) was already present in `gmail_uc_checker.py` from a prior session — no changes needed.
+
+### Files Changed
+- None (deps reinstalled, no code changes)
 
 ---
 
