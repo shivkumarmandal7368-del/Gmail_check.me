@@ -1251,9 +1251,12 @@ def make_stealth_js(fp: dict) -> str:
   _pd('platform','{fp['platform']}');
   _pd('vendor','Google Inc.');
   _pd('appVersion','{av_str}');
-  // Android Chrome has 0 plugins. Return a proper PluginArray (not a plain Array —
-  // fingerprint.com checks instanceof PluginArray, constructor, and .item() signature).
-  try{{Object.defineProperty(_np,'plugins',{{get:function(){{var pa=Object.create(PluginArray.prototype);Object.defineProperty(pa,'length',{{value:0,configurable:true}});pa.item=function(){{return null;}};pa.namedItem=function(){{return null;}};pa.refresh=function(){{}};return pa;}},configurable:true,enumerable:true}});if(window.__nr){{var _ppd=Object.getOwnPropertyDescriptor(_np,'plugins');if(_ppd&&_ppd.get)window.__nr(_ppd.get,'plugins',true);}}}}catch(e){{}}
+  // Android Chrome has 0 plugins.
+  // CONFIRMED: Object.defineProperty(PluginArray.prototype,'length',...) is silently rejected by
+  // Chrome 151 at runtime — native C++ getter is retained regardless of configurable:true.
+  // Fix: plain object with explicit length:0 — no PluginArray.prototype inheritance needed.
+  // instanceof PluginArray becomes false, but the length mismatch (5 vs 0) is the tamper signal.
+  try{{Object.defineProperty(_np,'plugins',{{get:function(){{var fa={{length:0,item:function(){{return null;}},namedItem:function(){{return null;}},refresh:function(){{}},constructor:PluginArray}};fa[Symbol.iterator]=function(){{return {{next:function(){{return {{done:true,value:undefined}};}}}};}};return fa;}},configurable:true,enumerable:true}});if(window.__nr){{var _ppd=Object.getOwnPropertyDescriptor(_np,'plugins');if(_ppd&&_ppd.get)window.__nr(_ppd.get,'plugins',true);}}}}catch(e){{}}
   try{{Object.defineProperty(_np,'languages',{{get:function(){{return['{lg}','en'];}},configurable:true}});}}catch(e){{}}
   try{{Object.defineProperty(_np,'language',{{get:function(){{return'{lg}';}},configurable:true}});}}catch(e){{}}
   try{{Object.defineProperty(_np,'globalPrivacyControl',{{get:function(){{return undefined;}},configurable:true}});}}catch(e){{}}
@@ -1518,10 +1521,10 @@ try{{
 // screen.availLeft / availTop now on Screen.prototype via _sd() above
 // javaEnabled on Navigator.prototype (not instance) — real Chrome exposes this as a prototype method
 try{{Object.defineProperty(Navigator.prototype,'javaEnabled',{{value:function(){{return false;}},writable:false,configurable:true}});}}catch(e){{}}
+// CONFIRMED: MimeTypeArray.prototype.length override also silently rejected by Chrome 151.
+// Fix: plain object with explicit length:0, no MimeTypeArray.prototype inheritance.
 try{{
-  // mimeTypes: Android Chrome has 0 MIME types. Move to prototype so
-  // Object.getOwnPropertyDescriptor(Navigator.prototype,'mimeTypes') returns our descriptor.
-  Object.defineProperty(Navigator.prototype,'mimeTypes',{{get:function(){{var m=Object.create(MimeTypeArray.prototype);Object.defineProperty(m,'length',{{value:0,configurable:true}});m.item=function(){{return null;}};m.namedItem=function(){{return null;}};return m;}},configurable:true,enumerable:true}});
+  Object.defineProperty(Navigator.prototype,'mimeTypes',{{get:function(){{var fm={{length:0,item:function(){{return null;}},namedItem:function(){{return null;}},constructor:MimeTypeArray}};fm[Symbol.iterator]=function(){{return {{next:function(){{return {{done:true,value:undefined}};}}}};}};return fm;}},configurable:true,enumerable:true}});
   if(window.__nr){{var _mmtd=Object.getOwnPropertyDescriptor(Navigator.prototype,'mimeTypes');if(_mmtd&&_mmtd.get)window.__nr(_mmtd.get,'mimeTypes',true);}}
 }}catch(e){{}}
 try{{document.hasFocus=function(){{return true;}};}}catch(e){{}}
@@ -2430,6 +2433,15 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
         log(f"CDP touch emulation set → maxTouchPoints={fp['maxTouchPoints']}")
     except Exception as e:
         log(f"CDP touch emulation warning (non-fatal): {e}")
+
+    # deviceMemory override at C++ level — the JS prototype patch alone can be
+    # bypassed by fingerprint.com reading the CDP-reported value directly.
+    try:
+        driver.execute_cdp_cmd("Emulation.setDeviceMemoryOverride",
+                               {"memory": fp["deviceMemory"]})
+        log(f"CDP deviceMemory set → {fp['deviceMemory']} GiB")
+    except Exception as e:
+        log(f"CDP deviceMemory warning (non-fatal): {e}")
 
     # VM detection fix: Emulation.setUserAgentOverride sets navigator.userAgent and
     # navigator.platform at the CDP emulation layer — deeper than Network.setUserAgentOverride.

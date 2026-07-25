@@ -480,6 +480,62 @@ try:
 except Exception as e:
     log(f"Mouse simulation skipped (non-fatal): {e}")
 
+# ── Diagnostic: navigate to about:blank (triggers stealth JS), read runtime values ──
+log("Running stealth JS diagnostic...")
+try:
+    driver.get("about:blank")
+    import time as _t; _t.sleep(0.5)
+    import json as _json
+    diag = driver.execute_script("""
+        var pa_desc = Object.getOwnPropertyDescriptor(PluginArray.prototype, 'length');
+        var ma_desc = Object.getOwnPropertyDescriptor(MimeTypeArray.prototype, 'length');
+        var np_own  = Object.getOwnPropertyDescriptor(navigator, 'plugins');
+        var np_prot = Object.getOwnPropertyDescriptor(Navigator.prototype, 'plugins');
+        return {
+            plugins_length:       navigator.plugins.length,
+            mimeTypes_length:     navigator.mimeTypes.length,
+            maxTouchPoints:       navigator.maxTouchPoints,
+            deviceMemory:         navigator.deviceMemory,
+            platform:             navigator.platform,
+            hardwareConcurrency:  navigator.hardwareConcurrency,
+            webdriver:            navigator.webdriver,
+            plugins_instanceof:   (navigator.plugins instanceof PluginArray),
+            mimeTypes_instanceof: (navigator.mimeTypes instanceof MimeTypeArray),
+            PluginArray_proto_length: pa_desc ? {
+                configurable: pa_desc.configurable,
+                is_js_fn:     typeof pa_desc.get === 'function',
+                toString:     pa_desc.get ? pa_desc.get.toString().substring(0,120) : null
+            } : 'no own desc',
+            MimeTypeArray_proto_length: ma_desc ? {
+                configurable: ma_desc.configurable,
+                is_js_fn:     typeof ma_desc.get === 'function',
+                toString:     ma_desc.get ? ma_desc.get.toString().substring(0,120) : null
+            } : 'no own desc',
+            nav_plugins_own:  np_own  ? 'HAS OWN PROP' : 'no own',
+            nav_plugins_proto: np_prot ? (typeof np_prot.get === 'function' ? 'js-getter' : 'non-getter') : 'not found',
+            userAgentData: navigator.userAgentData ? JSON.stringify({
+                mobile:   navigator.userAgentData.mobile,
+                platform: navigator.userAgentData.platform,
+                brands:   navigator.userAgentData.brands
+            }) : 'null/undefined',
+            deviceMemory_nav_own: (function(){
+                var d=Object.getOwnPropertyDescriptor(navigator,'deviceMemory');
+                return d ? JSON.stringify({configurable:d.configurable,value:d.value,hasGetter:typeof d.get==='function'}) : 'no own desc';
+            })(),
+            deviceMemory_proto: (function(){
+                var d=Object.getOwnPropertyDescriptor(Navigator.prototype,'deviceMemory');
+                return d ? JSON.stringify({configurable:d.configurable,hasGetter:typeof d.get==='function',str:d.get?d.get.toString().substring(0,80):null}) : 'no proto desc';
+            })(),
+            userAgentData_proto: (function(){
+                var d=Object.getOwnPropertyDescriptor(Navigator.prototype,'userAgentData');
+                return d ? JSON.stringify({configurable:d.configurable,hasGetter:typeof d.get==='function',str:d.get?d.get.toString().substring(0,80):null}) : 'no proto desc';
+            })()
+        };
+    """)
+    log(f"[DIAG] {_json.dumps(diag)}")
+except Exception as e:
+    log(f"Diagnostic skipped (non-fatal): {e}")
+
 # ── Navigate to fingerprint.com ────────────────────────────────────────────────
 log("Navigating to fingerprint.com...")
 try:
