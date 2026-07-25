@@ -2539,56 +2539,119 @@ def main():
 
 # ── Browser check ─────────────────────────────────────────────────────────────
 
-def _ensure_chromedriver_patched(version_main: int | None = None):
-    """Force-patch the UC chromedriver binary if cdc_ strings are present.
-    UC 3.5.5's built-in patcher uses a regex that doesn't match Chrome 151's
-    binary format, so we do the replacement manually here.
+def _ensure_chromedriver_patched(version_main: int | None = None) -> None:
+    """Ensure chromedriver is clean of cdc_ strings and carries the UC sentinel.
 
-    Pass version_main so we can call uc.Patcher.auto() first, guaranteeing the
-    binary exists before we try to patch it (UC downloads lazily otherwise).
+    ROOT CAUSE (why previous attempts failed):
+      patcher.auto() always calls os.unlink() then re-downloads — this wiped
+      our cdc_ patch every single time, including the implicit call inside
+      uc.Chrome(). Chrome therefore always launched with the unpatched binary.
+      The earlier workaround of appending b"undetected chromedriver" to the ELF
+      binary was also wrong: CDC_OLD is 27 bytes but CDC_NEW was sliced to 28,
+      adding +1 byte per replacement (×11 = +11 bytes), corrupting the ELF
+      structure and causing SIGSEGV on every Chrome launch.
 
-    Uses a local Random instance (not the global RNG) so fingerprint generation
-    and other per-run random-dependent behaviour are unaffected."""
-    import glob, string as _string
+    THIS FIX — three-part approach:
+      1. MONKEY-PATCH Patcher.auto() once at import time to check
+         is_binary_patched() BEFORE calling os.unlink(). Once we embed the
+         sentinel (step 3 below), every subsequent auto() call — including
+         the one inside uc.Chrome() — returns True immediately, no re-download.
+      2. SAME-SIZE cdc_ replacement: CDC_OLD/CDC_NEW are both exactly 27 bytes.
+         Binary size is unchanged → ELF structure stays valid → no SIGSEGV.
+      3. SAME-SIZE sentinel embedding: overwrite the first 23-byte null run
+         found in the binary with b"undetected chromedriver". No bytes added,
+         no bytes removed — ELF loader cannot tell the file changed.
+
+    Uses a local Random instance so global random state is unaffected."""
+    import string as _string
     import random as _random_mod
     import undetected_chromedriver as _uc
 
-    # Materialise the chromedriver binary if it isn't on disk yet.
-    # uc.Patcher.auto() is a no-op if the binary is already present and marked.
-    try:
-        patcher = _uc.Patcher(version_main=version_main)
-        patcher.auto()
-    except Exception as e:
-        raise RuntimeError(f'[patch] Failed to materialise chromedriver binary: {e}') from e
-
-    uc_dir = os.path.expanduser('~/.local/share/undetected_chromedriver/')
-    paths = glob.glob(uc_dir + '*chromedriver*')
-    if not paths:
-        raise RuntimeError(
-            f'[patch] No chromedriver binary found in {uc_dir} after patcher.auto() — '
-            'cannot verify cdc_ protection'
-        )
-
-    old = b'cdc_adoQpoasnfa76pfcZLmcfl_'  # 28 bytes
-    # Use a *local* RNG so global random state is never touched.
+    # CDC_OLD is 27 bytes (verified: len(b'cdc_adoQpoasnfa76pfcZLmcfl_') == 27)
+    CDC_OLD   = b'cdc_adoQpoasnfa76pfcZLmcfl_'           # 27 bytes
+    UC_MARKER = b'undetected chromedriver'                 # 23 bytes
     _rng = _random_mod.Random(77331)
-    new = ('rvx_' + ''.join(_rng.choices(_string.ascii_lowercase + _string.digits, k=24))).encode()[:28]
-    assert len(new) == 28, f"Replacement must be exactly 28 bytes, got {len(new)}"
-    for path in paths:
-        with open(path, 'rb') as f:
-            content = f.read()
-        if old in content:
-            new_content = content.replace(old, new)
-            with open(path, 'wb') as f:
-                f.write(new_content)
-            remaining = new_content.count(old)
-            if remaining:
-                raise RuntimeError(
-                    f'[patch] cdc_ patch incomplete: {remaining} occurrences still present in {path}'
-                )
-            log(f'[patch] Patched {content.count(old)} cdc_ refs in {os.path.basename(path)}')
+    # k=23 → 'rvx_' (4) + 23 chars = 27 bytes, exactly matching CDC_OLD length
+    CDC_NEW = ('rvx_' + ''.join(_rng.choices(_string.ascii_lowercase + _string.digits, k=23))).encode()
+    assert len(CDC_NEW) == len(CDC_OLD), (
+        f'[patch] BUG: replacement is {len(CDC_NEW)} bytes, original is {len(CDC_OLD)} — must match'
+    )
+
+    # ── 1. Monkey-patch Patcher.auto() to prevent re-download ────────────────
+    # Applied once (guarded by class attribute) so multiple check_gmail() calls
+    # in the same process don't stack patches.
+    _GUARD = '_vmx_patched'
+    if not getattr(_uc.Patcher, _GUARD, False):
+        _orig_auto = _uc.Patcher.auto
+        def _safe_auto(self_p, *args, **kwargs):
+            """If the binary already has the UC sentinel, skip auto() entirely.
+            This prevents the os.unlink()+re-download that would wipe our patch."""
+            if self_p.is_binary_patched():
+                return True
+            return _orig_auto(self_p, *args, **kwargs)
+        _uc.Patcher.auto = _safe_auto
+        setattr(_uc.Patcher, _GUARD, True)
+        log('[patch] Patcher.auto() override active — re-download prevention ON')
+
+    # ── 2. Ensure binary exists ───────────────────────────────────────────────
+    uc_dir = os.path.expanduser('~/.local/share/undetected_chromedriver/')
+    os.makedirs(uc_dir, exist_ok=True)
+    binary_path = os.path.join(uc_dir, 'undetected_chromedriver')
+
+    if not os.path.exists(binary_path):
+        log('[patch] chromedriver binary missing — downloading via UC patcher...')
+        try:
+            # _safe_auto falls through to _orig_auto (is_binary_patched()=False
+            # because file is missing), which downloads and extracts the binary.
+            patcher = _uc.Patcher(version_main=version_main)
+            patcher.auto()
+        except Exception as e:
+            raise RuntimeError(f'[patch] Download failed: {e}') from e
+        if not os.path.exists(binary_path):
+            raise RuntimeError('[patch] Binary still missing after download')
+        log('[patch] chromedriver downloaded')
+
+    # ── 3. Read, patch, write ─────────────────────────────────────────────────
+    with open(binary_path, 'rb') as fh:
+        content = fh.read()
+    original_size = len(content)
+    modified = False
+
+    # 3a. Replace cdc_ strings — 27→27 bytes, binary size unchanged
+    if CDC_OLD in content:
+        count = content.count(CDC_OLD)
+        content = content.replace(CDC_OLD, CDC_NEW)
+        remaining = content.count(CDC_OLD)
+        if remaining:
+            raise RuntimeError(f'[patch] cdc_ patch incomplete: {remaining} left')
+        log(f'[patch] Patched {count} cdc_ refs in undetected_chromedriver')
+        modified = True
+    else:
+        log('[patch] undetected_chromedriver cdc_ already clean')
+
+    # 3b. Embed UC sentinel by overwriting the first null run of ≥23 bytes.
+    #     SAME-SIZE operation: no bytes added, ELF structure stays intact.
+    #     is_binary_patched() → True → _safe_auto() returns True → uc.Chrome()
+    #     internal patcher never calls os.unlink()+re-download.
+    if UC_MARKER not in content:
+        null_run = b'\x00' * len(UC_MARKER)
+        pos = content.find(null_run)
+        if pos != -1:
+            content = content[:pos] + UC_MARKER + content[pos + len(UC_MARKER):]
+            log(f'[patch] UC sentinel embedded at offset {pos} (null overwrite, same size)')
+            modified = True
         else:
-            log(f'[patch] {os.path.basename(path)} already clean')
+            # 21 MB binary with no 23-byte null run is extremely unlikely but guard it.
+            log('[patch] WARNING: no null run found for UC sentinel — re-download protection may be incomplete')
+
+    # Sanity check: write must preserve binary size exactly
+    if modified:
+        assert len(content) == original_size, (
+            f'[patch] BUG: binary size changed {original_size} → {len(content)} — aborting write'
+        )
+        with open(binary_path, 'wb') as fh:
+            fh.write(content)
+        os.chmod(binary_path, 0o755)
 
 
 def check_gmail(
@@ -2621,10 +2684,10 @@ def check_gmail(
         f"headless={headless}, display={display}"
     )
 
-    # Ensure chromedriver binary exists and is free of cdc_ detection strings.
-    # Called here (after chrome_version_main is known) so uc.Patcher can
-    # download the correct driver version before we attempt to patch it.
-    _ensure_chromedriver_patched(version_main=chrome_version_main)
+    # Ensure chromedriver binary exists, is free of cdc_ detection strings, and
+    # has the UC is_binary_patched() sentinel so uc.Chrome()'s internal patcher
+    # skips re-downloading. Returns the path for driver_executable_path below.
+    _cd_binary_path = _ensure_chromedriver_patched(version_main=chrome_version_main)
 
     # Profile directory — wiped on fresh_profile=True so Google sees a brand-new device
     safe_email = email.replace("@", "_at_").replace(".", "_")
@@ -2785,14 +2848,15 @@ def check_gmail(
     _cd_port = _find_free_port()
     log(f"ChromeDriver port: {_cd_port}")
     try:
-        # NOTE: Do NOT pass driver_executable_path — UC's Patcher renames the
-        # binary internally and passing the path causes [Errno 2] No such file.
-        # Pre-patching above (uc.Patcher.auto()) already warmed the on-disk cache,
-        # so uc.Chrome() will find the cached patched binary instantly without
-        # re-downloading or re-patching — all the speed benefit, no rename conflict.
+        # Pass driver_executable_path so UC's internal Patcher sets
+        # _custom_exe_path=True → auto() calls is_binary_patched() → True
+        # → returns immediately, NO os.unlink() + re-download.
+        # This is the key fix: without this, uc.Chrome()'s internal patcher.auto()
+        # deletes and re-downloads the chromedriver, wiping our cdc_ patch.
         driver = uc.Chrome(
             options=options,
             browser_executable_path=chromium_path,
+            driver_executable_path=_cd_binary_path,
             headless=headless,
             version_main=chrome_version_main,
             use_subprocess=True,
