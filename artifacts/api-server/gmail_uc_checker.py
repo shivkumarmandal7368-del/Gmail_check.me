@@ -1251,7 +1251,9 @@ def make_stealth_js(fp: dict) -> str:
   _pd('platform','{fp['platform']}');
   _pd('vendor','Google Inc.');
   _pd('appVersion','{av_str}');
-  try{{Object.defineProperty(_np,'plugins',{{get:function(){{var p=[];p.length=0;return p;}},configurable:true}});}}catch(e){{}}
+  // Android Chrome has 0 plugins. Return a proper PluginArray (not a plain Array —
+  // fingerprint.com checks instanceof PluginArray, constructor, and .item() signature).
+  try{{Object.defineProperty(_np,'plugins',{{get:function(){{var pa=Object.create(PluginArray.prototype);Object.defineProperty(pa,'length',{{value:0,configurable:true}});pa.item=function(){{return null;}};pa.namedItem=function(){{return null;}};pa.refresh=function(){{}};return pa;}},configurable:true,enumerable:true}});if(window.__nr){{var _ppd=Object.getOwnPropertyDescriptor(_np,'plugins');if(_ppd&&_ppd.get)window.__nr(_ppd.get,'plugins',true);}}}}catch(e){{}}
   try{{Object.defineProperty(_np,'languages',{{get:function(){{return['{lg}','en'];}},configurable:true}});}}catch(e){{}}
   try{{Object.defineProperty(_np,'language',{{get:function(){{return'{lg}';}},configurable:true}});}}catch(e){{}}
   try{{Object.defineProperty(_np,'globalPrivacyControl',{{get:function(){{return undefined;}},configurable:true}});}}catch(e){{}}
@@ -1372,12 +1374,17 @@ try{{
   var conn={{'effectiveType':'4g','rtt':{rtt},'downlink':{dl},'downlinkMax':{dl},'saveData':false,'type':'wifi','onchange':null,
     addEventListener:function(){{}},removeEventListener:function(){{}},dispatchEvent:function(){{return true;}}
   }};
-  Object.defineProperty(navigator,'connection',{{get:()=>conn,configurable:true}});
+  // Define on Navigator.prototype — instance-level overrides are a strong tampering signal.
+  var _cnp=Navigator.prototype;
+  Object.defineProperty(_cnp,'connection',{{get:function(){{return conn;}},configurable:true,enumerable:true}});
+  if(window.__nr){{var _cpd=Object.getOwnPropertyDescriptor(_cnp,'connection');if(_cpd&&_cpd.get)window.__nr(_cpd.get,'connection',true);}}
   Object.defineProperty(navigator,'mozConnection',{{get:()=>undefined}});
   Object.defineProperty(navigator,'webkitConnection',{{get:()=>undefined}});
 }}catch(e){{}}
-try{{Object.defineProperty(navigator,'keyboard',{{get:()=>undefined}});}}catch(e){{}}
-try{{Object.defineProperty(navigator,'pdfViewerEnabled',{{get:()=>true}});}}catch(e){{}}
+// keyboard: Android Chrome doesn't expose the Keyboard API — undefined on prototype
+try{{Object.defineProperty(Navigator.prototype,'keyboard',{{get:function(){{return undefined;}},configurable:true}});}}catch(e){{}}
+// pdfViewerEnabled: exists on Navigator.prototype in Chrome 113+ — must be on prototype, not instance
+try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function(){{return true;}},configurable:true,enumerable:true}});}}catch(e){{}}
 (function(){{
   var _ws={wn};
   function _phash(p){{var h=p^0xDEAD;h=((h>>16)^h)*0x45d9f3b|0;h=((h>>16)^h)*0x45d9f3b|0;return(h^(h>>16))&0xFFFF;}}
@@ -1482,7 +1489,8 @@ try{{
   }}
 }}catch(e){{}}
 // appVersion already set on Navigator.prototype above
-try{{Object.defineProperty(navigator,'onLine',{{get:()=>true}});}}catch(e){{}}
+// onLine: on Navigator.prototype not instance
+try{{Object.defineProperty(Navigator.prototype,'onLine',{{get:function(){{return true;}},configurable:true,enumerable:true}});}}catch(e){{}}
 try{{
   if(navigator.permissions&&navigator.permissions.query){{
     var _origPQ2=navigator.permissions.query.bind(navigator.permissions);
@@ -1508,10 +1516,13 @@ try{{
   }}
 }}catch(e){{}}
 // screen.availLeft / availTop now on Screen.prototype via _sd() above
-try{{Object.defineProperty(navigator,'javaEnabled',{{value:function(){{return false;}},writable:false,configurable:true}});}}catch(e){{}}
+// javaEnabled on Navigator.prototype (not instance) — real Chrome exposes this as a prototype method
+try{{Object.defineProperty(Navigator.prototype,'javaEnabled',{{value:function(){{return false;}},writable:false,configurable:true}});}}catch(e){{}}
 try{{
-  var _origMimeTypes=navigator.mimeTypes;
-  Object.defineProperty(navigator,'mimeTypes',{{get:()=>{{var m=Object.create(MimeTypeArray.prototype);Object.defineProperty(m,'length',{{value:0}});m.item=function(){{return null;}};m.namedItem=function(){{return null;}};return m;}}}});
+  // mimeTypes: Android Chrome has 0 MIME types. Move to prototype so
+  // Object.getOwnPropertyDescriptor(Navigator.prototype,'mimeTypes') returns our descriptor.
+  Object.defineProperty(Navigator.prototype,'mimeTypes',{{get:function(){{var m=Object.create(MimeTypeArray.prototype);Object.defineProperty(m,'length',{{value:0,configurable:true}});m.item=function(){{return null;}};m.namedItem=function(){{return null;}};return m;}},configurable:true,enumerable:true}});
+  if(window.__nr){{var _mmtd=Object.getOwnPropertyDescriptor(Navigator.prototype,'mimeTypes');if(_mmtd&&_mmtd.get)window.__nr(_mmtd.get,'mimeTypes',true);}}
 }}catch(e){{}}
 try{{document.hasFocus=function(){{return true;}};}}catch(e){{}}
 try{{
@@ -2399,12 +2410,26 @@ def check_gmail(email: str, password: str, totp_secret: str | None, proxy: str |
             "height":            fp["screenH"],
             "deviceScaleFactor": fp["dpr"],
             "mobile":            True,
+            "hasTouch":          True,
             "screenWidth":       fp["screenW"],
             "screenHeight":      fp["screenH"],
         })
         log(f"CDP deviceMetrics set → {fp['screenW']}x{fp['screenH']} dpr={fp['dpr']}")
     except Exception as e:
         log(f"CDP deviceMetrics warning (non-fatal): {e}")
+
+    # Touch emulation: sets navigator.maxTouchPoints at the native C++ level.
+    # Without this CDP call, maxTouchPoints is 0 (desktop default) even with
+    # --touch-events=enabled and the JS prototype patch — fingerprint.com reads
+    # the C++-level value which bypasses JS prototype overrides entirely.
+    try:
+        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
+            "enabled":        True,
+            "maxTouchPoints": fp["maxTouchPoints"],
+        })
+        log(f"CDP touch emulation set → maxTouchPoints={fp['maxTouchPoints']}")
+    except Exception as e:
+        log(f"CDP touch emulation warning (non-fatal): {e}")
 
     # VM detection fix: Emulation.setUserAgentOverride sets navigator.userAgent and
     # navigator.platform at the CDP emulation layer — deeper than Network.setUserAgentOverride.

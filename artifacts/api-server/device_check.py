@@ -434,8 +434,19 @@ try:
             "height":            profile["screenH"],
             "deviceScaleFactor": profile["dpr"],
             "mobile":            True,
+            "hasTouch":          True,
             "screenWidth":       profile["screenW"],
             "screenHeight":      profile["screenH"],
+        })
+    except Exception:
+        pass
+    # Touch emulation: sets navigator.maxTouchPoints at the native C++ level.
+    # Without this, maxTouchPoints stays 0 even with --touch-events=enabled and
+    # the JS prototype patch — fingerprint.com reads the C++-level value.
+    try:
+        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
+            "enabled":        True,
+            "maxTouchPoints": profile["maxTouchPoints"],
         })
     except Exception:
         pass
