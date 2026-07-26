@@ -4947,6 +4947,89 @@ Selenium + undetected-chromedriver; Puppeteer and Playwright were not adopted.
 | Gmail Checker workflow | RUNNING on port 5173 |
 | TypeScript/Python syntax checks | Passed |
 
+## Session 58 Changes (July 26, 2026) — Fix Verification + Root Cause Investigation
+
+### Context
+
+Previous agent (Session 57 end / Session 58 start) applied three stealth fixes and quota expired immediately after injecting them, before any verification ran. This session resumed from that exact checkpoint.
+
+### Step 1 — Environment restored
+
+| Task | Result |
+|------|--------|
+| `pnpm install --frozen-lockfile` | ✅ 526 packages installed |
+| `artifacts/api-server: API Server` | ✅ RUNNING port 8080 (Chrome for Testing 149.0.7827.155) |
+| `artifacts/gmail-checker: web` | ✅ RUNNING port 5173 |
+
+### Step 2 — Code review: three fixes confirmed present
+
+| Fix | Location | In code? |
+|-----|----------|----------|
+| Fix 1: Independent WeakMap chain for plugins/mimeTypes | `make_plugins_override_js()` lines 2187–2244 | ✅ |
+| Fix 2: Unconditional chrome.app defineProperty | `make_stealth_js()` line 1577–1578, `make_plugins_override_js()` line 2108–2109 | ✅ (code present, but ineffective — see below) |
+| Fix 3: Instance-level `navigator.keyboard` delete | `make_stealth_js()` lines 1623–1625 | ✅ (code present, but ineffective — see below) |
+
+### Step 3 — Local Diagnostic (`local_diagnostic.py`)
+
+**Results: 12 unique failures across about:blank + google.com**
+
+| Signal | about:blank | google.com | Notes |
+|--------|------------|-----------|-------|
+| `1.nav.deviceMemory` | ❌ FAIL | ✅ PASS | about:blank: CDP deviceMemory override not applied (secure context issue) |
+| `1.nav.maxTouchPoints` | ❌ FAIL | ✅ PASS | Same — secure context |
+| `1.nav.userAgentData` | ❌ FAIL | ✅ PASS | Same |
+| `3.desc.instance:window.devicePixelRatio/innerWidth/innerHeight/outerWidth/outerHeight` | ❌ FAIL both | ❌ FAIL both | OWN property on window instance — long-standing issue |
+| **`4.chrome.app`** | ❌ FAIL | ❌ FAIL | **Fix 2 did NOT work — see root cause below** |
+| `5.webgl.context` | ❌ FAIL | ❌ FAIL | SwiftShader WebGL context unavailable in diagnostic (not in real check_gmail) |
+| `6.window.innerWidth` | ❌ FAIL | ✅ PASS | about:blank viewport mismatch |
+| **`9.nav.keyboard`** | ✅ PASS | ❌ FAIL | **Fix 3 did NOT work on HTTPS — see root cause below** |
+
+**Fix 1 (WeakMap / plugins / mimeTypes): ✅ Working** — no plugin or mimeType failures in either page.
+
+### Step 4 — Root Cause Investigation (probe scripts)
+
+#### 🔴 Fix 2 (chrome.app) — Root Cause CONFIRMED
+
+`window.chrome` is `undefined` when `addScriptToEvaluateOnNewDocument` scripts run.
+
+Evidence — probe WITHOUT stealth scripts vs WITH stealth scripts (about:blank):
+```
+NO stealth:   app_desc: {configurable:true, enumerable:true, hasGet:false, hasValue:true}  ← Chrome-set value
+WITH stealth: app_desc: {configurable:true, enumerable:true, hasGet:false, hasValue:true}  ← IDENTICAL
+```
+Both produce IDENTICAL results. Our scripts have **zero effect** on chrome.app because `window.chrome` is `undefined` at script injection time → both `delete window.chrome.app` and `Object.defineProperty(window.chrome, 'app', ...)` throw TypeError caught silently.
+
+Chrome initializes `window.chrome = {app:{...}, runtime:{...}}` **after** `addScriptToEvaluateOnNewDocument`, before page JS.
+
+**Fix needed:** Intercept `window.chrome` initialization via a setter on `window` — define `Object.defineProperty(window, 'chrome', {get, set})` in `addScriptToEvaluateOnNewDocument` so when Chrome does `window.chrome = obj`, our setter removes `.app` before storing.
+
+#### 🔴 Fix 3 (navigator.keyboard) — Root Cause CONFIRMED
+
+Our `configurable:true` defineProperty is overridden by Chrome's secure-context Keyboard API initialization.
+
+Evidence:
+```
+about:blank: keyboard_proto_desc: not-on-Navigator.prototype  ← our fix worked (keyboard absent)
+google.com:  keyboard_proto_desc: {configurable:true, hasGet:true} → value=[object Keyboard]
+```
+- On `about:blank` (not HTTPS): keyboard never gets added → our fix holds.
+- On `https://google.com`: Chrome adds `navigator.keyboard` to Navigator.prototype AFTER our script (for secure contexts), overriding our `configurable:true` getter with a real Keyboard object.
+
+**Fix needed:** Change `configurable:true` → `configurable:false` in the keyboard defineProperty so Chrome cannot redefine it.
+
+### Step 5 — Fingerprint.com device check
+
+*(Running — results to be recorded in Session 59)*
+
+### Open items going into Session 59
+
+1. **Apply Fix 2 (chrome.app)** — `window.chrome` setter interceptor in `make_stealth_js`
+2. **Apply Fix 3 (keyboard)** — change `configurable:true` → `configurable:false` in keyboard defineProperty
+3. **Record fingerprint.com device check results**
+4. **Verify both fixes** with local diagnostic re-run
+
+---
+
 ## What's Next (Future Work)
 
 1. **Proxy health pre-flight** — ping proxy before starting batch, warn if dead/slow  
