@@ -1570,14 +1570,12 @@ try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable
       window.__nr(window.chrome.runtime.onMessage.hasListener,'hasListener');
     }}
   }}
-  // chrome.app must be absent on Android Chrome — delete it, then defineProperty
-  // as a fallback in case the property is non-configurable (delete returns false silently).
+  // chrome.app must be absent on Android Chrome — delete it, then unconditionally
+  // defineProperty so Chrome's internal restoration cannot re-expose it.
+  // The old conditional guard (if app!==undefined) was wrong: if delete succeeded,
+  // the guard skipped defineProperty, allowing Chrome to restore app after script exit.
   try{{delete window.chrome.app;}}catch(e){{}}
-  try{{
-    if(window.chrome.app!==undefined){{
-      Object.defineProperty(window.chrome,'app',{{get:function(){{return undefined;}},configurable:true,enumerable:false}});
-    }}
-  }}catch(e){{}}
+  try{{Object.defineProperty(window.chrome,'app',{{get:function(){{return undefined;}},configurable:true,enumerable:false}});}}catch(e){{}}
   if(!window.chrome.loadTimes){{var _lt=Date.now()/1000;window.chrome.loadTimes=function(){{var _t=Date.now()/1000;return{{requestTime:_t-0.5,startLoadTime:_t-0.5,commitLoadTime:_t-0.3,finishDocumentLoadTime:_t-0.1,finishLoadTime:_t,firstPaintTime:_lt-0.25,firstPaintAfterLoadTime:_lt-0.18,navigationType:'Other',wasFetchedViaSpdy:false,wasNpnNegotiated:false,npnNegotiatedProtocol:'',wasAlternateProtocolAvailable:false,connectionInfo:''}}}};if(window.__nr)window.__nr(window.chrome.loadTimes,'loadTimes');}}
   if(!window.chrome.csi)window.chrome.csi=function(){{return{{startE:Date.now()-1000,onloadT:Date.now()-500,pageT:500,tran:15}}}};
 }})();
@@ -1621,8 +1619,9 @@ try{{
   Object.defineProperty(navigator,'webkitConnection',{{get:()=>undefined}});
 }}catch(e){{}}
 // keyboard: Android Chrome doesn't expose the Keyboard API.
-// Try delete first, then defineProperty as a fallback for non-configurable descriptors.
+// Delete from both prototype and instance (Chrome 149 may set it as own property).
 try{{delete Navigator.prototype.keyboard;}}catch(e){{}}
+try{{delete navigator.keyboard;}}catch(e){{}}
 try{{Object.defineProperty(Navigator.prototype,'keyboard',{{get:function(){{return undefined;}},configurable:true,enumerable:false}});}}catch(e){{}}
 // pdfViewerEnabled: exists on Navigator.prototype in Chrome 113+ — must be on prototype, not instance
 try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function(){{return true;}},configurable:true,enumerable:true}});}}catch(e){{}}
@@ -2105,13 +2104,9 @@ try{{
   // DevTools open detection — spoof the property check
   try{{Object.defineProperty(window,'__devtools_open__',{{get:function(){{return false;}},configurable:true}});}}catch(e){{}}
   // Remove chrome.app and any extension runtime id — real Android Chrome has neither.
-  // Use defineProperty as a fallback in case delete fails on non-configurable descriptors.
+  // Unconditional defineProperty (no guard) so Chrome cannot restore app after script exit.
   try{{delete window.chrome.app;}}catch(e){{}}
-  try{{
-    if(window.chrome&&window.chrome.app!==undefined){{
-      Object.defineProperty(window.chrome,'app',{{get:function(){{return undefined;}},configurable:true,enumerable:false}});
-    }}
-  }}catch(e){{}}
+  try{{if(window.chrome)Object.defineProperty(window.chrome,'app',{{get:function(){{return undefined;}},configurable:true,enumerable:false}});}}catch(e){{}}
   try{{delete window.chrome.webstore;}}catch(e){{}}
   try{{
     if(window.chrome&&window.chrome.runtime)
@@ -2189,6 +2184,35 @@ def make_plugins_override_js() -> str:
     """
     return r"""
 (function() {
+  // ── Independent toString chain for getters defined in this script ──────────
+  // Cannot reliably use window.__nr from the previous addScriptToEvaluateOnNewDocument
+  // because Function.prototype.toString.call(fn) resolves through script-1's closure
+  // WeakMap, and cross-script-boundary WeakMap key identity can fail in Chrome 149
+  // (the _fpGet reference registered via window.__nr is not found in _ntm when the
+  // diagnostic calls Function.prototype.toString.call(desc.get)).
+  //
+  // Fix: chain our own WeakMap onto whatever Function.prototype.toString currently is
+  // (script-1 override if it worked, or native if not). The chain is transparent —
+  // fingerprint.com cannot distinguish one WeakMap level from two.
+  var _prevFPTS = Function.prototype.toString;
+  var _ntm2 = new WeakMap();
+  (function() {
+    var _newFPTS = function toString() {
+      if (_ntm2.has(this)) return _ntm2.get(this);
+      try { return _prevFPTS.call(this); } catch(e) { return 'function () { [native code] }'; }
+    };
+    try {
+      Function.prototype.toString = _newFPTS;
+      _ntm2.set(_newFPTS, 'function toString() { [native code] }');
+    } catch(e) {}
+  })();
+  function _reg(fn, name, isGetter) {
+    try {
+      if (fn && typeof fn === 'function')
+        _ntm2.set(fn, 'function ' + (isGetter ? 'get ' : '') + name + '() { [native code] }');
+    } catch(e) {}
+  }
+
   // ── Capture native PluginArray/MimeTypeArray prototypes BEFORE overriding ──
   // Object.create(nativeProto) makes our fake objects pass `instanceof PluginArray`
   // checks and share the correct prototype chain — a plain {} would not.
@@ -2209,10 +2233,11 @@ def make_plugins_override_js() -> str:
     });
     try { _fp[Symbol.iterator] = function(){ return { next: function(){ return { done: true, value: undefined }; } }; }; } catch(e) {}
     var _fpGet = function(){ return _fp; };
-    // Register with __nr so Function.prototype.toString returns '[native code]'
+    // Primary: register in our local WeakMap chain (works regardless of window.__nr)
+    _reg(_fpGet, 'plugins', true);
+    // Secondary: also try window.__nr from script-1 (belt-and-suspenders)
     if (window.__nr) { try { window.__nr(_fpGet, 'plugins', true); } catch(e) {} }
-    // Belt-and-suspenders: set toString directly on the function so
-    // fingerprint.com sees native code even if __nr WeakMap lookup fails.
+    // Tertiary: instance-level toString for direct .toString() calls (not .call())
     try { Object.defineProperty(_fpGet, 'toString', { value: function(){ return 'function get plugins() { [native code] }'; }, configurable: true, writable: true }); } catch(e) {}
     Object.defineProperty(Navigator.prototype, 'plugins', {
       get: _fpGet, configurable: true, enumerable: true
@@ -2229,6 +2254,7 @@ def make_plugins_override_js() -> str:
     });
     try { _fm[Symbol.iterator] = function(){ return { next: function(){ return { done: true, value: undefined }; } }; }; } catch(e) {}
     var _fmGet = function(){ return _fm; };
+    _reg(_fmGet, 'mimeTypes', true);
     if (window.__nr) { try { window.__nr(_fmGet, 'mimeTypes', true); } catch(e) {} }
     try { Object.defineProperty(_fmGet, 'toString', { value: function(){ return 'function get mimeTypes() { [native code] }'; }, configurable: true, writable: true }); } catch(e) {}
     Object.defineProperty(Navigator.prototype, 'mimeTypes', {
@@ -2239,8 +2265,7 @@ def make_plugins_override_js() -> str:
   // ── Clean up __nr ───────────────────────────────────────────────────────────
   // make_stealth_js left window.__nr alive so this script could use it above.
   // Now that registration is complete, delete it so fingerprint.com cannot find
-  // it via Object.getOwnPropertyNames(window). The WeakMap closure keeps all
-  // already-registered functions returning '[native code]' from toString().
+  // it via Object.getOwnPropertyNames(window).
   try { delete window.__nr; } catch(e) {}
 })();
 """
