@@ -577,7 +577,16 @@ try:
             userAgentData_proto: (function(){
                 var d=Object.getOwnPropertyDescriptor(Navigator.prototype,'userAgentData');
                 return d ? JSON.stringify({configurable:d.configurable,hasGetter:typeof d.get==='function',str:d.get?d.get.toString().substring(0,80):null}) : 'no proto desc';
-            })()
+            })(),
+            outerHeight: window.outerHeight,
+            outerWidth:  window.outerWidth,
+            innerHeight: window.innerHeight,
+            innerWidth:  window.innerWidth,
+            outerMinusInnerH: window.outerHeight - window.innerHeight,
+            outerMinusInnerW: window.outerWidth  - window.innerWidth,
+            screenW: screen.width,
+            screenH: screen.height,
+            fn_toString_override: (function(){ var f=function(){}; return f.toString(); })().substring(0,40)
         };
     """)
     log(f"[DIAG] {_json.dumps(diag)}")

@@ -2210,7 +2210,10 @@ def make_plugins_override_js() -> str:
     try { _fp[Symbol.iterator] = function(){ return { next: function(){ return { done: true, value: undefined }; } }; }; } catch(e) {}
     var _fpGet = function(){ return _fp; };
     // Register with __nr so Function.prototype.toString returns '[native code]'
-    if (window.__nr) { try { window.__nr(_fpGet, 'get plugins', true); } catch(e) {} }
+    if (window.__nr) { try { window.__nr(_fpGet, 'plugins', true); } catch(e) {} }
+    // Belt-and-suspenders: set toString directly on the function so
+    // fingerprint.com sees native code even if __nr WeakMap lookup fails.
+    try { Object.defineProperty(_fpGet, 'toString', { value: function(){ return 'function get plugins() { [native code] }'; }, configurable: true, writable: true }); } catch(e) {}
     Object.defineProperty(Navigator.prototype, 'plugins', {
       get: _fpGet, configurable: true, enumerable: true
     });
@@ -2226,7 +2229,8 @@ def make_plugins_override_js() -> str:
     });
     try { _fm[Symbol.iterator] = function(){ return { next: function(){ return { done: true, value: undefined }; } }; }; } catch(e) {}
     var _fmGet = function(){ return _fm; };
-    if (window.__nr) { try { window.__nr(_fmGet, 'get mimeTypes', true); } catch(e) {} }
+    if (window.__nr) { try { window.__nr(_fmGet, 'mimeTypes', true); } catch(e) {} }
+    try { Object.defineProperty(_fmGet, 'toString', { value: function(){ return 'function get mimeTypes() { [native code] }'; }, configurable: true, writable: true }); } catch(e) {}
     Object.defineProperty(Navigator.prototype, 'mimeTypes', {
       get: _fmGet, configurable: true, enumerable: true
     });
@@ -2921,32 +2925,12 @@ def check_gmail(
     except Exception as e:
         log(f"Stealth JS warning: {e}")
 
-    # Fix UA Client Hints in actual HTTP headers using fingerprint values
-    try:
-        driver.execute_cdp_cmd("Network.enable", {})
-        driver.execute_cdp_cmd("Network.setUserAgentOverride", {
-            "userAgent": MOBILE_UA,
-            "acceptLanguage": f"{fp['language']},en;q=0.9",
-            "platform": fp["platform"],
-            "userAgentMetadata": {
-                "brands": [
-                    {"brand": "Not(A;Brand",   "version": "8"},
-                    {"brand": "Chromium",       "version": fp["chromeVersion"].split(".")[0]},
-                    {"brand": "Google Chrome",  "version": fp["chromeVersion"].split(".")[0]},
-                ],
-                "fullVersion": fp["chromeVersion"],
-                "platform": "Android",
-                "platformVersion": fp["androidVersion"],
-                "architecture": "",
-                "model": fp["model"],
-                "mobile": True,
-                "bitness": "",
-                "wow64": False,
-            },
-        })
-        log(f"Network UA override applied → {fp['model']} / Android {fp['androidVersion']}")
-    except Exception as e:
-        log(f"Network UA override warning: {e}")
+    # NOTE: Network.enable + Network.setUserAgentOverride intentionally removed.
+    # Activating the CDP Network domain leaves a detectable trace that fingerprint.com
+    # uses for its "developer tools" signal (weight 8). Emulation.setUserAgentOverride
+    # (below) covers both the JS navigator.userAgent and the HTTP User-Agent header,
+    # including Sec-CH-UA via userAgentMetadata, making Network.setUserAgentOverride
+    # redundant. Avoid enabling any CDP domain that is not strictly necessary.
 
     # Set Chrome's actual timezone + locale via CDP at startup.
     # The stealth JS (line ~1116) only fakes Intl.DateTimeFormat at the JS level —
