@@ -4266,20 +4266,23 @@ def _do_login(
                 return
             rand_sleep(900, 1400)
 
-    def handle_totp_if_prompted(label: str, max_rounds: int = 4) -> None:
+    def handle_totp_if_prompted(
+        label: str, max_rounds: int = 4, *, quick: bool = False
+    ) -> None:
         """Enter fresh TOTP whenever Google asks during device sign-out."""
+        post_sleep = (450, 750) if quick else (1200, 1800)
         for _ in range(max_rounds):
             if not is_totp_challenge_url(driver.current_url):
                 return
             log(f"{email} — {label}: TOTP re-auth")
             if not enter_fresh_totp_once(label):
                 return
-            rand_sleep(1200, 1800)
-            _deadline = time.time() + 20
+            rand_sleep(*post_sleep)
+            _deadline = time.time() + (12 if quick else 20)
             while time.time() < _deadline:
                 if not is_totp_challenge_url(driver.current_url):
                     break
-                time.sleep(0.4)
+                time.sleep(0.25)
 
     def wait_for_device_activity_loaded(timeout: float = 25.0) -> bool:
         deadline = time.time() + timeout
@@ -4363,11 +4366,53 @@ def _do_login(
     }
     """
 
-    def goto_device_activity_list() -> None:
+    def _device_url_kind() -> str:
+        """list | detail | other — without full page reload."""
+        try:
+            return driver.execute_script(
+                """
+                var p = location.pathname || '';
+                if (p.indexOf('device-activity') === -1) return 'other';
+                if (/\\/device-activity\\/[^/]+/.test(p)) return 'detail';
+                return 'list';
+                """
+            ) or "other"
+        except Exception:
+            return "other"
+
+    def return_to_device_list(max_back: int = 4) -> bool:
+        """Back to device list — avoid driver.get (keeps session, less TOTP)."""
+        for attempt in range(max_back + 1):
+            handle_totp_if_prompted("Back to device list", max_rounds=2, quick=True)
+            kind = _device_url_kind()
+            if kind == "list":
+                rand_sleep(350, 550)
+                return True
+            if kind == "detail":
+                try:
+                    driver.back()
+                except Exception:
+                    pass
+                rand_sleep(400, 650)
+                continue
+            if attempt == max_back:
+                break
+            try:
+                driver.back()
+            except Exception:
+                break
+            rand_sleep(400, 650)
+        log(f"{email} — device list: back() did not reach list (url={driver.current_url[:80]})")
+        return False
+
+    def goto_device_activity_list(*, force_reload: bool = False) -> None:
+        """Open list once; in-loop prefer return_to_device_list()."""
+        if not force_reload and _device_url_kind() == "list":
+            return
         try:
             driver.get(DEVICE_ACTIVITY_URL)
-            rand_sleep(2000, 3200)
-            wait_for_device_activity_loaded(20.0)
+            rand_sleep(1400, 2200)
+            wait_for_device_activity_loaded(18.0)
         except Exception as exc:
             log(f"{email} — device list navigation warning: {exc}")
 
@@ -4488,19 +4533,23 @@ def _do_login(
         )
         return raw if isinstance(raw, list) else []
 
-    def collect_active_device_sessions() -> list[dict]:
-        """Scroll full list — Android phone, Chrome device, Windows/Linux computer, etc."""
+    def collect_active_device_sessions(*, thorough: bool = False) -> list[dict]:
+        """Active signed-in rows on the current list page (no navigation)."""
         merged: dict[str, dict] = {}
         try:
             height = driver.execute_script(
                 "return Math.max(document.body.scrollHeight, "
-                "(document.querySelector('[role=main]')||{}).scrollHeight||0, 1600);"
+                "(document.querySelector('[role=main]')||{}).scrollHeight||0, 1200);"
             )
         except Exception:
-            height = 2000
-        steps = max(4, int(height // 400) + 1)
+            height = 1600
+        step_size = 500 if thorough else 700
+        steps = max(3 if thorough else 2, int(height // step_size) + 1)
+        if not thorough:
+            steps = min(steps, 4)
+        pause = (120, 220) if not thorough else (220, 380)
         for step in range(steps + 1):
-            y = min(step * 400, height)
+            y = min(step * step_size, height)
             try:
                 driver.execute_script(
                     "window.scrollTo(0, arguments[0]);"
@@ -4510,7 +4559,7 @@ def _do_login(
                 )
             except Exception:
                 pass
-            rand_sleep(280, 450)
+            rand_sleep(*pause)
             for item in _gather_device_sessions_js():
                 href = item.get("href") or ""
                 if href:
@@ -4531,14 +4580,35 @@ def _do_login(
         return out
 
     def open_device_session(session: dict) -> str:
-        """Open device detail by URL (reliable for every session type)."""
-        href = session.get("href") or ""
+        """Open device detail by clicking the list row (stay in same auth session)."""
+        href = (session.get("href") or "").split("#")[0]
         label = session.get("label") or ""
         kind = session.get("kind") or detect_session_kind(label)
-        try:
-            driver.get(href)
-        except Exception:
+        if not href:
             return ""
+        clicked = driver.execute_script(
+            _DEVICE_JS_HELPERS
+            + """
+            var target = arguments[0];
+            var links = Array.from(document.querySelectorAll('a[href*="device-activity"]'));
+            for (var i = 0; i < links.length; i++) {
+              var L = links[i];
+              try {
+                if ((L.href || '').split('#')[0] !== target) continue;
+              } catch(e) { continue; }
+              if (!__visible(L)) continue;
+              __click(L);
+              return true;
+            }
+            return false;
+            """,
+            href,
+        )
+        if not clicked:
+            try:
+                driver.get(href)
+            except Exception:
+                return ""
         return f"[{kind}] {label[:70]}"
 
     def click_sign_out_on_device_detail() -> str | None:
@@ -4577,29 +4647,28 @@ def _do_login(
             """
         )
 
-    def sign_out_current_device_from_list(signed_out_hrefs: set[str]) -> bool:
-        """Last step: open this device → Sign out (same flow as others)."""
+    def sign_out_current_device_from_list() -> bool:
+        """Last step: open this device → Sign out (same click/back flow)."""
+        return_to_device_list()
         sessions = collect_active_device_sessions()
-        pending = [s for s in sessions if (s.get("href") or "") not in signed_out_hrefs]
-        if not pending:
+        if not sessions:
             return False
-        opened = open_device_session(pending[0])
+        opened = open_device_session(sessions[0])
         if not opened:
             return False
-        rand_sleep(1500, 2500)
-        handle_totp_if_prompted("Current device detail TOTP", max_rounds=3)
+        rand_sleep(700, 1100)
+        handle_totp_if_prompted("Current device detail TOTP", max_rounds=2, quick=True)
         label = click_sign_out_on_device_detail()
         if not label:
+            return_to_device_list()
             return False
-        href = pending[0].get("href") or ""
-        if href:
-            signed_out_hrefs.add(href)
         log(f"{email} — current device sign-out: {label}")
-        rand_sleep(500, 900)
+        rand_sleep(350, 550)
         confirm_device_dialog()
-        rand_sleep(400, 700)
+        rand_sleep(250, 450)
         confirm_device_dialog()
-        handle_totp_if_prompted("Current device confirm TOTP", max_rounds=3)
+        handle_totp_if_prompted("Current device confirm TOTP", max_rounds=2, quick=True)
+        return_to_device_list()
         return True
 
     def run_device_activity_signouts(new_pw: str) -> dict:
@@ -4607,7 +4676,7 @@ def _do_login(
         log(f"{email} — Device activity: sign out all sessions")
         try:
             driver.get(DEVICE_ACTIVITY_URL)
-            rand_sleep(2200, 3600)
+            rand_sleep(1400, 2200)
         except Exception as exc:
             shot = screenshot_b64()
             return {
@@ -4618,19 +4687,20 @@ def _do_login(
                 "debugScreenshot": shot,
             }
 
-        handle_totp_if_prompted("Device activity landing", max_rounds=5)
+        handle_totp_if_prompted("Device activity landing", max_rounds=4, quick=True)
         wait_for_device_activity_loaded()
+        collect_active_device_sessions(thorough=True)
 
         signed_out_count = 0
         idle_passes = 0
-        signed_out_hrefs: set[str] = set()
         kinds_done: dict[str, int] = {}
         kinds_seen: set[str] = set()
 
-        # Flow: scan all session types → open detail → Sign out (not Find device) → repeat
-        for _round in range(50):
-            goto_device_activity_list()
-            handle_totp_if_prompted("Device list TOTP", max_rounds=2)
+        # One device-activity URL load → click device → sign out → back → next (no re-get loop)
+        for _round in range(40):
+            if _device_url_kind() != "list":
+                return_to_device_list()
+            handle_totp_if_prompted("Device list", max_rounds=2, quick=True)
 
             if all_devices_signed_out_on_page():
                 log(f"{email} — all devices show signed out on list")
@@ -4639,60 +4709,62 @@ def _do_login(
             sessions = collect_active_device_sessions()
             for s in sessions:
                 kinds_seen.add(s.get("kind") or "session")
-            pending = [s for s in sessions if (s.get("href") or "") not in signed_out_hrefs]
             kinds_on_page = sorted({s.get("kind", "session") for s in sessions})
             log(
-                f"{email} — sessions on page: {len(sessions)} total, "
-                f"{len(pending)} pending, kinds={kinds_on_page}"
+                f"{email} — sessions on page: {len(sessions)} active, "
+                f"kinds={kinds_on_page}"
             )
 
-            if not pending:
+            if not sessions:
                 idle_passes += 1
-                log(f"{email} — no new session to open (idle {idle_passes}/5)")
-                if idle_passes >= 5:
+                log(f"{email} — no active device row (idle {idle_passes}/4)")
+                if idle_passes >= 4:
                     break
-                rand_sleep(800, 1200)
+                return_to_device_list()
+                rand_sleep(400, 600)
                 continue
 
             idle_passes = 0
-            target = pending[0]
-            href = target.get("href") or ""
+            target = sessions[0]
             kind = target.get("kind") or "session"
             device_label = open_device_session(target)
             if not device_label:
+                return_to_device_list()
                 continue
             log(f"{email} — opened device: {device_label[:80]}")
-            rand_sleep(1800, 2800)
-            handle_totp_if_prompted("Device detail TOTP", max_rounds=3)
+            rand_sleep(650, 950)
+            handle_totp_if_prompted("Device detail", max_rounds=2, quick=True)
 
             sign_out_label = click_sign_out_on_device_detail()
             if not sign_out_label:
-                log(f"{email} — Sign out not found on detail (skipped Find device only?)")
-                try:
-                    driver.back()
-                except Exception:
-                    pass
-                rand_sleep(1000, 1500)
+                log(f"{email} — Sign out not found on detail — back to list")
+                return_to_device_list()
                 continue
 
             signed_out_count += 1
-            signed_out_hrefs.add(href)
             kinds_done[kind] = kinds_done.get(kind, 0) + 1
             log(f"{email} — device sign-out #{signed_out_count} [{kind}]: {sign_out_label}")
-            rand_sleep(500, 900)
+            rand_sleep(300, 500)
             confirm_device_dialog()
-            rand_sleep(400, 700)
+            rand_sleep(250, 400)
             confirm_device_dialog()
-            handle_totp_if_prompted("After Sign out confirm", max_rounds=4)
-            rand_sleep(2000, 3200)
+            handle_totp_if_prompted("After sign out", max_rounds=2, quick=True)
+            if not return_to_device_list():
+                log(f"{email} — reload device list once (back failed)")
+                goto_device_activity_list(force_reload=True)
+                handle_totp_if_prompted("Device list reload", max_rounds=2, quick=True)
+            rand_sleep(400, 650)
 
-        goto_device_activity_list()
-        handle_totp_if_prompted("Before self sign-out", max_rounds=3)
+        return_to_device_list()
+        handle_totp_if_prompted("Before self sign-out", max_rounds=2, quick=True)
 
         if not all_devices_signed_out_on_page():
-            log(f"{email} — signing out current device via detail page")
-            sign_out_current_device_from_list(signed_out_hrefs)
-            goto_device_activity_list()
+            log(f"{email} — signing out remaining device(s) via detail page")
+            for _ in range(5):
+                if all_devices_signed_out_on_page():
+                    break
+                if not sign_out_current_device_from_list():
+                    break
         else:
             log(f"{email} — list already all signed out — logging out browser session")
 
@@ -4703,11 +4775,11 @@ def _do_login(
         log(f"{email} — final logout ({signed_out_count} other device(s) signed out)")
         try:
             driver.get("https://accounts.google.com/Logout?continue=https://myaccount.google.com/")
-            rand_sleep(1800, 2800)
+            rand_sleep(900, 1400)
         except Exception as _le:
             log(f"{email} — Logout URL warning: {_le}")
 
-        handle_totp_if_prompted("Self sign-out TOTP", max_rounds=3)
+        handle_totp_if_prompted("Self sign-out TOTP", max_rounds=2, quick=True)
         shot = screenshot_b64()
         return {
             "status": "opened",
