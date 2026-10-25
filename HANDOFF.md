@@ -16,8 +16,9 @@ Fixes that landed:
 VPS Pixel 6 direct audit (no proxy, IP 147.90.10.113):
 - Before: score **19** = VPN 3 + Tampering 8 + Developer Tools 8
 - After: score **11** = VPN 3 + Tampering 8. **Developer Tools = Not Detected.**
-- Page diag: deviceMemory 8, maxTouchPoints 5, userAgentData mobile, 412×868 viewport, chrome.app absent, keyboard absent, webdriver false.
-- VPN 3 is the datacenter IP (no residential proxy). Tampering 8 remains; unmasked WebGL still reads SwiftShader because Chrome ignores the instance `getParameter` replacement.
+- Page diag on the final run: deviceMemory 8, maxTouchPoints 5, UA-CH mobile, 412×868, timezone Europe/Amsterdam (matches the IP), WebGL Mali-G78 on both `getParameter` and `prototype.getParameter.call`, chrome.app absent, keyboard absent, webdriver false.
+- Turning the full stealth script back on (it had a regex syntax error and was not running) raised the score to **26** (Bot 7 + Tampering 16 + VPN 3). Device check now injects only the minimal patch.
+- The remaining Tampering 8 is the attached ChromeDriver/CDP session. It stays after every page-level inconsistency above is removed. VPN 3 is the datacenter IP and needs a residential proxy.
 
 ---
 
