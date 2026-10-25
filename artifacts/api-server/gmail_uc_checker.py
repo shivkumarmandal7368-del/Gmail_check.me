@@ -3601,6 +3601,10 @@ def check_gmail(
         device_index=device_index,
         reuse_device_snapshot=not fresh_profile,
     )
+    if proxy and not fp.get("geoLocked"):
+        fp = _sync_fingerprint_geo_from_proxy(
+            fp, proxy, os.path.join(profile_dir, "fingerprint.json")
+        )
     if chrome_version_full:
         # Keep the emulated Android UA/client hints aligned with the actual
         # Chrome binary used by undetected-chromedriver.
