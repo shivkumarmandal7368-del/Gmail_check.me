@@ -1689,6 +1689,42 @@ try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function
   }}
   patch(WebGLRenderingContext,_e1);
   if(window.WebGL2RenderingContext)patch(WebGL2RenderingContext,_e2);
+  // Chrome binds getParameter on the context instance, so prototype patches
+  // never run. Wrap getContext and patch the instance that fingerprint reads.
+  var _origGC=HTMLCanvasElement.prototype.getContext;
+  function _wrapCtx(ctx,extList){{
+    if(!ctx||ctx.__fpw)return ctx;
+    try{{Object.defineProperty(ctx,'__fpw',{{value:1}});}}catch(e){{}}
+    var gp=ctx.getParameter.bind(ctx);
+    ctx.getParameter=function(p){{
+      if(p===37445||p===7936)return _wv;
+      if(p===37446||p===7937)return _wr;
+      if(p===7938)return '{gl_ver}';
+      if(p===35724)return 'OpenGL ES GLSL ES 3.20';
+      if(p===3379||p===34024||p===34076)return 16384;
+      if(p===36348)return 15;
+      if(p===36349)return 224;
+      if(p===36347)return 256;
+      if(p===33901)return new Float32Array([1,511]);
+      if(p===34930)return 8;
+      return gp(p);
+    }};
+    ctx.getSupportedExtensions=function(){{return extList.slice();}};
+    var _ge=ctx.getExtension.bind(ctx);
+    ctx.getExtension=function(name){{
+      if(extList.indexOf(name)===-1)return null;
+      return _ge(name);
+    }};
+    if(window.__nr)window.__nr(ctx.getParameter,'getParameter');
+    return ctx;
+  }}
+  HTMLCanvasElement.prototype.getContext=function(type){{
+    var ctx=_origGC.apply(this,arguments);
+    if(type&&String(type).indexOf('webgl')!==-1)
+      ctx=_wrapCtx(ctx,/2/.test(String(type))?_e2:_e1);
+    return ctx;
+  }};
+  if(window.__nr)window.__nr(HTMLCanvasElement.prototype.getContext,'getContext');
 }})();
 (function(){{
   var seed={cs};
