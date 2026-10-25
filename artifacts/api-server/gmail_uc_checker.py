@@ -4367,13 +4367,18 @@ def _do_login(
     """
 
     def _trusted_tap(el) -> bool:
-        """Real input event. JS el.click() is ignored on Google's verify buttons."""
+        """WebDriver click first. A coordinate tap was missing Google's Sign out button."""
         if el is None:
             return False
         try:
             driver.execute_script(
                 "arguments[0].scrollIntoView({block:'center', inline:'center'});", el
             )
+        except Exception:
+            pass
+        try:
+            el.click()
+            return True
         except Exception:
             pass
         try:
@@ -4386,10 +4391,6 @@ def _do_login(
             )
             x, y = float(rect["x"]), float(rect["y"])
             if rect.get("w", 0) > 2 and rect.get("h", 0) > 2:
-                # Desktop layout ignores touch events, so use a real mouse click.
-                driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
-                    "type": "mouseMoved", "x": x, "y": y,
-                })
                 driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
                     "type": "mousePressed", "x": x, "y": y,
                     "button": "left", "clickCount": 1,
@@ -4400,12 +4401,8 @@ def _do_login(
                 })
                 return True
         except Exception:
-            pass
-        try:
-            el.click()
-            return True
-        except Exception:
             return False
+        return False
 
     def _find_labeled_control(kind: str):
         """Return {el, t} for More ways or Authenticator. el is a WebElement."""
@@ -4875,12 +4872,12 @@ def _do_login(
             }
             function walk(root) {
               var best = null;
-              var nodes = root.querySelectorAll('button, a, [role="button"], [role="link"], span');
+              var nodes = root.querySelectorAll('button, a, [role="button"], [role="link"], [role="menuitem"], span');
               for (var i = 0; i < nodes.length; i++) {
                 var node = nodes[i];
                 var t = norm(node.innerText || node.textContent || '');
                 if (!ok(t)) continue;
-                var clickable = node.closest('button, a, [role="button"], [role="link"]') || node;
+                var clickable = node.closest('button, a, [role="button"], [role="link"], [role="menuitem"]') || node;
                 var r = clickable.getBoundingClientRect();
                 if (r.width < 2 || r.height < 2) continue;
                 if (!best || t.length < best.len) best = {el: clickable, len: t.length, t: t};
@@ -5090,19 +5087,32 @@ def _do_login(
                 time.sleep(0.2)
             return None
 
+        def device_key(href: str) -> str:
+            marker = "/device-activity/id/"
+            path = href.split("?")[0].split("#")[0]
+            idx = path.find(marker)
+            if idx == -1:
+                return path
+            return path[idx:].rstrip("/")
+
         def wait_auto_back_to_list() -> bool:
-            """Confirm Sign out once, then wait. Back too early cancels the sign-out."""
+            """Confirm the dialog once, then wait for Google to return to the list."""
             confirmed = False
-            deadline = time.time() + 8.0
+            deadline = time.time() + 5.0
             while time.time() < deadline:
                 if _device_url_kind() == "list":
                     return True
-                if not confirmed:
-                    if _tap_sign_out_button():
-                        confirmed = True
-                        time.sleep(0.4)
-                        continue
-                time.sleep(0.25)
+                if not confirmed and _tap_sign_out_button():
+                    confirmed = True
+                    time.sleep(0.35)
+                    continue
+                time.sleep(0.2)
+            if _device_url_kind() == "detail":
+                try:
+                    driver.back()
+                except Exception:
+                    pass
+                time.sleep(0.4)
             return _device_url_kind() == "list"
 
         def row_shows_signed_out(href: str) -> bool:
@@ -5148,7 +5158,7 @@ def _do_login(
             sessions = list_devices_fast(full_scroll=(_round == 0))
             for s in sessions:
                 kinds_seen.add(s.get("kind") or "session")
-            pending = [s for s in sessions if (s.get("href") or "") not in done_hrefs]
+            pending = [s for s in sessions if device_key(s.get("href") or "") not in done_hrefs]
             by_kind: dict[str, int] = {}
             for s in sessions:
                 k = s.get("kind") or "session"
@@ -5164,36 +5174,43 @@ def _do_login(
 
             target = pending[0]
             href = target.get("href") or ""
+            key = device_key(href)
             kind = target.get("kind") or "session"
-            attempts[href] = attempts.get(href, 0) + 1
+            attempts[key] = attempts.get(key, 0) + 1
             device_label = open_device_session(target)
             if not device_label:
-                if attempts[href] >= 2:
-                    done_hrefs.add(href)
+                if attempts[key] >= 2:
+                    done_hrefs.add(key)
                 continue
             log(f"{email} — opened device: {device_label[:80]}")
             sign_out_label = click_sign_out_ready()
             if not sign_out_label:
                 log(f"{email} — Sign out not found — next device")
                 wait_auto_back_to_list()
-                if attempts[href] >= 2:
-                    done_hrefs.add(href)
+                if attempts[key] >= 2:
+                    done_hrefs.add(key)
                 continue
 
             log(f"{email} — clicked Sign out [{kind}]")
-            time.sleep(0.4)
-            if not wait_auto_back_to_list():
-                log(f"{email} — list par wapas nahi aaya")
-                ensure_device_activity_list("After sign out")
-            if row_shows_signed_out(href):
-                done_hrefs.add(href)
+            time.sleep(0.35)
+            back_ok = wait_auto_back_to_list()
+            if not back_ok and _device_url_kind() != "list":
+                log(f"{email} — list par wapas nahi aaya, agla device")
+                try:
+                    driver.get(DEVICE_ACTIVITY_URL)
+                    time.sleep(0.8)
+                except Exception:
+                    pass
+            if row_shows_signed_out(href) or row_shows_signed_out(key):
+                done_hrefs.add(key)
                 signed_out_count += 1
                 kinds_done[kind] = kinds_done.get(kind, 0) + 1
                 log(f"{email} — device sign-out #{signed_out_count} [{kind}] list shows Signed out")
             else:
-                log(f"{email} — [{kind}] abhi bhi signed in, dubara try ({attempts[href]}/2)")
-                if attempts[href] >= 2:
-                    done_hrefs.add(href)
+                log(f"{email} — [{kind}] abhi bhi signed in ({attempts[key]}/2)")
+                if attempts[key] >= 2:
+                    done_hrefs.add(key)
+                    log(f"{email} — [{kind}] skip, next device")
 
         kinds_seen_sorted = sorted(kinds_seen)
         log(
