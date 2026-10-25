@@ -58,6 +58,7 @@ sudo -u "${APP_USER}" bash -lc "
   pnpm install --frozen-lockfile
   pnpm run typecheck:libs || true
   python3 -m venv .venv
+  .venv/bin/pip install -q setuptools
   .venv/bin/pip install -q -r artifacts/api-server/requirements.txt
   eval \"\$(bash scripts/setup-chrome-for-testing.sh)\"
   echo \"Chrome: \$(\"\${CHROME_BINARY}\" --version)\"
