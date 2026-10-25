@@ -3862,10 +3862,13 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         # "challenge/totp" / "challenge/ipp" are TOTP pages — handle separately
         _2fa_urls = ("challenge/dp", "challenge/totp", "challenge/ipp",
                      "challenge/selection", "challenge/sk")
+        # challenge/recaptcha is the "I'm not a robot" checkbox. It is handled
+        # before classify() — do not treat it as a phone/device block.
         is_real_challenge = (
             (
                 "challenge" in url
                 and "challenge/pwd" not in url
+                and "challenge/recaptcha" not in url
                 and not any(x in url for x in _2fa_urls)
             )
             or "InterstitialConfirmation" in url
@@ -4139,6 +4142,82 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             url, text = page_state()
             if "uplevelingstep" not in url:
                 break
+
+    # Same step as a phone: Google shows "I'm not a robot" after the email,
+    # one checkbox click, then the password page. An image puzzle is a
+    # different page — we do not try to solve that.
+    if "challenge/recaptcha" in url:
+        log(f"{email} — I'm not a robot checkbox — clicking it")
+        _rc_result = "missed"
+        try:
+            _iframe_deadline = time.time() + 8
+            _anchor_frame = None
+            while time.time() < _iframe_deadline and _anchor_frame is None:
+                driver.switch_to.default_content()
+                for _fr in driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha']"):
+                    _src = _fr.get_attribute("src") or ""
+                    if "anchor" in _src or "bframe" not in _src:
+                        if "bframe" in _src:
+                            continue
+                        _anchor_frame = _fr
+                        break
+                if _anchor_frame is None:
+                    time.sleep(0.3)
+            if _anchor_frame is not None:
+                driver.switch_to.frame(_anchor_frame)
+                _box = wait_for_any(["#recaptcha-anchor", ".recaptcha-checkbox-border"], timeout=6)
+                if _box:
+                    try:
+                        natural_mouse_move(driver, _box)
+                    except Exception:
+                        pass
+                    _box.click()
+                    log(f"{email} — I'm not a robot checkbox clicked")
+                driver.switch_to.default_content()
+            _rc_deadline = time.time() + 12
+            while time.time() < _rc_deadline:
+                driver.switch_to.default_content()
+                _rc_url = driver.current_url
+                if "challenge/recaptcha" not in _rc_url:
+                    _rc_result = "passed"
+                    break
+                _image = False
+                for _bf in driver.find_elements(By.CSS_SELECTOR, "iframe[src*='bframe']"):
+                    try:
+                        if _bf.is_displayed() and _bf.size.get("height", 0) > 80:
+                            _image = True
+                            break
+                    except Exception:
+                        pass
+                if _image:
+                    _rc_result = "image"
+                    break
+                time.sleep(0.4)
+            else:
+                _rc_result = "timeout"
+        except Exception as _rc_err:
+            log(f"{email} — recaptcha checkbox error: {_rc_err}")
+            _rc_result = "missed"
+        finally:
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+        url, text = page_state()
+        log(f"{email} — After I'm not a robot ({_rc_result}): {url[:70]}")
+        if _rc_result != "passed":
+            shot = screenshot_b64()
+            _why = (
+                "Google asked for an image puzzle after I'm not a robot."
+                if _rc_result == "image"
+                else "Google showed I'm not a robot and the checkbox did not open the password page."
+            )
+            return {
+                "status": "verification_required",
+                "reason": _why,
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
 
     result = classify(url, text)
     if result:
