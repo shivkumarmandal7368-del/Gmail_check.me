@@ -1696,7 +1696,7 @@ try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function
     if(!ctx||ctx.__fpw)return ctx;
     try{{Object.defineProperty(ctx,'__fpw',{{value:1}});}}catch(e){{}}
     var gp=ctx.getParameter.bind(ctx);
-    ctx.getParameter=function(p){{
+    var _gp=function(p){{
       if(p===37445||p===7936)return _wv;
       if(p===37446||p===7937)return _wr;
       if(p===7938)return '{gl_ver}';
@@ -1709,6 +1709,8 @@ try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function
       if(p===34930)return 8;
       return gp(p);
     }};
+    try{{delete ctx.getParameter;}}catch(e){{}}
+    try{{Object.defineProperty(ctx,'getParameter',{{value:_gp,configurable:true,writable:true}});}}catch(e){{ctx.getParameter=_gp;}}
     ctx.getSupportedExtensions=function(){{return extList.slice();}};
     var _ge=ctx.getExtension.bind(ctx);
     ctx.getExtension=function(name){{
@@ -1720,8 +1722,10 @@ try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function
   }}
   HTMLCanvasElement.prototype.getContext=function(type){{
     var ctx=_origGC.apply(this,arguments);
-    if(type&&String(type).indexOf('webgl')!==-1)
-      ctx=_wrapCtx(ctx,/2/.test(String(type))?_e2:_e1);
+    try{{
+      if(ctx&&type&&String(type).indexOf('webgl')!==-1)
+        ctx=_wrapCtx(ctx,/webgl2/i.test(String(type))?_e2:_e1);
+    }}catch(e){{}}
     return ctx;
   }};
   if(window.__nr)window.__nr(HTMLCanvasElement.prototype.getContext,'getContext');
