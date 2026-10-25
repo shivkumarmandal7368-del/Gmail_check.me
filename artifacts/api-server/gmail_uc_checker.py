@@ -232,6 +232,22 @@ def log(msg: str):
     print(f"[UC] {msg}", file=sys.stderr, flush=True)
 
 
+# Login target. Success is this page while signed in, not the Gmail inbox.
+ACCOUNT_HOME = "https://myaccount.google.com/"
+
+
+def signed_in_host(url: str) -> bool:
+    """True when the browser is on the account home or, as a fallback, Gmail."""
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    if host == "myaccount.google.com" and "signin" not in url.lower():
+        return True
+    return host == "mail.google.com" or host.endswith(".mail.google.com")
+
+
 def browser_result_category(result: dict) -> str:
     """Return the stable UI category for a browser-check result."""
     status = result.get("status", "")
@@ -3637,6 +3653,27 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
     def classify(url: str, text: str) -> dict | None:
         host = get_hostname(url)
+        # Signed-in Google Account home is the success page. The inbox is not required.
+        if host == "myaccount.google.com" and "signin" not in url.lower():
+            rand_sleep(400, 700)
+            shot = screenshot_b64()
+            log("Google account home loaded — login successful")
+            if fresh_profile:
+                try:
+                    log("Logging out (fresh profile mode)")
+                    driver.get("https://accounts.google.com/Logout?continue=https://myaccount.google.com/")
+                    rand_sleep(700, 1200)
+                except Exception as _le:
+                    log(f"Logout warning (non-fatal): {_le}")
+            else:
+                log("Account home open — keeping session (same-device mode, no logout)")
+            return {
+                "status": "opened",
+                "reason": "Google account login successful ✅",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
+
         # Must literally BE at mail.google.com — not just have it in a ?continue= param
         at_mailbox = host == "mail.google.com" or host.endswith(".mail.google.com")
 
@@ -3930,13 +3967,9 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     except Exception as _warm_err:
         log(f"{email} — warmup skipped: {_warm_err}")
 
-    log(f"{email} — Opening https://accounts.google.com")
+    log(f"{email} — Opening https://myaccount.google.com/")
     try:
-        driver.get(
-            "https://accounts.google.com/v3/signin/identifier"
-            "?continue=https%3A%2F%2Fmail.google.com%2Fmail%2F"
-            "&service=mail&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
-        )
+        driver.get(ACCOUNT_HOME)
         rand_sleep(600, 1000)
     except Exception as e:
         # Navigation failure = Chrome/ChromeDriver crashed — treat as retriable
@@ -3965,9 +3998,9 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     # Already-authenticated session in persistent profile — skip straight to Gmail
     # Do NOT fall through to Steps 2-4 (no email field on these pages)
     if "signin/continue" in url or "accounts.google.com/o/oauth2/auth" in url:
-        log(f"{email} — Session still active (signin/continue), navigating to Gmail directly")
+        log(f"{email} — Session still active (signin/continue), opening Google Account")
         try:
-            driver.get("https://mail.google.com/mail/u/0/#inbox")
+            driver.get(ACCOUNT_HOME)
             rand_sleep(2500, 3500)
         except Exception:
             pass
@@ -3976,7 +4009,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         for _si in range(8):
             url, text = page_state()
             log(f"{email} — [shortcut loop {_si}] {url[:70]}")
-            if "mail.google.com" in get_hostname(url):
+            if signed_in_host(url):
                 break
             result = classify(url, text)
             if result:
@@ -4005,10 +4038,10 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 elif _uplevel_hits == 2:
                     # Try Gmail HTML version
                     try:
-                        driver.get("https://mail.google.com/mail/h/?zy=e")
+                        driver.get(ACCOUNT_HOME)
                         rand_sleep(2000, 3000)
                         _hu = driver.current_url
-                        if "mail.google.com" in get_hostname(_hu) and "uplevelingstep" not in _hu:
+                        if signed_in_host(_hu) and "uplevelingstep" not in _hu:
                             break  # HTML Gmail loaded — continue to classify below
                     except Exception:
                         pass
@@ -4038,7 +4071,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                     pass
             elif "signin/continue" in url:
                 try:
-                    driver.get("https://mail.google.com/mail/u/0/#inbox")
+                    driver.get("https://myaccount.google.com/")
                 except Exception:
                     pass
             else:
@@ -4567,13 +4600,13 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         rand_sleep(700, 1200)
 
         # Wait for Gmail to fully load (signin/continue is an auto-redirect page)
-        log(f"{email} — Waiting for Gmail redirect after TOTP…")
+        log(f"{email} — Waiting for Google Account after TOTP…")
         _totp_redirect_early = None
         _second_totp_done = False   # guard: only enter second TOTP once
         deadline = time.time() + 30
         while time.time() < deadline:
             url = driver.current_url
-            if "mail.google.com" in get_hostname(url):
+            if signed_in_host(url):
                 break
 
             # ── Second TOTP: Google sometimes asks for TOTP twice ─────────────
@@ -4736,7 +4769,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         url, text = page_state()
         host = get_hostname(url)
 
-        if "mail.google.com" in host:
+        if signed_in_host(url):
             break
 
         # ── "This might not be safe" in interstitial loop — click Continue ──────
@@ -4820,11 +4853,11 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 """)
                 if not clicked:
                     # Nothing to click — just navigate away
-                    driver.get("https://mail.google.com/mail/u/0/#inbox")
+                    driver.get("https://myaccount.google.com/")
             except Exception as e:
                 log(f"gds dismiss error: {e}")
                 try:
-                    driver.get("https://mail.google.com/mail/u/0/#inbox")
+                    driver.get("https://myaccount.google.com/")
                 except Exception:
                     pass
             dismissed = True
@@ -4882,11 +4915,11 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 # Second attempt: try Gmail HTML version — bypasses some interstitials
                 log(f"{email} — uplevelingstep: trying Gmail HTML version")
                 try:
-                    driver.get("https://mail.google.com/mail/h/?zy=e")
+                    driver.get("https://myaccount.google.com/")
                     rand_sleep(800, 1200)
                     _html_url = driver.current_url
                     log(f"{email} — Gmail HTML URL: {_html_url[:70]}")
-                    if "mail.google.com" in get_hostname(_html_url) and "uplevelingstep" not in _html_url:
+                    if signed_in_host(_html_url) and "uplevelingstep" not in _html_url:
                         # HTML Gmail loaded — classify it
                         _html_text = ""
                         try:
@@ -4930,7 +4963,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         elif "signin/continue" in url:
             log(f"{email} — signin/continue, navigating directly to Gmail")
             try:
-                driver.get("https://mail.google.com/mail/u/0/#inbox")
+                driver.get("https://myaccount.google.com/")
             except Exception:
                 pass
             dismissed = True
@@ -4980,7 +5013,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             if not dismissed:
                 # No TOTP secret or field not found — skip to Gmail
                 try:
-                    driver.get("https://mail.google.com/mail/u/0/#inbox")
+                    driver.get("https://myaccount.google.com/")
                     dismissed = True
                 except Exception:
                     break
@@ -5052,7 +5085,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             # Unknown domain — force navigate to Gmail
             log(f"{email} — unknown page ({url[:60]}), forcing Gmail navigation")
             try:
-                driver.get("https://mail.google.com/mail/u/0/#inbox")
+                driver.get("https://myaccount.google.com/")
                 dismissed = True
             except Exception:
                 break
@@ -5062,11 +5095,11 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         else:
             break
 
-    # Wait for Gmail to fully load
+    # Wait for the Google Account home (or Gmail, if Google still redirects there)
     deadline = time.time() + 12
     while time.time() < deadline:
         _cu = driver.current_url
-        if "mail.google.com" in get_hostname(_cu):
+        if signed_in_host(_cu):
             break
         # Early exit: challenge/verification URL — no need to wait
         if (

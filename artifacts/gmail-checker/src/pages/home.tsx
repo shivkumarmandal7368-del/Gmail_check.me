@@ -1359,7 +1359,7 @@ function BrowserChecker() {
                         {(r as any).debugScreenshot && (
                           <div className="mt-2">
                             <p className={`text-[10px] font-mono mb-1 ${r.status === "opened" ? "text-green-400/70" : "text-yellow-400/70"}`}>
-                              {r.status === "opened" ? "📸 Mailbox screenshot:" : "📸 Google ne kya dikhaya:"}
+                              {r.status === "opened" ? "📸 Account screenshot:" : "📸 Google ne kya dikhaya:"}
                             </p>
                             <img src={(r as any).debugScreenshot} alt="screenshot"
                               className="rounded border border-border max-w-[320px] w-full cursor-pointer hover:opacity-90 transition-opacity"
