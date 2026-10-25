@@ -2169,7 +2169,7 @@ try{{
     var _origErr=Error;
     function _PatchedError(){{
       var e=new _origErr(...arguments);
-      if(e.stack)e.stack=e.stack.replace(/\s+at\s+__puppeteer[^\n]*/g,'').replace(/\s+at\s+__selenium[^\n]*/g,'').replace(/\s+at\s+__cdc[^\n]*/g,'');
+      if(e.stack)e.stack=e.stack.replace(/\\s+at\\s+__puppeteer[^\\n]*/g,'').replace(/\\s+at\\s+__selenium[^\\n]*/g,'').replace(/\\s+at\\s+__cdc[^\\n]*/g,'');
       return e;
     }}
     _PatchedError.prototype=_origErr.prototype;
