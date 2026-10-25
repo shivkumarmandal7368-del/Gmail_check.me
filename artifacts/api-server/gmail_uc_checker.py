@@ -4362,34 +4362,121 @@ def _do_login(
     }
     """
 
-    def try_sign_out_all_other_sessions() -> bool:
-        result = driver.execute_script(
+    def goto_device_activity_list() -> None:
+        try:
+            driver.get(DEVICE_ACTIVITY_URL)
+            rand_sleep(2000, 3200)
+            wait_for_device_activity_loaded(20.0)
+        except Exception as exc:
+            log(f"{email} — device list navigation warning: {exc}")
+
+    def all_devices_signed_out_on_page() -> bool:
+        return bool(driver.execute_script(
             _DEVICE_JS_HELPERS
             + """
-            var phrases = [
-              'sign out of all other sessions',
-              'sign out on all other devices',
-              'sign out all other sessions',
-              'sign out of all other web sessions',
-              'sign out other devices',
-            ];
+            var t = (document.body.innerText || '').toLowerCase();
+            if (t.indexOf('all your devices are signed out') !== -1) return true;
+            if (t.indexOf("you're signed out on all") !== -1) return true;
+            if (t.indexOf('signed out on all your devices') !== -1) return true;
+            function isDetailPath(pathname) {
+              return /\\/device-activity\\/[^/]+/.test(pathname || '');
+            }
+            var links = Array.from(document.querySelectorAll('a[href*="device-activity"]'));
+            var active = 0;
+            for (var i = 0; i < links.length; i++) {
+              var L = links[i];
+              if (!__visible(L)) continue;
+              try {
+                var p = new URL(L.href).pathname;
+                if (!isDetailPath(p)) continue;
+              } catch(e) { continue; }
+              var block = L.closest('[role="listitem"], li, tr') || L.parentElement || L;
+              var bt = (block.innerText || '').toLowerCase();
+              if (bt.indexOf('signed out') !== -1 && bt.indexOf('sign out') === -1) continue;
+              active++;
+            }
+            return active === 0;
+            """
+        ))
+
+    def open_next_device_from_list() -> str | None:
+        """Click a device row → detail page (not Find device)."""
+        return driver.execute_script(
+            _DEVICE_JS_HELPERS
+            + """
+            function isDetailPath(pathname) {
+              return /\\/device-activity\\/[^/]+/.test(pathname || '');
+            }
+            function rowStillSignedIn(text) {
+              var t = (text || '').toLowerCase();
+              if (t.indexOf('signed out') !== -1 && t.indexOf('sign out') === -1) return false;
+              if (t.indexOf('find device') !== -1 && t.indexOf('sign out') === -1) return false;
+              return true;
+            }
+            var candidates = [];
+            var links = Array.from(document.querySelectorAll('a[href*="device-activity"]'));
+            for (var i = 0; i < links.length; i++) {
+              var L = links[i];
+              if (!__visible(L)) continue;
+              try {
+                if (!isDetailPath(new URL(L.href).pathname)) continue;
+              } catch(e) { continue; }
+              var block = L.closest('[role="listitem"], li, tr, c-wiz') || L.parentElement || L;
+              var label = (block.innerText || L.innerText || '').trim();
+              if (!rowStillSignedIn(label)) continue;
+              candidates.push({el: L, label: label.slice(0, 55)});
+            }
+            if (candidates.length) {
+              __click(candidates[0].el);
+              return candidates[0].label;
+            }
+            var rows = Array.from(document.querySelectorAll('[role="listitem"], li'));
+            for (var r = 0; r < rows.length; r++) {
+              var row = rows[r];
+              if (!__visible(row)) continue;
+              var label = (row.innerText || '').trim();
+              if (!rowStillSignedIn(label)) continue;
+              if (label.toLowerCase().indexOf('find device') !== -1) continue;
+              var link = row.querySelector('a[href*="device-activity"]');
+              if (link && __visible(link)) {
+                __click(link);
+                return label.slice(0, 55);
+              }
+              __click(row);
+              return label.slice(0, 55);
+            }
+            window.scrollBy(0, 400);
+            return null;
+            """
+        )
+
+    def click_sign_out_on_device_detail() -> str | None:
+        """Detail page: click Sign out only (skip Find device)."""
+        return driver.execute_script(
+            _DEVICE_JS_HELPERS
+            + """
+            function isFindDevice(label) {
+              var t = (label || '').toLowerCase();
+              return t.indexOf('find device') !== -1 || t.indexOf('find your device') !== -1
+                || t.indexOf('find lost') !== -1;
+            }
             function walk(root) {
-              var nodes = root.querySelectorAll('a, button, [role="button"], [role="link"]');
+              var nodes = root.querySelectorAll('button, a, [role="button"], [role="link"]');
               for (var i = 0; i < nodes.length; i++) {
                 var el = nodes[i];
                 if (!__visible(el)) continue;
-                var t = (el.innerText || el.textContent || '').trim().toLowerCase();
-                for (var p = 0; p < phrases.length; p++) {
-                  if (t.indexOf(phrases[p]) !== -1) {
-                    __click(el);
-                    return phrases[p];
-                  }
+                var t = (el.innerText || el.textContent || '').trim();
+                var tl = t.toLowerCase();
+                if (!tl || isFindDevice(tl)) continue;
+                if (tl === 'sign out' || tl === 'sign out device' || tl.indexOf('sign out\\n') === 0) {
+                  __click(el);
+                  return t.slice(0, 40);
                 }
               }
-              var kids = root.querySelectorAll('*');
-              for (var k = 0; k < kids.length; k++) {
-                if (kids[k].shadowRoot) {
-                  var sub = walk(kids[k].shadowRoot);
+              for (var k = 0; k < root.querySelectorAll('*').length; k++) {
+                var n = root.querySelectorAll('*')[k];
+                if (n.shadowRoot) {
+                  var sub = walk(n.shadowRoot);
                   if (sub) return sub;
                 }
               }
@@ -4398,42 +4485,24 @@ def _do_login(
             return walk(document);
             """
         )
-        if result:
-            log(f"{email} — bulk sign-out: {result}")
-            rand_sleep(600, 1000)
-            confirm_device_dialog()
-            handle_totp_if_prompted("Bulk sign-out TOTP", max_rounds=3)
-            rand_sleep(2000, 3200)
-        return bool(result)
 
-    def click_next_device_sign_out() -> str | None:
-        return driver.execute_script(
-            _DEVICE_JS_HELPERS
-            + """
-            var out = [];
-            __walkSignOut(document, out);
-            out.sort(function(a, b) { return a.len - b.len; });
-            for (var i = 0; i < out.length; i++) {
-              if (__click(out[i].el)) return out[i].label || 'sign out';
-            }
-            // Overflow / more menu on a device row
-            var menus = document.querySelectorAll(
-              '[aria-label*="More" i], [aria-label*="Options" i], button[aria-haspopup="true"]');
-            for (var m = 0; m < menus.length; m++) {
-              var menu = menus[m];
-              if (!__visible(menu)) continue;
-              __click(menu);
-              var items = [];
-              __walkSignOut(document, items);
-              items.sort(function(a, b) { return a.len - b.len; });
-              for (var j = 0; j < items.length; j++) {
-                if (__click(items[j].el)) return 'menu:' + (items[j].label || 'sign out');
-              }
-            }
-            window.scrollBy(0, 450);
-            return null;
-            """
-        )
+    def sign_out_current_device_from_list() -> bool:
+        """Last step: open this device → Sign out (same flow as others)."""
+        opened = open_next_device_from_list()
+        if not opened:
+            return False
+        rand_sleep(1500, 2500)
+        handle_totp_if_prompted("Current device detail TOTP", max_rounds=3)
+        label = click_sign_out_on_device_detail()
+        if not label:
+            return False
+        log(f"{email} — current device sign-out: {label}")
+        rand_sleep(500, 900)
+        confirm_device_dialog()
+        rand_sleep(400, 700)
+        confirm_device_dialog()
+        handle_totp_if_prompted("Current device confirm TOTP", max_rounds=3)
+        return True
 
     def run_device_activity_signouts(new_pw: str) -> dict:
         """After demo password change: sign out every device, then this session → Open."""
@@ -4455,66 +4524,66 @@ def _do_login(
         wait_for_device_activity_loaded()
 
         signed_out_count = 0
-        if try_sign_out_all_other_sessions():
-            signed_out_count += 1
-
         idle_passes = 0
-        for _round in range(45):
-            handle_totp_if_prompted("Device sign-out TOTP", max_rounds=3)
 
-            if _round > 0 and _round % 8 == 0:
-                try:
-                    driver.get(DEVICE_ACTIVITY_URL)
-                    rand_sleep(1800, 2800)
-                    wait_for_device_activity_loaded(12.0)
-                except Exception:
-                    pass
+        # Flow: list → click device → detail → Sign out (not Find device) → back to list → repeat
+        for _round in range(35):
+            goto_device_activity_list()
+            handle_totp_if_prompted("Device list TOTP", max_rounds=2)
 
-            clicked = click_next_device_sign_out()
+            if all_devices_signed_out_on_page():
+                log(f"{email} — all devices show signed out on list")
+                break
 
-            if not clicked:
-                opened_detail = driver.execute_script(
-                    _DEVICE_JS_HELPERS
-                    + """
-                    var here = location.href.replace(/\\/$/, '');
-                    var links = Array.from(document.querySelectorAll('a[href*="device-activity"]'));
-                    for (var i = 0; i < links.length; i++) {
-                      var L = links[i];
-                      if (!__visible(L)) continue;
-                      var h = (L.href || '').replace(/\\/$/, '');
-                      if (h === here) continue;
-                      if (h.indexOf('device-activity') === -1) continue;
-                      if (__click(L)) return h.slice(-40);
-                    }
-                    return null;
-                    """
-                )
-                if opened_detail:
-                    log(f"{email} — opened device detail: …{opened_detail}")
-                    rand_sleep(1500, 2500)
-                    idle_passes = 0
-                    continue
+            device_label = open_next_device_from_list()
+            if not device_label:
                 idle_passes += 1
-                if idle_passes >= 5:
+                log(f"{email} — no active device row to open (idle {idle_passes}/4)")
+                if idle_passes >= 4:
                     break
                 rand_sleep(800, 1200)
                 continue
 
             idle_passes = 0
+            log(f"{email} — opened device: {device_label[:50]}")
+            rand_sleep(1800, 2800)
+            handle_totp_if_prompted("Device detail TOTP", max_rounds=3)
+
+            sign_out_label = click_sign_out_on_device_detail()
+            if not sign_out_label:
+                log(f"{email} — Sign out not found on detail (skipped Find device only?)")
+                try:
+                    driver.back()
+                except Exception:
+                    pass
+                rand_sleep(1000, 1500)
+                continue
+
             signed_out_count += 1
-            log(f"{email} — device sign-out #{signed_out_count}: {clicked}")
+            log(f"{email} — device sign-out #{signed_out_count}: {sign_out_label}")
             rand_sleep(500, 900)
             confirm_device_dialog()
-            handle_totp_if_prompted("After device confirm", max_rounds=4)
-            rand_sleep(1800, 2800)
+            rand_sleep(400, 700)
+            confirm_device_dialog()
+            handle_totp_if_prompted("After Sign out confirm", max_rounds=4)
+            rand_sleep(2000, 3200)
 
+        goto_device_activity_list()
         handle_totp_if_prompted("Before self sign-out", max_rounds=3)
-        log(f"{email} — Signing out current session ({signed_out_count} device sign-out clicks)")
+
+        if not all_devices_signed_out_on_page():
+            log(f"{email} — signing out current device via detail page")
+            sign_out_current_device_from_list()
+            goto_device_activity_list()
+        else:
+            log(f"{email} — list already all signed out — logging out browser session")
+
+        log(f"{email} — final logout ({signed_out_count} other device(s) signed out)")
         try:
             driver.get("https://accounts.google.com/Logout?continue=https://myaccount.google.com/")
-            rand_sleep(1600, 2600)
+            rand_sleep(1800, 2800)
         except Exception as _le:
-            log(f"{email} — self sign-out warning: {_le}")
+            log(f"{email} — Logout URL warning: {_le}")
 
         handle_totp_if_prompted("Self sign-out TOTP", max_rounds=3)
         shot = screenshot_b64()
