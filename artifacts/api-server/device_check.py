@@ -448,14 +448,16 @@ log(
 )
 try:
     os.environ["FP_WEBGL_ONLY"] = "1"
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": make_stealth_js(device_fp),
-    })
+    if os.environ.get("FP_NO_JS") != "1":
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": make_stealth_js(device_fp),
+        })
     # Second-pass inject: plugins/mimeTypes override runs after main stealth JS
     # so that Chrome's C++ has already made Navigator.prototype.plugins configurable.
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": make_plugins_override_js(),
-    })
+    if os.environ.get("FP_NO_JS") != "1":
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": make_plugins_override_js(),
+        })
     log("Device fingerprint patches injected ✓")
 except Exception as e:
     print(f"ERROR:Device fingerprint injection failed: {str(e)[:300]}", flush=True)
