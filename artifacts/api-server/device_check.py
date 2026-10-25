@@ -464,17 +464,38 @@ log(
     f"{profile['screenW']}x{profile['screenH']} dpr={profile['dpr']}"
 )
 try:
-    os.environ["FP_WEBGL_ONLY"] = "1"
+    # Minimal patch only. The full stealth script's toString/plugins/canvas lies
+    # are themselves the Tampering signal. Keep the three things that are real
+    # inconsistencies: WebGL renderer, chrome.app, and the console-hook that
+    # fingerprint scores as Developer Tools.
+    _wv = profile["webglVendor"].replace("'", "\\'")
+    _wr = profile["webglRenderer"].replace("'", "\\'")
+    _minimal = f"""
+(function(){{
+  ['log','debug','info','warn','error','table','dir','dirxml','trace'].forEach(function(k){{
+    try{{console[k]=function(){{}};}}catch(e){{}}
+  }});
+  try{{delete window.chrome.app;}}catch(e){{}}
+  try{{delete Navigator.prototype.keyboard; delete navigator.keyboard;}}catch(e){{}}
+  var orig=HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext=function(type){{
+    var ctx=orig.apply(this,arguments);
+    if(!ctx||!type||String(type).indexOf('webgl')===-1)return ctx;
+    var gp=ctx.getParameter.bind(ctx);
+    var wrapped=function(p){{
+      if(p===37445||p===7936)return '{_wv}';
+      if(p===37446||p===7937)return '{_wr}';
+      return gp(p);
+    }};
+    return new Proxy(ctx,{{get:function(t,prop){{
+      if(prop==='getParameter')return wrapped;
+      var v=t[prop]; return typeof v==='function'?v.bind(t):v;
+    }}}});
+  }};
+}})();
+"""
     if os.environ.get("FP_NO_JS") != "1":
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": make_stealth_js(device_fp),
-        })
-    # Second-pass inject: plugins/mimeTypes override runs after main stealth JS
-    # so that Chrome's C++ has already made Navigator.prototype.plugins configurable.
-    if os.environ.get("FP_NO_JS") != "1":
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": make_plugins_override_js(),
-        })
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": _minimal})
     log("Device fingerprint patches injected ✓")
 except Exception as e:
     print(f"ERROR:Device fingerprint injection failed: {str(e)[:300]}", flush=True)
