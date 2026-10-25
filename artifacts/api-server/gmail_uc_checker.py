@@ -1687,8 +1687,8 @@ try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function
     }};
     if(window.__nr){{window.__nr(ctx.prototype.getParameter,'getParameter');window.__nr(ctx.prototype.getSupportedExtensions,'getSupportedExtensions');window.__nr(ctx.prototype.getExtension,'getExtension');window.__nr(ctx.prototype.getShaderPrecisionFormat,'getShaderPrecisionFormat');}}
   }}
-  patch(WebGLRenderingContext,_e1);
-  if(window.WebGL2RenderingContext)patch(WebGL2RenderingContext,_e2);
+  try{{patch(WebGLRenderingContext,_e1);}}catch(e){{}}
+  try{{if(window.WebGL2RenderingContext)patch(WebGL2RenderingContext,_e2);}}catch(e){{}}
   // Chrome binds getParameter on the context instance, so prototype patches
   // never run. Wrap getContext and patch the instance that fingerprint reads.
   var _origGC=HTMLCanvasElement.prototype.getContext;
