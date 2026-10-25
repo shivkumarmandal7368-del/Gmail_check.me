@@ -20,7 +20,7 @@ echo "[vps-install] System packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
-  ca-certificates curl git unzip xvfb xauth nginx \
+  ca-certificates curl git unzip xvfb xauth x11-xkb-utils nginx \
   fonts-liberation libatk-bridge2.0-0 libatk1.0-0 \
   libcups2 libdbus-1-3 libdrm2 libgbm1 libgtk-3-0 libnspr4 libnss3 \
   libx11-xcb1 libxcomposite1 libxdamage1 libxfixes3 libxkbcommon0 libxrandr2 \

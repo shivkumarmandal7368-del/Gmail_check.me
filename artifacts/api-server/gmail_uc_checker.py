@@ -1109,6 +1109,156 @@ def _proxy_country_hint(proxy_url: str) -> str:
     return ""
 
 
+# Language tag → XKB layout. This is the keyboard a phone in that locale uses.
+_KEYBOARD_BY_LANG: dict[str, str] = {
+    "en-us": "us", "en-gb": "gb", "en-ca": "ca", "en-au": "us", "en-nz": "us",
+    "en-in": "in", "en-za": "za", "en-sg": "us", "en-ph": "us", "en-ie": "ie",
+    "de-de": "de", "de-at": "de", "de-ch": "ch",
+    "fr-fr": "fr", "fr-be": "be",
+    "es-es": "es", "es-mx": "latam", "es-ar": "latam", "es-co": "latam",
+    "es-cl": "latam", "es-pe": "latam", "es-ve": "latam",
+    "pt-br": "br", "pt-pt": "pt",
+    "it-it": "it", "nl-nl": "nl", "pl-pl": "pl", "ru-ru": "ru", "tr-tr": "tr",
+    "sv-se": "se", "nb-no": "no", "da-dk": "dk", "fi-fi": "fi",
+    "cs-cz": "cz", "sk-sk": "sk", "ro-ro": "ro", "hu-hu": "hu",
+    "el-gr": "gr", "uk-ua": "ua", "hr-hr": "hr", "bg-bg": "bg",
+    "ja-jp": "jp", "ko-kr": "kr", "zh-cn": "cn", "zh-tw": "tw", "zh-hk": "cn",
+    "th-th": "th", "vi-vn": "vn", "id-id": "id",
+    "ar-sa": "ara", "ar-ae": "ara", "ar-eg": "ara", "ar-ma": "ara",
+    "ar-iq": "ara", "ar-jo": "ara", "ar-kw": "ara",
+    "he-il": "il",
+}
+_KEYBOARD_BY_PRIMARY: dict[str, str] = {
+    "en": "us", "de": "de", "fr": "fr", "es": "es", "pt": "pt", "it": "it",
+    "nl": "nl", "pl": "pl", "ru": "ru", "tr": "tr", "ja": "jp", "ko": "kr",
+    "zh": "cn", "ar": "ara", "th": "th", "vi": "vn", "id": "id",
+}
+
+
+def keyboard_layout_for_language(language: str) -> str:
+    """XKB layout that belongs with this Accept-Language tag."""
+    lang = (language or "en-US").strip().lower().replace("_", "-")
+    if lang in _KEYBOARD_BY_LANG:
+        return _KEYBOARD_BY_LANG[lang]
+    return _KEYBOARD_BY_PRIMARY.get(lang.split("-")[0], "us")
+
+
+def accept_language_for(language: str) -> str:
+    """Accept-Language header for a locale, e.g. en-US → 'en-US,en;q=0.9'."""
+    language = (language or "en-US").strip()
+    primary = language.split("-")[0]
+    if primary.lower() == language.lower():
+        return language
+    return f"{language},{primary};q=0.9"
+
+
+def geo_lookup_ip(ip: str) -> dict | None:
+    """Describe one known exit IP.
+
+    The lookup is direct, not through the proxy, so a rotating gateway cannot
+    answer with a different address than the one Chrome already used.
+    """
+    ip = (ip or "").strip()
+    if not ip or not ip[0].isdigit():
+        return None
+    import requests as req
+    try:
+        r = req.get(
+            "http://ip-api.com/json/"
+            f"{ip}?fields=status,query,country,countryCode,regionName,city,"
+            "timezone,lat,lon,isp,org,as,mobile,proxy,hosting",
+            timeout=12,
+        )
+        d = r.json()
+        if d.get("status") != "success" or not d.get("timezone"):
+            log(f"[geo ip] no timezone for {ip}: {d.get('message', d)}")
+            return None
+        cc = d.get("countryCode") or "US"
+        language = _COUNTRY_LANG.get(cc, "en-US")
+        return {
+            "timezone": d.get("timezone"),
+            "language": language,
+            "countryCode": cc,
+            "lat": float(d.get("lat") or 0),
+            "lon": float(d.get("lon") or 0),
+            "ip": d.get("query") or ip,
+            "city": d.get("city"),
+            "region": d.get("regionName"),
+            "country": d.get("country"),
+            "isp": d.get("isp"),
+            "org": d.get("org"),
+            "as": d.get("as"),
+            "mobile": d.get("mobile"),
+            "proxy": d.get("proxy"),
+            "hosting": d.get("hosting"),
+            "keyboard": keyboard_layout_for_language(language),
+        }
+    except Exception as e:
+        log(f"[geo ip] lookup failed for {ip}: {e}")
+        return None
+
+
+def apply_keyboard_layout(layout: str, display: str | None = None) -> bool:
+    """Point the virtual display's keyboard at the exit IP's locale."""
+    layout = (layout or "").strip()
+    if not layout:
+        return False
+    disp = display or os.environ.get("DISPLAY") or ""
+    cmd = ["setxkbmap", "-layout", layout]
+    if disp:
+        cmd[1:1] = ["-display", disp]
+    try:
+        proc = subprocess.run(cmd, check=False, timeout=5, capture_output=True, text=True)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            log(f"Keyboard layout {layout} not applied: {detail[:160]}")
+            return False
+        log(f"Keyboard layout set → {layout}")
+        return True
+    except FileNotFoundError:
+        log("Keyboard layout skipped — setxkbmap is not installed")
+        return False
+    except Exception as e:
+        log(f"Keyboard layout skipped ({layout}): {e}")
+        return False
+
+
+def read_browser_exit_ip(driver) -> str | None:
+    """Read the IP Chrome itself is using. A separate requests call can rotate."""
+    try:
+        driver.set_page_load_timeout(25)
+        driver.get("https://api.ipify.org?format=json")
+        body = driver.execute_script("return document.body && document.body.innerText || ''") or ""
+        ip = json.loads(body).get("ip")
+        return ip or None
+    except Exception as e:
+        log(f"Chrome exit IP read failed: {e}")
+        return None
+    finally:
+        try:
+            driver.set_page_load_timeout(180)
+        except Exception:
+            pass
+
+
+def lock_fingerprint_to_exit_ip(fp: dict, ip: str | None) -> dict:
+    """Overwrite locale fields so they describe this exact exit IP."""
+    live = geo_lookup_ip(ip or "")
+    if not live:
+        fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-US")
+        return fp
+    for key, value in live.items():
+        if value is not None:
+            fp[key] = value
+    fp["geoLocked"] = True
+    fp["keyboard"] = live.get("keyboard") or keyboard_layout_for_language(fp.get("language") or "en-US")
+    log(
+        f"LOCALE_LOCK ip={fp.get('ip')} tz={fp.get('timezone')} "
+        f"lang={fp.get('language')} keyboard={fp.get('keyboard')} cc={fp.get('countryCode')}"
+    )
+    return fp
+
+
 def get_or_create_fingerprint(
     profile_dir: str,
     proxy: str | None = None,
@@ -3098,6 +3248,26 @@ def check_gmail(
 
     log("Chrome launched")
 
+    # Locale follows the IP Chrome is actually using, not the preflight request.
+    # A rotating gateway can hand those two calls different exits.
+    exit_ip = read_browser_exit_ip(driver)
+    if exit_ip:
+        lock_fingerprint_to_exit_ip(fp, exit_ip)
+        apply_keyboard_layout(fp.get("keyboard") or "us", os.environ.get("DISPLAY"))
+        try:
+            with open(os.path.join(profile_dir, "fingerprint.json"), "w") as _locale_fp:
+                json.dump(fp, _locale_fp, indent=2)
+        except Exception as _locale_save_err:
+            log(f"Locale fingerprint save skipped: {_locale_save_err}")
+    else:
+        fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-US")
+        log("Chrome exit IP unread — keeping the preflight locale")
+    if fresh_profile:
+        log(
+            f"FRESH_DEVICE canvas={fp.get('canvasSeed')} profile={profile_dir} "
+            f"tz={fp.get('timezone')} lang={fp.get('language')} keyboard={fp.get('keyboard')}"
+        )
+
     # Inject stealth patches on every new page (fingerprint-specific values)
     try:
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
@@ -3217,9 +3387,6 @@ def check_gmail(
         log(f"CDP Emulation UA override set → platform={fp['platform']} (with userAgentMetadata)")
     except Exception as e:
         log(f"CDP Emulation UA override warning (non-fatal): {e}")
-
-    # Exit IP fetch skipped — each account uses a unique sticky session ID for IP isolation
-    exit_ip = None
 
     _login_result: dict = {}
     try:

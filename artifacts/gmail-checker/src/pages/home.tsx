@@ -1231,7 +1231,7 @@ function BrowserChecker() {
                 </div>
               </div>
               <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
-                {freshProfile ? "⚠️ Naya device har run — account 2-3 din mein flag ho sakta hai" : "✓ Same device reuse — account safe, faster second check"}
+                {freshProfile ? "Naya profile aur naya canvas har run. Timezone, language aur keyboard Chrome ke IP se match honge." : "Same device reuse. Timezone, language aur keyboard Chrome ke IP se match honge."}
               </p>
             </button>
 
@@ -1841,7 +1841,13 @@ function DeviceChecker() {
   const [logs,         setLogs]         = useState<string[]>([]);
   const [shots,        setShots]        = useState<{ label: string; b64: string }[]>([]);
   const [errMsg,       setErrMsg]       = useState("");
+  const [freshProfile, setFreshProfile] = useState<boolean>(() => {
+    try { return JSON.parse(localStorage.getItem("vbc_fresh") || "false") === true; } catch { return false; }
+  });
   const abortRef  = useRef<AbortController | null>(null);
+  useEffect(() => {
+    try { localStorage.setItem("vbc_fresh", JSON.stringify(freshProfile)); } catch {}
+  }, [freshProfile]);
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
@@ -1860,7 +1866,7 @@ function DeviceChecker() {
     abortRef.current = abort;
 
     try {
-      const body: Record<string, unknown> = { deviceIndex };
+      const body: Record<string, unknown> = { deviceIndex, freshProfile };
       if (proxyMode === "custom" && proxyText.trim()) body.proxy = proxyText.trim();
 
       const resp = await fetch("/api/device-check/run", {
@@ -2008,6 +2014,24 @@ function DeviceChecker() {
           </CardContent>
         </Card>
       </div>
+
+      <button onClick={() => status !== "running" && setFreshProfile(f => !f)} disabled={status === "running"}
+        className={cn("w-full rounded-lg border p-3 text-left transition-colors",
+          freshProfile ? "border-blue-500/40 bg-blue-500/5" : "border-border bg-card/30")}>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[10px] font-mono uppercase tracking-widest text-blue-400/80 flex items-center gap-1">
+            <Smartphone className="w-3 h-3" /> Fresh Device Per Run
+          </span>
+          <div className={cn("w-8 h-4 rounded-full transition-colors relative", freshProfile ? "bg-blue-500" : "bg-border")}>
+            <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", freshProfile ? "left-4" : "left-0.5")} />
+          </div>
+        </div>
+        <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
+          {freshProfile
+            ? "Naya Chrome profile aur naya canvas — purana visitor reuse nahi hoga. Timezone, language aur keyboard us IP par rahenge jo Chrome use kare."
+            : "Same device reuse. Timezone, language aur keyboard phir bhi Chrome ke exit IP se match honge."}
+        </p>
+      </button>
 
       {/* Run button row */}
       <div className="flex items-center gap-3">

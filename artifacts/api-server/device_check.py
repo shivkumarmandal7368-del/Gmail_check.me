@@ -46,6 +46,10 @@ try:
         parse_proxy,
         DEVICE_FINGERPRINT_SNAPSHOT_PATH,
         _cleanup_stale_chrome_artifacts,
+        geo_lookup_ip,
+        accept_language_for,
+        apply_keyboard_layout,
+        keyboard_layout_for_language,
     )
 except Exception as e:
     print(f"ERROR:Cannot import PHONE_PROFILES: {e}", flush=True)
@@ -177,6 +181,18 @@ if PROXY_URL:
         sys.exit(1)
 else:
     proxy_exit = direct_exit or "direct"
+
+FRESH_PROFILE = os.environ.get("FRESH_PROFILE", "").strip().lower() in ("1", "true", "yes")
+_boot_geo = geo_lookup_ip(proxy_exit) if proxy_exit else None
+_boot_lang = (_boot_geo or {}).get("language") or "en-US"
+if FRESH_PROFILE:
+    import tempfile
+    _profile_dir = tempfile.mkdtemp(prefix=f"dc_fresh_{device_index}_")
+    log(f"FRESH_DEVICE new Chrome profile {_profile_dir}")
+else:
+    _profile_dir = f"/tmp/vanguard-mx-device-profile-{device_index}"
+    os.makedirs(_profile_dir, exist_ok=True)
+    log(f"REUSED_DEVICE Chrome profile {_profile_dir}")
 
 ext_path = None
 
@@ -333,7 +349,7 @@ o.add_argument("--touch-events=enabled")
 # Do NOT also pass --force-device-scale-factor. Combined with
 # Emulation.setDeviceMetricsOverride it double-scales the layout viewport
 # (inner ~2x outer) which fingerprint.com scores as Developer Tools + Tampering.
-o.add_argument("--lang=en-US,en;q=0.9")
+o.add_argument(f"--lang={_boot_lang}")
 o.add_argument(f"--force-device-memory={profile['deviceMemory']}")
 o.add_argument("--use-angle=swiftshader")
 o.add_argument("--enable-webgl")
@@ -363,6 +379,7 @@ log(f"Chrome binary: {chromium_path} (version_main={chrome_version_main})")
 try:
     driver = uc.Chrome(
         options=o,
+        user_data_dir=_profile_dir,
         browser_executable_path=chromium_path,
         version_main=chrome_version_main,
         use_subprocess=True,
@@ -375,6 +392,7 @@ except Exception as e:
 
 time.sleep(5)
 log("Chrome launched ✓")
+browser_ip = None
 
 if proxy_info:
     # Confirm the browser itself is using the proxy.
@@ -411,30 +429,53 @@ else:
 # Device Check must use the same browser fingerprint engine as Browser Check;
 # changing only the UA leaves WebGL, navigator, canvas, and hardware signals
 # identifying the Replit Chromium host.
-_exit_ip = proxy_exit if proxy_info else direct_exit
-_tz, _cc, _lat, _lon = "America/New_York", "US", 39.8283, -98.5795
-try:
-    import requests as _rq
-    _g = _rq.get(
-        f"http://ip-api.com/json/{_exit_ip}?fields=status,timezone,countryCode,lat,lon",
-        timeout=8,
-    ).json()
-    if _g.get("status") == "success" and _g.get("timezone"):
-        _tz = _g["timezone"]
-        _cc = _g.get("countryCode") or _cc
-        _lat = _g.get("lat", _lat)
-        _lon = _g.get("lon", _lon)
-    log(f"Exit geo {_exit_ip} → tz={_tz} cc={_cc}")
-except Exception as _geo_err:
-    log(f"Exit geo lookup failed ({_geo_err}) — using {_tz}")
+# Locale is taken from the IP Chrome just used. The preflight IP can be a
+# different exit on a rotating proxy, so it is only a fallback.
+_exit_ip = browser_ip or (proxy_exit if proxy_info else direct_exit)
+_live = geo_lookup_ip(_exit_ip) if _exit_ip else None
+if _live:
+    _tz = _live["timezone"]
+    _lang = _live["language"]
+    _cc = _live["countryCode"]
+    _lat = _live["lat"]
+    _lon = _live["lon"]
+    _kb = _live["keyboard"]
+else:
+    _tz, _lang, _cc = "America/New_York", _boot_lang, "US"
+    _lat, _lon = 39.8283, -98.5795
+    _kb = keyboard_layout_for_language(_lang)
+log(f"LOCALE_LOCK ip={_exit_ip} tz={_tz} lang={_lang} keyboard={_kb} cc={_cc}")
+apply_keyboard_layout(_kb, os.environ.get("DISPLAY"))
+
+_saved_seed = None
+_saved_audio = None
+_saved_webgl = None
+if not FRESH_PROFILE:
+    try:
+        with open(DEVICE_FINGERPRINT_SNAPSHOT_PATH) as _sf:
+            _prev = json.load(_sf)
+        if _prev.get("deviceIndex") == device_index and _prev.get("canvasSeed"):
+            _saved_seed = int(_prev["canvasSeed"])
+            _saved_audio = _prev.get("audioNoise")
+            _saved_webgl = _prev.get("webglNoise")
+    except Exception:
+        _saved_seed = None
+_canvas_seed = random.randint(1, 254) if FRESH_PROFILE or not _saved_seed else _saved_seed
+_audio_noise = round(random.uniform(0.00001, 0.00009), 8) if FRESH_PROFILE or _saved_audio is None else _saved_audio
+_webgl_noise = round(random.uniform(0.000001, 0.000009), 8) if FRESH_PROFILE or _saved_webgl is None else _saved_webgl
+if FRESH_PROFILE:
+    log(f"FRESH_DEVICE new canvas seed {_canvas_seed}")
+else:
+    log(f"REUSED_DEVICE canvas seed {_canvas_seed}")
 
 device_fp = dict(profile)
 device_fp.update({
-    "canvasSeed": random.randint(1, 65535),
-    "audioNoise": round(random.uniform(0.00001, 0.00009), 8),
-    "webglNoise": round(random.uniform(0.000001, 0.000009), 8),
+    "canvasSeed": _canvas_seed,
+    "audioNoise": _audio_noise,
+    "webglNoise": _webgl_noise,
     "timezone": _tz,
-    "language": "en-US",
+    "language": _lang,
+    "keyboard": _kb,
     "countryCode": _cc,
     "batteryLevel": round(random.uniform(0.25, 0.92), 2),
     "batteryCharging": False,
@@ -446,7 +487,7 @@ device_fp.update({
     "lat": _lat,
     "lon": _lon,
     "geoLocked": True,
-    "ip": proxy_exit,
+    "ip": _exit_ip,
 })
 # Keep an exact local handoff for Browser Check. This file contains only the
 # selected device fingerprint; it never contains account credentials or proxy
@@ -498,6 +539,19 @@ try:
   }};
 }})();
 """
+    if FRESH_PROFILE:
+        # A wiped cookie jar is not a new device: fingerprint.com links the same
+        # canvas. This is the same per-account canvas shift Browser Check uses.
+        _minimal += f"""
+(function(){{
+  var seed={int(_canvas_seed)};
+  function _xc(d){{if(!d||!d.data||d.data.length<4)return;d.data[0]=d.data[0]^seed;d.data[3]=d.data[3]^((seed*7)&255);if(d.data.length>8)d.data[4]=d.data[4]^((seed*3)&255);}}
+  var o=HTMLCanvasElement.prototype.toDataURL;
+  HTMLCanvasElement.prototype.toDataURL=function(){{var c=this.getContext('2d');if(c){{var d=c.getImageData(0,0,this.width||1,this.height||1);_xc(d);c.putImageData(d,0,0);}}return o.apply(this,arguments);}};
+  var og=CanvasRenderingContext2D.prototype.getImageData;
+  CanvasRenderingContext2D.prototype.getImageData=function(){{var d=og.apply(this,arguments);_xc(d);return d;}};
+}})();
+"""
     if os.environ.get("FP_NO_JS") != "1":
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": _minimal})
     log("Device fingerprint patches injected ✓")
@@ -517,7 +571,7 @@ cv_major = chrome.split(".")[0]
     # redundant. Avoid enabling any CDP domain that is not strictly necessary.
 try:
     driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": _tz})
-    driver.execute_cdp_cmd("Emulation.setLocaleOverride",   {"locale": "en-US"})
+    driver.execute_cdp_cmd("Emulation.setLocaleOverride",   {"locale": _lang})
     # Override hardware concurrency at the CDP level so it matches JS patches
     try:
         driver.execute_cdp_cmd("Emulation.setHardwareConcurrencyOverride",
@@ -577,14 +631,14 @@ try:
         try:
             driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
                 "userAgent": UA,
-                "acceptLanguage": "en-US,en;q=0.9",
+                "acceptLanguage": accept_language_for(_lang),
                 "platform": profile["platform"],
                 "userAgentMetadata": {**_ua_meta, "formFactors": ["Mobile"]},
             })
         except Exception:
             driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
                 "userAgent": UA,
-                "acceptLanguage": "en-US,en;q=0.9",
+                "acceptLanguage": accept_language_for(_lang),
                 "platform": profile["platform"],
                 "userAgentMetadata": _ua_meta,
             })
@@ -696,6 +750,7 @@ try:
         "iw:innerWidth,ih:innerHeight,ow:outerWidth,oh:outerHeight,dpr:devicePixelRatio,"
         "app:!!(window.chrome&&window.chrome.app),kb:('keyboard' in navigator),"
         "wd:navigator.webdriver,tz:Intl.DateTimeFormat().resolvedOptions().timeZone,"
+        "lang:navigator.language,langs:(navigator.languages||[]).join(','),"
         "gl:(function(){try{var g=document.createElement('canvas').getContext('webgl');"
         "var e=g.getExtension('WEBGL_debug_renderer_info');"
         "return g.getParameter(e.UNMASKED_RENDERER_WEBGL);}catch(err){return String(err);}})(),"
