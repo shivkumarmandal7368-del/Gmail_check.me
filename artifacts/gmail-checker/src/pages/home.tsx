@@ -23,31 +23,75 @@ import { Progress } from "@/components/ui/progress"
 import {
   Download, Terminal, CheckCircle2, XCircle, AlertTriangle,
   HelpCircle, Activity, ShieldAlert, Smartphone,
-  Lock, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle, Zap
+  Lock, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle, Zap, Bot
 } from "lucide-react"
+import { RobotChecker } from "@/pages/RobotChecker";
 
 type LoginList = "opened" | "not_opened" | "delete" | "unknown" | "fingerprint";
+type AppMode = "browser" | "robot";
 
 export default function Home() {
+  const [mode, setMode] = useState<AppMode>(() => {
+    try {
+      return localStorage.getItem("vmx_mode") === "robot" ? "robot" : "browser";
+    } catch {
+      return "browser";
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("vmx_mode", mode);
+    } catch {
+      /* ignore */
+    }
+  }, [mode]);
+
   return (
     <div className="min-h-screen bg-background text-foreground p-4 md:p-6 font-sans">
       <div className="max-w-6xl mx-auto space-y-5">
-        <header className="flex items-center justify-between pb-4 border-b border-border">
+        <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-border">
           <div className="flex items-center gap-3">
             <div className="bg-primary/10 p-2 rounded-lg border border-primary/20">
-              <Globe className="w-5 h-5 text-primary" />
+              {mode === "robot" ? <Bot className="w-5 h-5 text-primary" /> : <Globe className="w-5 h-5 text-primary" />}
             </div>
             <div>
               <h1 className="text-xl font-semibold tracking-tight">Vanguard MX</h1>
-              <p className="text-sm text-muted-foreground font-mono">Browser Check</p>
+              <p className="text-sm text-muted-foreground font-mono">
+                {mode === "robot" ? "Robot Check" : "Browser Check"}
+              </p>
             </div>
           </div>
-          <div className="flex items-center gap-2 text-sm text-muted-foreground bg-card px-3 py-1.5 rounded-full border border-border">
-            <Activity className="w-4 h-4 text-primary" />
-            <span className="font-mono">System Online</span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex rounded-lg border border-border overflow-hidden font-mono text-sm">
+              <button
+                type="button"
+                onClick={() => setMode("browser")}
+                className={cn(
+                  "px-3 py-1.5 flex items-center gap-1.5 transition-colors",
+                  mode === "browser" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted/50",
+                )}
+              >
+                <Globe className="w-3.5 h-3.5" /> Browser
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode("robot")}
+                className={cn(
+                  "px-3 py-1.5 flex items-center gap-1.5 transition-colors border-l border-border",
+                  mode === "robot" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted/50",
+                )}
+              >
+                <Bot className="w-3.5 h-3.5" /> Robot
+              </button>
+            </div>
+            <div className="flex items-center gap-2 text-sm text-muted-foreground bg-card px-3 py-1.5 rounded-full border border-border">
+              <Activity className="w-4 h-4 text-primary" />
+              <span className="font-mono">System Online</span>
+            </div>
           </div>
         </header>
-        <BrowserChecker />
+        {mode === "robot" ? <RobotChecker /> : <BrowserChecker />}
       </div>
     </div>
   );

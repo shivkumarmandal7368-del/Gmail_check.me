@@ -31,15 +31,40 @@ const router: IRouter = Router();
 // ── POST /jobs — create & start a background job ──────────────────────────────
 
 router.post("/jobs", (req: Request, res: Response) => {
-  const parsed = BrowserCheckEmailsBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
+  const robotCheckOnly = req.body.robotCheckOnly === true;
+
+  let credentials: Array<{ email: string; password: string; totp?: string }>;
+  if (robotCheckOnly) {
+    const fromEmails = Array.isArray(req.body.emails)
+      ? (req.body.emails as unknown[])
+          .filter((e): e is string => typeof e === "string" && e.trim().includes("@"))
+          .map(e => e.trim().toLowerCase())
+      : [];
+    if (fromEmails.length > 0) {
+      credentials = fromEmails.map(email => ({ email, password: "robot-check-only" }));
+    } else {
+      const parsed = BrowserCheckEmailsBody.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.message });
+        return;
+      }
+      credentials = parsed.data.credentials.map(c => ({
+        email: c.email.trim(),
+        password: "robot-check-only",
+        ...(c.totp ? { totp: c.totp } : {}),
+      }));
+    }
+  } else {
+    const parsed = BrowserCheckEmailsBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    credentials = parsed.data.credentials as Array<{ email: string; password: string; totp?: string }>;
   }
 
-  const { credentials } = parsed.data;
   if (credentials.length === 0) {
-    res.status(400).json({ error: "No credentials provided" });
+    res.status(400).json({ error: robotCheckOnly ? "No emails provided" : "No credentials provided" });
     return;
   }
 
@@ -75,13 +100,14 @@ router.post("/jobs", (req: Request, res: Response) => {
       : undefined;
 
   const jobId = startJob({
-    credentials: credentials as Array<{ email: string; password: string; totp?: string }>,
+    credentials,
     proxy,
     proxies: proxies.length > 0 ? proxies : undefined,
     concurrency,
     freshProfile,
     deviceIndex,
     changePasswordAfterLogin,
+    robotCheckOnly,
   });
 
   res.json({ jobId });

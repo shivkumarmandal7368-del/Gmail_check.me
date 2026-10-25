@@ -3150,6 +3150,7 @@ def main():
     fresh_profile     = bool(data.get("freshProfile", False))
     change_password   = bool(data.get("changePasswordAfterLogin", False))
     sign_out_sessions = bool(data.get("signOutSessions", False))
+    robot_check_only  = bool(data.get("robotCheckOnly", False))
     raw_device_index  = data.get("deviceIndex")
     device_index      = (
         int(raw_device_index)
@@ -3161,7 +3162,7 @@ def main():
     result = check_gmail(
         email, password, totp_secret, proxy, fresh_profile,
         proxy_for_ip_check, device_index, change_password,
-        sign_out_sessions,
+        sign_out_sessions, robot_check_only,
     )
 
     # Auto-retry up to 3 times if Google blocked automation detection.
@@ -3371,6 +3372,7 @@ def check_gmail(
     device_index: int | None = None,
     change_password_after_login: bool = False,
     sign_out_sessions: bool = False,
+    robot_check_only: bool = False,
 ) -> dict:
     totp_code = generate_totp(totp_secret) if totp_secret else None
 
@@ -3743,6 +3745,7 @@ def check_gmail(
             driver, email, password, totp_code, totp_secret, fresh_profile,
             change_password_after_login,
             sign_out_sessions,
+            robot_check_only,
         )
 
         # ── Post-login geo fallback (driver still open here!) ──────────────────
@@ -3857,6 +3860,7 @@ def _do_login(
     fresh_profile: bool = False,
     change_password_after_login: bool = False,
     sign_out_sessions: bool = False,
+    robot_check_only: bool = False,
 ) -> dict:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
@@ -6067,15 +6071,18 @@ def _do_login(
                 if _rc_result == "image"
                 else "Google showed I'm not a robot and the checkbox did not open the password page."
             )
-            return {
+            _fail = {
                 "status": "verification_required",
                 "reason": _why,
                 "totpCode": totp_code,
                 "debugScreenshot": shot,
             }
+            if robot_check_only:
+                _fail["robotOutcome"] = "robot"
+            return _fail
 
     result = classify(url, text)
-    if result:
+    if result and not robot_check_only:
         return result
 
     PW_SELECTORS = [
@@ -6084,6 +6091,52 @@ def _do_login(
         'input[name="password"]',
         '#password input',
     ]
+
+    if robot_check_only:
+        log(f"{email} — Robot check: looking for password page (no password typed)")
+        pw_probe = wait_for_any(PW_SELECTORS, timeout=8)
+        url, text = page_state()
+        if pw_probe:
+            shot = screenshot_b64()
+            return {
+                "status": "opened",
+                "reason": "Robot check: password page (not robot)",
+                "totpCode": totp_code,
+                "robotOutcome": "not_robot",
+                "debugScreenshot": shot,
+            }
+        if "challenge/recaptcha" in url:
+            shot = screenshot_b64()
+            return {
+                "status": "verification_required",
+                "reason": "Robot check: captcha / I'm not a robot",
+                "totpCode": totp_code,
+                "robotOutcome": "robot",
+                "debugScreenshot": shot,
+            }
+        if result:
+            out = dict(result)
+            reason_l = str(out.get("reason", "")).lower()
+            if (
+                out.get("status") == "verification_required"
+                and any(x in reason_l for x in (
+                    "image puzzle", "not a robot", "recaptcha", "captcha",
+                ))
+            ):
+                out["robotOutcome"] = "robot"
+            else:
+                out["robotOutcome"] = "unknown"
+            out.setdefault("debugScreenshot", screenshot_b64())
+            out.setdefault("totpCode", totp_code)
+            return out
+        shot = screenshot_b64()
+        return {
+            "status": "unknown",
+            "reason": f"Robot check: password page nahi mila ({url[:80]})",
+            "totpCode": totp_code,
+            "robotOutcome": "unknown",
+            "debugScreenshot": shot,
+        }
 
     # ── Step 3: Enter password ────────────────────────────────────────────────
     log(f"{email} — Step 3: typing password")

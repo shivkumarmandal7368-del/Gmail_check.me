@@ -41,6 +41,7 @@ export interface JobResult {
   proxySession?: string;
   durationMs?: number;
   newPassword?: string;
+  robotOutcome?: string;
 }
 
 export interface Job {
@@ -60,6 +61,8 @@ export interface Job {
   deviceIndex?: number;
   /** Demo: random password on myaccount signinoptions/password after login */
   changePasswordAfterLogin?: boolean;
+  /** Email-only flow: stop after robot vs password page */
+  robotCheckOnly?: boolean;
 
   /** Progress */
   total: number;
@@ -151,6 +154,7 @@ export function createJob(params: {
   freshProfile: boolean;
   deviceIndex?: number;
   changePasswordAfterLogin?: boolean;
+  robotCheckOnly?: boolean;
 }): Job {
   const id = randomBytes(8).toString("hex");
   const job: Job = {
