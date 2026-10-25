@@ -4251,15 +4251,16 @@ def _do_login(
                     value,
                 )
 
-        def click_submit() -> None:
-            driver.execute_script(
+        def click_password_form_continue() -> bool:
+            """Primary form button — not the post-fill 'stay signed in' dialog."""
+            return bool(driver.execute_script(
                 """
-                var labels = ['change password', 'save password', 'save', 'next', 'continue', 'done'];
+                var labels = ['save password', 'save', 'next', 'continue', 'done', 'update'];
                 var btns = Array.from(document.querySelectorAll('button, [role="button"], div[role="button"]'));
                 for (var label of labels) {
                     var hit = btns.find(function(b) {
                         var t = (b.innerText || b.textContent || '').trim().toLowerCase();
-                        return t.indexOf(label) !== -1;
+                        return t === label || t.indexOf(label) === 0;
                     });
                     if (hit && !hit.disabled) { hit.click(); return true; }
                 }
@@ -4267,7 +4268,45 @@ def _do_login(
                 if (submit && !submit.disabled) { submit.click(); return true; }
                 return false;
                 """
-            )
+            ))
+
+        def confirm_stay_signed_in_dialog() -> bool:
+            """Dialog: 'You'll stay signed in on these devices after changing your password'."""
+            return bool(driver.execute_script(
+                """
+                function walk(root) {
+                  var btns = Array.from(root.querySelectorAll('button, [role="button"]'));
+                  for (var b of btns) {
+                    var t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    if (t === 'change password' && !b.disabled) {
+                      b.click();
+                      return true;
+                    }
+                  }
+                  for (var n of root.querySelectorAll('*')) {
+                    if (n.shadowRoot && walk(n.shadowRoot)) return true;
+                  }
+                  return false;
+                }
+                var body = (document.body.innerText || '').toLowerCase();
+                if (body.indexOf('stay signed in') === -1
+                    && body.indexOf('changing your password') === -1
+                    && body.indexOf('after changing your') === -1) {
+                  return false;
+                }
+                return walk(document);
+                """
+            ))
+
+        def submit_password_change_form() -> None:
+            click_password_form_continue()
+            rand_sleep(700, 1100)
+            for _ in range(4):
+                if confirm_stay_signed_in_dialog():
+                    log(f"{email} — clicked 'Change password' on stay-signed-in dialog")
+                    rand_sleep(2200, 3500)
+                else:
+                    break
 
         def wait_fields(timeout: float = 18.0) -> list:
             deadline = time.time() + timeout
@@ -4314,8 +4353,8 @@ def _do_login(
             except Exception:
                 pass
             rand_sleep(400, 700)
-            click_submit()
-            rand_sleep(3000, 4500)
+            submit_password_change_form()
+            rand_sleep(1500, 2500)
             clear_totp_pages(max_rounds=2, pause_label="After password change")
 
             url_after, text_after = page_state()
@@ -4333,10 +4372,21 @@ def _do_login(
                     else:
                         fill_field(fields2[0], new_pw)
                     rand_sleep(200, 400)
-                    click_submit()
-                    rand_sleep(3000, 4500)
+                    submit_password_change_form()
+                    rand_sleep(1500, 2500)
                     clear_totp_pages(max_rounds=2, pause_label="After password change retry")
                     url_after, text_after = page_state()
+
+            if is_google_password_change_url(url_after):
+                for _dlg in range(4):
+                    if confirm_stay_signed_in_dialog():
+                        log(f"{email} — dialog confirm pass {_dlg + 1}")
+                        rand_sleep(2200, 3500)
+                        url_after, text_after = page_state()
+                        if not is_google_password_change_url(url_after):
+                            break
+                    else:
+                        break
 
             if not is_google_password_change_url(url_after):
                 try:
