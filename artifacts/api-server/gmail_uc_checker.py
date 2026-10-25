@@ -4634,8 +4634,8 @@ def _do_login(
     _SESSION_KIND_ORDER = (
         "android_phone",
         "chrome_device",
-        "windows_computer",
         "linux_computer",
+        "windows_computer",
         "ios",
         "mac",
         "session",
@@ -4857,6 +4857,49 @@ def _do_login(
         return_to_device_list()
         return True
 
+    def _tap_sign_out_button() -> str:
+        """Trusted tap on Sign out. Skips Find device and already-signed-out rows."""
+        hit = driver.execute_script(
+            """
+            function norm(raw) {
+              return (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+            }
+            function ok(t) {
+              if (!t || t.length > 24) return false;
+              if (t.indexOf('find device') !== -1 || t.indexOf('signed out') !== -1) return false;
+              return t === 'sign out' || t === 'sign out device';
+            }
+            function walk(root) {
+              var best = null;
+              var nodes = root.querySelectorAll('button, a, [role="button"], [role="link"], span');
+              for (var i = 0; i < nodes.length; i++) {
+                var node = nodes[i];
+                var t = norm(node.innerText || node.textContent || '');
+                if (!ok(t)) continue;
+                var clickable = node.closest('button, a, [role="button"], [role="link"]') || node;
+                var r = clickable.getBoundingClientRect();
+                if (r.width < 2 || r.height < 2) continue;
+                if (!best || t.length < best.len) best = {el: clickable, len: t.length, t: t};
+              }
+              var kids = root.querySelectorAll('*');
+              for (var k = 0; k < kids.length; k++) {
+                if (!kids[k].shadowRoot) continue;
+                var sub = walk(kids[k].shadowRoot);
+                if (sub && (!best || sub.len < best.len)) best = sub;
+              }
+              return best;
+            }
+            var hit = walk(document);
+            if (hit) { try { hit.el.scrollIntoView({block:'center'}); } catch (e) {} }
+            return hit;
+            """
+        )
+        if not isinstance(hit, dict) or hit.get("el") is None:
+            return ""
+        if not _trusted_tap(hit["el"]):
+            return ""
+        return str(hit.get("t") or "sign out")
+
     def run_device_activity_signouts(new_pw: str) -> dict:
         """After demo password change: sign out every device, then this session → Open."""
         log(f"{email} — Device activity: sign out all sessions")
@@ -4883,26 +4926,30 @@ def _do_login(
             }
         def list_devices_fast() -> list[dict]:
             merged: dict[str, dict] = {}
-            for item in _gather_device_sessions_js():
-                href = item.get("href") or ""
-                if href:
-                    merged[href] = item
-            if len(merged) < 4:
-                try:
-                    driver.execute_script(
-                        "window.scrollTo(0, Math.max(document.body.scrollHeight, 800));"
-                    )
-                except Exception:
-                    pass
-                time.sleep(0.15)
+
+            def absorb() -> None:
                 for item in _gather_device_sessions_js():
                     href = item.get("href") or ""
                     if href:
                         merged[href] = item
+
+            absorb()
+            for y in (500, 1100, 1800):
                 try:
-                    driver.execute_script("window.scrollTo(0, 0);")
+                    driver.execute_script(
+                        "window.scrollTo(0, arguments[0]);"
+                        "var m=document.querySelector('[role=main]');"
+                        "if(m)m.scrollTop=arguments[0];",
+                        y,
+                    )
                 except Exception:
                     pass
+                time.sleep(0.12)
+                absorb()
+            try:
+                driver.execute_script("window.scrollTo(0, 0);")
+            except Exception:
+                pass
             out = list(merged.values())
             out.sort(
                 key=lambda s: (
@@ -4915,50 +4962,64 @@ def _do_login(
             return out
 
         def click_sign_out_ready() -> str | None:
-            deadline = time.time() + 3.0
+            deadline = time.time() + 4.0
             while time.time() < deadline:
-                label = click_sign_out_on_device_detail()
+                label = _tap_sign_out_button()
                 if label:
                     return label
                 time.sleep(0.2)
             return None
 
         def wait_auto_back_to_list() -> bool:
-            """Google returns to the list and shows Signed out under the device."""
-            deadline = time.time() + 3.5
+            """Sign out confirm, then Google returns to the list by itself."""
+            deadline = time.time() + 6.0
             while time.time() < deadline:
                 if _device_url_kind() == "list":
                     return True
-                confirm_device_dialog()
-                time.sleep(0.15)
+                _tap_sign_out_button()
+                time.sleep(0.25)
             if _device_url_kind() == "detail":
                 try:
                     driver.back()
                 except Exception:
                     pass
-                time.sleep(0.25)
+                time.sleep(0.3)
             return _device_url_kind() == "list"
 
         done_hrefs: set[str] = set()
         signed_out_count = 0
         kinds_done: dict[str, int] = {}
         kinds_seen: set[str] = set()
+        back_fails = 0
 
-        # Click device → Sign out → Google goes back and shows Signed out → next device.
-        for _round in range(8):
-            if _device_url_kind() != "list" and not wait_auto_back_to_list():
-                break
+        # Android, then Chrome, then Linux, then Windows — every row, then account logout.
+        for _round in range(24):
+            if _device_url_kind() != "list":
+                if wait_auto_back_to_list():
+                    back_fails = 0
+                elif ensure_device_activity_list("Back to device list"):
+                    back_fails = 0
+                else:
+                    back_fails += 1
+                    log(f"{email} — not back on device list ({back_fails}/2)")
+                    if back_fails >= 2:
+                        break
+                    continue
+
             sessions = list_devices_fast()
             for s in sessions:
                 kinds_seen.add(s.get("kind") or "session")
             pending = [s for s in sessions if (s.get("href") or "") not in done_hrefs]
+            by_kind: dict[str, int] = {}
+            for s in sessions:
+                k = s.get("kind") or "session"
+                by_kind[k] = by_kind.get(k, 0) + 1
             log(
                 f"{email} — sessions on page: {len(sessions)} active, "
-                f"{len(pending)} left, "
-                f"kinds={sorted({s.get('kind', 'session') for s in sessions})}"
+                f"{len(pending)} left, counts={by_kind}"
             )
             if not pending:
-                log(f"{email} — every device signed out once — account logout")
+                log(f"{email} — every listed device signed out — account logout")
                 break
 
             target = pending[0]
@@ -4967,7 +5028,6 @@ def _do_login(
             done_hrefs.add(href)
             device_label = open_device_session(target)
             if not device_label:
-                wait_auto_back_to_list()
                 continue
             log(f"{email} — opened device: {device_label[:80]}")
             sign_out_label = click_sign_out_ready()
@@ -4979,8 +5039,10 @@ def _do_login(
             signed_out_count += 1
             kinds_done[kind] = kinds_done.get(kind, 0) + 1
             log(f"{email} — device sign-out #{signed_out_count} [{kind}]: {sign_out_label}")
-            confirm_device_dialog()
-            wait_auto_back_to_list()
+            time.sleep(0.35)
+            _tap_sign_out_button()
+            if not wait_auto_back_to_list():
+                log(f"{email} — waiting to land back on the device list")
 
         kinds_seen_sorted = sorted(kinds_seen)
         log(
