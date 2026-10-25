@@ -128,17 +128,11 @@ function randomSessionId(): string {
 }
 
 /**
- * Keep a provider sticky session when the URL already has one.
- * ProxyScrape's static session holds the same exit IP for its window
- * (3 minutes on the saved proxy). A rotating URL with no session gets
- * one id for the whole job, so every account in that job shares the IP.
+ * New exit IP for every account. Reusing a saved -session- id keeps the IP
+ * that already failed "I'm not a robot", so Google shows the image puzzle
+ * on the next try. A phone passes because it is not that same IP.
  */
 function assignJobProxy(proxyUrl: string, jobSessionId: string): { url: string; sessionId: string } {
-  try {
-    const u = new URL(proxyUrl);
-    const existing = u.username.match(/-session-([A-Za-z0-9]+)$/);
-    if (existing) return { url: proxyUrl, sessionId: existing[1] };
-  } catch { /* fall through and pin a new session */ }
   return { url: injectStickySession(proxyUrl, jobSessionId), sessionId: jobSessionId };
 }
 
@@ -339,9 +333,7 @@ export async function browserLoginCheck(
   };
   signal?.addEventListener("abort", onAbort, { once: true });
 
-  // One session for the whole queue. Accounts run one after another and keep
-  // the saved proxy's exit IP until that sticky window ends.
-  const jobSessionId = randomSessionId();
+  // A fresh sticky session per account, so a challenged IP is not reused.
 
   const tasks = credentials.map(
     (cred, idx) => async () => {
@@ -359,9 +351,7 @@ export async function browserLoginCheck(
       }
 
       const baseProxy = getProxy(idx);
-      // A saved static session is kept, so the exit IP stays for its 3-minute
-      // window. A rotating URL is pinned once for this whole job.
-      const pinned = baseProxy ? assignJobProxy(baseProxy, jobSessionId) : undefined;
+      const pinned = baseProxy ? assignJobProxy(baseProxy, randomSessionId()) : undefined;
       const assignedProxy = pinned?.url;
       const sessionId = pinned?.sessionId;
       console.log(`[BROWSER] ${cred.email} → proxy slot ${proxies && proxies.length > 0 ? (idx % proxies.length) + 1 : "single"} | session=${sessionId ?? "none"} | fresh=${freshProfile}`);

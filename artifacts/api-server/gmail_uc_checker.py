@@ -3389,14 +3389,10 @@ def check_gmail(
             f"tz={fp.get('timezone')} lang={fp.get('language')} keyboard={fp.get('keyboard')}"
         )
 
-    # Login uses the small patch only. The full stealth script is what Google
-    # flags on the identifier page (signin/rejected / "browser may not be secure").
-    try:
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
-                               {"source": make_login_stealth_js(fp)})
-        log("Login stealth JS injected via CDP")
-    except Exception as e:
-        log(f"Stealth JS warning: {e}")
+    # Do not inject page JS here. Rewriting WebGL/console makes reCAPTCHA
+    # show the image puzzle after "I'm not a robot". A phone Chrome has no
+    # patched prototypes, and the checkbox just ticks. CDP emulation below
+    # still sets the phone viewport, timezone, and user agent.
 
     # NOTE: Network.enable + Network.setUserAgentOverride intentionally removed.
     # Activating the CDP Network domain leaves a detectable trace that fingerprint.com
@@ -3905,8 +3901,35 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             time.sleep(0.15)
         return None
 
-    # Sign-in starts at accounts.google.com. A google.com search before this
-    # added about 20s and did not change Google's answer.
+    # A phone already has Google cookies and a little mouse history. A cold
+    # profile that opens the sign-in form immediately is what makes the
+    # checkbox escalate to a puzzle. One homepage load is enough; no search.
+    try:
+        log(f"{email} — Warmup: google.com")
+        driver.get("https://www.google.com")
+        _warm_deadline = time.time() + 8
+        while time.time() < _warm_deadline:
+            try:
+                if driver.execute_script("return document.readyState") == "complete":
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
+        _xdt = _get_xdotool()
+        _win = _get_chrome_win_id()
+        if _xdt and _win:
+            _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
+            subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
+            for _mv in range(3):
+                subprocess.run(
+                    [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
+                    capture_output=True, timeout=3, env=_denv,
+                )
+                time.sleep(random.uniform(0.15, 0.35))
+        rand_sleep(600, 1100)
+    except Exception as _warm_err:
+        log(f"{email} — warmup skipped: {_warm_err}")
+
     log(f"{email} — Opening https://accounts.google.com")
     try:
         driver.get(
@@ -4167,6 +4190,8 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 driver.switch_to.frame(_anchor_frame)
                 _box = wait_for_any(["#recaptcha-anchor", ".recaptcha-checkbox-border"], timeout=6)
                 if _box:
+                    # Look at the box the way a phone user does, then click once.
+                    rand_sleep(1200, 2200)
                     try:
                         natural_mouse_move(driver, _box)
                     except Exception:
@@ -4174,14 +4199,36 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                     _box.click()
                     log(f"{email} — I'm not a robot checkbox clicked")
                 driver.switch_to.default_content()
-            _rc_deadline = time.time() + 12
+
+            def _checkbox_ticked() -> bool:
+                driver.switch_to.default_content()
+                for _fr in driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha']"):
+                    _src = _fr.get_attribute("src") or ""
+                    if "bframe" in _src:
+                        continue
+                    try:
+                        driver.switch_to.frame(_fr)
+                        _anchor = driver.find_elements(By.CSS_SELECTOR, "#recaptcha-anchor")
+                        if _anchor and _anchor[0].get_attribute("aria-checked") == "true":
+                            driver.switch_to.default_content()
+                            return True
+                    except Exception:
+                        pass
+                    driver.switch_to.default_content()
+                return False
+
+            # The puzzle iframe is often already in the DOM. Success is the
+            # checkbox ticking, same as on a phone — not the iframe existing.
+            _rc_deadline = time.time() + 10
             while time.time() < _rc_deadline:
                 driver.switch_to.default_content()
-                _rc_url = driver.current_url
-                if "challenge/recaptcha" not in _rc_url:
+                if "challenge/recaptcha" not in driver.current_url or _checkbox_ticked():
                     _rc_result = "passed"
                     break
+                time.sleep(0.4)
+            else:
                 _image = False
+                driver.switch_to.default_content()
                 for _bf in driver.find_elements(By.CSS_SELECTOR, "iframe[src*='bframe']"):
                     try:
                         if _bf.is_displayed() and _bf.size.get("height", 0) > 80:
@@ -4189,12 +4236,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                             break
                     except Exception:
                         pass
-                if _image:
-                    _rc_result = "image"
-                    break
-                time.sleep(0.4)
-            else:
-                _rc_result = "timeout"
+                _rc_result = "image" if _image else "timeout"
         except Exception as _rc_err:
             log(f"{email} — recaptcha checkbox error: {_rc_err}")
             _rc_result = "missed"
