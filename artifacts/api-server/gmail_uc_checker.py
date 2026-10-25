@@ -2882,19 +2882,14 @@ def main():
     _blocked_reason = result.get("reason", "")
 
     def _is_retriable(res: dict) -> bool:
-        """Return True if the result is something we should auto-retry with a fresh proxy IP."""
+        """Retry only a crashed Chrome. Google's 'browser may not be secure'
+        page does not change on a second launch, so repeating it only delays
+        the result."""
         st  = res.get("status", "")
         rsn = res.get("reason", "").lower()
-        # Automation blocks
-        if st == "verification_required" and any(x in rsn for x in [
-            "automation detected", "couldn't sign you in", "blocked this browser",
-            "not be secure", "blocked", "rejected",
-        ]):
-            return True
-        # Chrome crash / OOM / spawn failure — retry may succeed with fresh launch slot
         if st == "unknown" and any(x in rsn for x in [
             "chrome launch failed", "oom", "signal", "killed",
-            "failed to spawn", "exit code", "timed out",
+            "failed to spawn", "exit code", "timed out", "chrome crash",
         ]):
             return True
         return False
@@ -3383,7 +3378,7 @@ def check_gmail(
                                {"memory": fp["deviceMemory"]})
         log(f"CDP deviceMemory set → {fp['deviceMemory']} GiB")
     except Exception as e:
-        log(f"CDP deviceMemory warning (non-fatal): {e}")
+        log(f"CDP deviceMemory skipped: {str(e).splitlines()[0][:160]}")
 
     # VM detection fix: Emulation.setUserAgentOverride sets navigator.userAgent and
     # navigator.platform at the CDP emulation layer — deeper than Network.setUserAgentOverride.
@@ -3819,70 +3814,9 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             time.sleep(0.15)
         return None
 
-    # ── Step 0: Warmup — visit Google homepage first ─────────────────────────
-    # CRITICAL: Without this, Google detects automation at the password step
-    # and silently bounces back to challenge/pwd (no error message).
-    # Root cause: fingerprint needs a real page load to "warm up" before
-    # Google's login flow trusts the session. The warmup MUST:
-    #   1. Wait for the page to be truly interactive (not just nav start)
-    #   2. Do minimal human-like interaction (scroll)
-    #   3. Sleep long enough for JS fingerprinting to execute over proxy
-    # 800–1200ms was too short over proxy — page incomplete → Google detects
-    # automation → bounces back to challenge/pwd → wrongly tagged wrong_password.
-    try:
-        log(f"{email} — Step 0: warmup — building Google session cookies")
-        driver.get("https://www.google.com")
-        # Wait for page fully interactive — proxy latency can take 2-5s
-        _w_deadline = time.time() + 8
-        while time.time() < _w_deadline:
-            try:
-                if driver.execute_script("return document.readyState") == "complete":
-                    break
-            except Exception:
-                pass
-            time.sleep(0.35)
-        rand_sleep(800, 1300)
-        # Accept cookie/privacy consent if Google shows it (common outside US)
-        try:
-            for _btn_sel in [
-                "#L2AGLb", "button.tHlp8d", "[jsname='b3VHJd']",
-                "button[aria-label*='Accept all']", "button[aria-label*='accept']",
-            ]:
-                _btns = driver.find_elements(By.CSS_SELECTOR, _btn_sel)
-                if _btns and _btns[0].is_displayed():
-                    _btns[0].click()
-                    rand_sleep(600, 900)
-                    break
-        except Exception:
-            pass
-        # Real Google search — builds NID, 1P_JAR, SOCS, AEC cookies that
-        # make the subsequent login session look organic, not bot-fresh.
-        try:
-            _search_terms = ["gmail login", "google account", "inbox email", "google news", "youtube"]
-            _term = random.choice(_search_terms)
-            _sbox = driver.find_elements(By.NAME, "q")
-            if _sbox and _sbox[0].is_displayed():
-                for _c in _term:
-                    _sbox[0].send_keys(_c)
-                    time.sleep(random.uniform(0.07, 0.19))
-                rand_sleep(450, 750)
-                _sbox[0].send_keys(Keys.RETURN)
-                rand_sleep(1800, 2800)
-                # Scroll through results like a real user
-                driver.execute_script("window.scrollTo({top: 350, behavior: 'smooth'});")
-                rand_sleep(600, 1000)
-                driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
-                rand_sleep(400, 700)
-                log(f"{email} — Step 0: searched '{_term}', session cookies built")
-        except Exception:
-            pass
-        rand_sleep(700, 1100)
-        log(f"{email} — Step 0: warmup complete")
-    except Exception:
-        pass  # warmup failure is non-fatal — continue anyway
-
-    # ── Step 1: Navigate to Gmail sign-in ────────────────────────────────────
-    log(f"{email} — Step 1: navigating to sign-in page")
+    # Sign-in starts at accounts.google.com. A google.com search before this
+    # added about 20s and did not change Google's answer.
+    log(f"{email} — Opening https://accounts.google.com")
     try:
         driver.get(
             "https://accounts.google.com/v3/signin/identifier"
@@ -3909,7 +3843,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         shot = screenshot_b64()
         return {
             "status": "verification_required",
-            "reason": "Google rejected sign-in (automation detected). Use a residential proxy.",
+            "reason": "Google stopped on accounts.google.com: Couldn't sign you in. This browser or app may not be secure. Password and 2FA did not start.",
             "totpCode": totp_code,
             "debugScreenshot": shot,
         }
@@ -4092,7 +4026,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         shot = screenshot_b64()
         return {
             "status": "verification_required",
-            "reason": "Google rejected sign-in (automation detected). Use a residential proxy.",
+            "reason": "Google stopped on accounts.google.com: Couldn't sign you in. This browser or app may not be secure. Password and 2FA did not start.",
             "totpCode": totp_code,
             "debugScreenshot": shot,
         }
