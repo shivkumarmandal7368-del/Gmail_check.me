@@ -246,6 +246,12 @@ LOGIN_START = (
     "https://myaccount.google.com/signinoptions/password"
     "?continue=https://myaccount.google.com/"
 )
+# Normal browser + robot check: start on the email identifier (not password-change page).
+GOOGLE_EMAIL_SIGNIN = (
+    "https://accounts.google.com/v3/signin/identifier"
+    "?continue=https%3A%2F%2Fmyaccount.google.com%2F"
+    "&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
+)
 
 
 def signed_in_host(url: str) -> bool:
@@ -1446,14 +1452,32 @@ def apply_keyboard_layout(layout: str, display: str | None = None) -> bool:
 
 def read_browser_exit_ip(driver) -> str | None:
     """Read the IP Chrome itself is using. A separate requests call can rotate."""
+    urls = (
+        "http://api.ipify.org?format=json",
+        "https://api.ipify.org?format=json",
+        "http://ip-api.com/json/?fields=query",
+    )
     try:
         driver.set_page_load_timeout(25)
-        driver.get("https://api.ipify.org?format=json")
-        body = driver.execute_script("return document.body && document.body.innerText || ''") or ""
-        ip = json.loads(body).get("ip")
-        return ip or None
-    except Exception as e:
-        log(f"Chrome exit IP read failed: {e}")
+        last_err: Exception | None = None
+        for target in urls:
+            try:
+                driver.get(target)
+                body = driver.execute_script(
+                    "return document.body && document.body.innerText || ''"
+                ) or ""
+                body = body.strip()
+                if not body:
+                    continue
+                data = json.loads(body)
+                ip = data.get("ip") or data.get("query")
+                if ip:
+                    return str(ip)
+            except Exception as exc:
+                last_err = exc
+                continue
+        if last_err:
+            log(f"Chrome exit IP read failed: {last_err}")
         return None
     finally:
         try:
@@ -5673,53 +5697,121 @@ def _do_login(
                 "debugScreenshot": shot,
             }
 
+    _signin_entry = LOGIN_START if change_password_after_login else GOOGLE_EMAIL_SIGNIN
+
     # A phone already has Google cookies and a little mouse history. A cold
     # profile that opens the sign-in form immediately is what makes the
     # checkbox escalate to a puzzle. One homepage load is enough; no search.
-    try:
-        log(f"{email} — Warmup: google.com")
-        driver.get("https://www.google.com")
-        _warm_deadline = time.time() + 8
-        while time.time() < _warm_deadline:
+    if robot_check_only:
+        log(f"{email} — Robot check: skip warmup, open email sign-in")
+        try:
+            driver.get(_signin_entry)
+            time.sleep(0.45)
+        except Exception as e:
+            shot = None
             try:
-                if driver.execute_script("return document.readyState") == "complete":
-                    break
+                shot = screenshot_b64()
             except Exception:
                 pass
-            time.sleep(0.3)
-        _xdt = _get_xdotool()
-        _win = _get_chrome_win_id()
-        if _xdt and _win:
-            _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
-            subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
-            for _mv in range(3):
-                subprocess.run(
-                    [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
-                    capture_output=True, timeout=3, env=_denv,
-                )
-                time.sleep(random.uniform(0.15, 0.35))
-        rand_sleep(600, 1100)
-    except Exception as _warm_err:
-        log(f"{email} — warmup skipped: {_warm_err}")
+            return {
+                "status": "unknown",
+                "reason": f"Chrome crash while opening sign-in. ({type(e).__name__})",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
+        url, text = page_state()
+        log(f"{email} — After nav: {url[:70]}")
+    else:
+        if not change_password_after_login:
+            try:
+                log(f"{email} — Warmup: google.com")
+                driver.get("https://www.google.com")
+                _warm_deadline = time.time() + 8
+                while time.time() < _warm_deadline:
+                    try:
+                        if driver.execute_script("return document.readyState") == "complete":
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
+                _xdt = _get_xdotool()
+                _win = _get_chrome_win_id()
+                if _xdt and _win:
+                    _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
+                    subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
+                    for _mv in range(3):
+                        subprocess.run(
+                            [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
+                            capture_output=True, timeout=3, env=_denv,
+                        )
+                        time.sleep(random.uniform(0.15, 0.35))
+                rand_sleep(600, 1100)
+            except Exception as _warm_err:
+                log(f"{email} — warmup skipped: {_warm_err}")
 
-    log(f"{email} — Opening password-page sign-in link")
-    try:
-        driver.get(LOGIN_START)
-        rand_sleep(600, 1000)
-    except Exception as e:
-        # Navigation failure = Chrome/ChromeDriver crashed — treat as retriable
-        shot = None
-        try: shot = screenshot_b64()
-        except Exception: pass
-        return {
-            "status": "unknown",
-            "reason": f"Chrome crash while opening accounts.google.com. ({type(e).__name__}: {str(e).splitlines()[0][:150]})",
-            "totpCode": totp_code,
-            "debugScreenshot": shot,
-        }
+            try:
+                log(f"{email} — Opening email sign-in link")
+                driver.get(_signin_entry)
+                rand_sleep(600, 1000)
+            except Exception as e:
+                shot = None
+                try:
+                    shot = screenshot_b64()
+                except Exception:
+                    pass
+                return {
+                    "status": "unknown",
+                    "reason": f"Chrome crash while opening accounts.google.com. ({type(e).__name__}: {str(e).splitlines()[0][:150]})",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
+            url, text = page_state()
+            log(f"{email} — After nav: {url[:70]}")
+            try:
+                log(f"{email} — Warmup: google.com")
+                driver.get("https://www.google.com")
+                _warm_deadline = time.time() + 8
+                while time.time() < _warm_deadline:
+                    try:
+                        if driver.execute_script("return document.readyState") == "complete":
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
+                _xdt = _get_xdotool()
+                _win = _get_chrome_win_id()
+                if _xdt and _win:
+                    _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
+                    subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
+                    for _mv in range(3):
+                        subprocess.run(
+                            [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
+                            capture_output=True, timeout=3, env=_denv,
+                        )
+                        time.sleep(random.uniform(0.15, 0.35))
+                rand_sleep(600, 1100)
+            except Exception as _warm_err:
+                log(f"{email} — warmup skipped: {_warm_err}")
 
-    url, text = page_state()
-    log(f"{email} — After nav: {url[:70]}")
+            log(f"{email} — Opening password-page sign-in link")
+            try:
+                driver.get(_signin_entry)
+                rand_sleep(600, 1000)
+            except Exception as e:
+                shot = None
+                try:
+                    shot = screenshot_b64()
+                except Exception:
+                    pass
+                return {
+                    "status": "unknown",
+                    "reason": f"Chrome crash while opening accounts.google.com. ({type(e).__name__}: {str(e).splitlines()[0][:150]})",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
+
+            url, text = page_state()
+            log(f"{email} — After nav: {url[:70]}")
 
     # Defined early so TOTP right after LOGIN_START is handled before email step.
     def finish_after_totp(start_label: str) -> dict | None:
@@ -5906,6 +5998,20 @@ def _do_login(
     # ── Step 2: Enter email ───────────────────────────────────────────────────
     log(f"{email} — Step 2: typing email")
     email_field = wait_for_any(EMAIL_SELECTORS, timeout=8)
+
+    if not email_field and not change_password_after_login:
+        log(f"{email} — email field missing (stale session?) — logout + identifier retry")
+        try:
+            driver.get(
+                "https://accounts.google.com/Logout"
+                "?continue=https%3A%2F%2Faccounts.google.com%2Fv3%2Fsignin%2Fidentifier"
+            )
+            rand_sleep(500, 900)
+            driver.get(GOOGLE_EMAIL_SIGNIN)
+            rand_sleep(500, 900)
+        except Exception as _reauth_err:
+            log(f"{email} — sign-in retry nav warning: {_reauth_err}")
+        email_field = wait_for_any(EMAIL_SELECTORS, timeout=10)
 
     if not email_field:
         url, text = page_state()
