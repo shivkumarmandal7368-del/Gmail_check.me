@@ -104,6 +104,7 @@ router.post("/device-check/run", (req, res) => {
   const body = req.body ?? {};
   const deviceIndex: number = Number.isInteger(body.deviceIndex) ? body.deviceIndex : 0;
   const proxyOverride: string = typeof body.proxy === "string" ? body.proxy.trim() : "";
+  const freshProfile = body.freshProfile === true;
 
   // Resolve python3
   let python3 = "python3";
@@ -115,6 +116,7 @@ router.post("/device-check/run", (req, res) => {
     env: {
       ...process.env,
       DEVICE_INDEX: String(deviceIndex),
+      FRESH_PROFILE: freshProfile ? "1" : "0",
       ...(proxyOverride ? { PROXY_OVERRIDE: proxyOverride } : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],

@@ -455,7 +455,7 @@ function LoginChecker() {
 function BrowserChecker() {
   // ── localStorage keys ────────────────────────────────────────────────────
   const LS = {
-    input: "vbc_input", proxy: "vbc_proxy", concurrency: "vbc_conc",
+    input: "vbc_input", proxy: "vbc_proxy", proxyMode: "vbc_proxy_mode", concurrency: "vbc_conc",
     fresh: "vbc_fresh", device: "vbc_device", results: "vbc_results", total: "vbc_total",
     active: "vbc_active", savedAt: "vbc_saved_at", jobId: "vbc_job_id",
     creds: "vbc_creds",
@@ -466,9 +466,11 @@ function BrowserChecker() {
 
   const [inputText,    setInputText]    = useState<string>(() => lsGet(LS.input, ""));
   const [proxyText,    setProxyText]    = useState<string>(() => lsGet(LS.proxy, ""));
-  const [concurrency,  setConcurrency]  = useState<number>(() => lsGet(LS.concurrency, 3));
+  const [proxyMode,    setProxyMode]    = useState<"saved" | "custom">(() => lsGet<string>(LS.proxyMode, "saved") === "custom" ? "custom" : "saved");
+  const [savedProxy,   setSavedProxy]   = useState<{ configured: boolean; label: string } | null>(null);
   const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, false));
   const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
+
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
   const [selectedUnknown, setSelectedUnknown] = useState<Set<string>>(new Set());
   const [total,        setTotal]        = useState<number>(() => lsGet(LS.total, 0));
@@ -515,7 +517,21 @@ function BrowserChecker() {
   // ── Auto-save ─────────────────────────────────────────────────────────────
   useEffect(() => { try { localStorage.setItem(LS.input,       JSON.stringify(inputText));    } catch {} }, [inputText]);
   useEffect(() => { try { localStorage.setItem(LS.proxy,       JSON.stringify(proxyText));    } catch {} }, [proxyText]);
-  useEffect(() => { try { localStorage.setItem(LS.concurrency, JSON.stringify(concurrency));  } catch {} }, [concurrency]);
+  useEffect(() => { try { localStorage.setItem(LS.proxyMode,   JSON.stringify(proxyMode));    } catch {} }, [proxyMode]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/proxy/status")
+      .then(r => r.json())
+      .then((data: { configured?: boolean; label?: string }) => {
+        if (cancelled) return;
+        setSavedProxy({
+          configured: data.configured === true,
+          label: typeof data.label === "string" && data.label ? data.label : "Saved proxy",
+        });
+      })
+      .catch(() => { if (!cancelled) setSavedProxy({ configured: false, label: "Could not read saved proxy" }); });
+    return () => { cancelled = true; };
+  }, []);
   useEffect(() => { try { localStorage.setItem(LS.fresh,       JSON.stringify(freshProfile)); } catch {} }, [freshProfile]);
   useEffect(() => { try { localStorage.setItem(LS.device,      JSON.stringify(deviceIndex));  } catch {} }, [deviceIndex]);
   useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
@@ -823,56 +839,79 @@ function BrowserChecker() {
   };
 
   const buildBody = (creds: Array<{ email: string; password: string; totp?: string }>) => {
-    const proxies = parseProxies(proxyText);
+    const proxies = proxyMode === "custom" ? parseProxies(proxyText) : [];
     return JSON.stringify({
       credentials: creds,
       ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
-      concurrency, freshProfile, deviceIndex,
+      concurrency: 1, freshProfile, deviceIndex,
     });
+  };
+
+  const ensureProxy = async (): Promise<boolean> => {
+    setProxyCheckState("checking");
+    setProxyExitIp("");
+    setProxyCheckError("");
+    try {
+      if (proxyMode === "saved") {
+        const res = await fetch("/api/proxy/check", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ useSaved: true }),
+        });
+        const d = await res.json() as { ok?: boolean; ip?: string; error?: string };
+        if (!d.ok) {
+          setProxyCheckState("fail");
+          setProxyCheckError(d.error ?? "Saved proxy failed");
+          return false;
+        }
+        setProxyCheckState("ok");
+        setProxyExitIp(d.ip ?? "");
+        return true;
+      }
+      const proxies = parseProxies(proxyText);
+      if (proxies.length === 0) {
+        setProxyCheckState("fail");
+        setProxyCheckError("Custom proxy is empty. Paste http://user:pass@host:port, one per line.");
+        return false;
+      }
+      const proxyResults = await Promise.all(
+        proxies.map((p, i) =>
+          fetch("/api/proxy/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proxy: p }) })
+            .then(r => r.json() as Promise<{ ok: boolean; ip?: string; error?: string }>)
+            .then(d => d.ok
+              ? { idx: i + 1, ok: true as const, ip: d.ip }
+              : { idx: i + 1, ok: false as const, error: d.error })
+            .catch(() => ({ idx: i + 1, ok: false as const, error: "Endpoint unreachable" }))
+        )
+      );
+      const failed = proxyResults.filter((r): r is { idx: number; ok: false; error?: string } => !r.ok);
+      if (failed.length > 0) {
+        setProxyCheckState("fail");
+        setProxyCheckError(failed.map(f => `Proxy ${f.idx}: ${f.error ?? "failed"}`).join(" | "));
+        return false;
+      }
+      setProxyCheckState("ok");
+      const firstSuccessful = proxyResults.find(
+        (result): result is { idx: number; ok: true; ip?: string } => result.ok
+      );
+      setProxyExitIp(firstSuccessful?.ip ?? "");
+      return true;
+    } catch {
+      setProxyCheckState("fail");
+      setProxyCheckError("Proxy check endpoint unreachable");
+      return false;
+    }
+  };
+
+  const readJobError = async (res: Response) => {
+    const body = await res.json().catch(() => ({} as { error?: string }));
+    return body.error || `HTTP ${res.status}`;
   };
 
   const handleCheck = async () => {
     const credentials = parseCredentials(inputText);
     if (credentials.length === 0) return;
-
-    // ── Proxy pre-flight check ──────────────────────────────────────────────
-    // Run BEFORE starting the job so fake sessions are never created when
-    // the proxy is dead.  Blocks the check and shows the real error to the user.
-    const proxies = parseProxies(proxyText);
-    if (proxies.length > 0) {
-      setProxyCheckState("checking");
-      setProxyExitIp("");
-      setProxyCheckError("");
-      try {
-        // Check ALL proxies in parallel — not just the first one
-        const proxyResults = await Promise.all(
-          proxies.map((p, i) =>
-            fetch("/api/proxy/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proxy: p }) })
-              .then(r => r.json() as Promise<{ ok: boolean; ip?: string; error?: string }>)
-              .then(d => d.ok
-                ? { idx: i + 1, ok: true as const, ip: d.ip }
-                : { idx: i + 1, ok: false as const, error: d.error })
-              .catch(() => ({ idx: i + 1, ok: false as const, error: "Endpoint unreachable" }))
-          )
-        );
-        const failed = proxyResults.filter(r => !r.ok);
-        if (failed.length > 0) {
-          setProxyCheckState("fail");
-          setProxyCheckError(failed.map(f => `Proxy ${f.idx}: ${f.error ?? "failed"}`).join(" | "));
-          return; // ← BLOCK: do not start the job
-        }
-        setProxyCheckState("ok");
-        const firstSuccessful = proxyResults.find(
-          (result): result is { idx: number; ok: true; ip?: string } => result.ok
-        );
-        setProxyExitIp(firstSuccessful?.ip ?? "");
-      } catch {
-        setProxyCheckState("fail");
-        setProxyCheckError("Proxy check endpoint unreachable");
-        return; // ← BLOCK
-      }
-    }
-    // ── End proxy pre-flight ────────────────────────────────────────────────
+    if (!(await ensureProxy())) return;
 
     // Build and persist credential map so exports survive page refresh
     const newCredsMap: Record<string, { password: string; totpSecret?: string }> = {};
@@ -886,11 +925,17 @@ function BrowserChecker() {
     setJobStatus("running"); setPauseRequested(false); setResumeReady(false);
     try {
       const res = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: buildBody(credentials) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(await readJobError(res));
       const { jobId: id } = await res.json();
       setJobId(id); activeJobIdRef.current = id; setIsRunning(true);
       connectToJobStream(id, 0);
-    } catch (e) { console.error("[BrowserChecker] handleCheck:", e); }
+    } catch (e) {
+      console.error("[BrowserChecker] handleCheck:", e);
+      setJobStatus("idle");
+      setIsRunning(false);
+      setProxyCheckState("fail");
+      setProxyCheckError(e instanceof Error ? e.message : "Browser check could not start");
+    }
   };
 
   const handlePause = async () => {
@@ -965,26 +1010,37 @@ function BrowserChecker() {
     setActiveList("opened");
     setInputText("");
     setProxyText("");
-    setConcurrency(3);
+    setProxyMode("saved");
+    setProxyCheckState("idle");
+    setProxyCheckError("");
+    setProxyExitIp("");
     setFreshProfile(false);
     setDeviceIndex(0);
   };
 
   const startRetryJob = async (creds: Array<{ email: string; password: string; totp?: string }>) => {
+    if (!(await ensureProxy())) return;
     sseAbortRef.current?.abort();
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     appendModeRef.current = true;
     setTotal(t => t + creds.length);
     try {
       const res = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: buildBody(creds) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(await readJobError(res));
       const { jobId: id } = await res.json();
       // Don't call setJobId — keep the original jobId in localStorage so a
       // page refresh restores the original job, not the retry job.
       activeJobIdRef.current = id; setJobStatus("running"); setIsRunning(true);
       setPauseRequested(false); setResumeReady(false);
       connectToJobStream(id, 0);
-    } catch (e) { console.error("[BrowserChecker] retry:", e); setTotal(t => t - creds.length); }
+    } catch (e) {
+      console.error("[BrowserChecker] retry:", e);
+      setTotal(t => t - creds.length);
+      setJobStatus("idle");
+      setIsRunning(false);
+      setProxyCheckState("fail");
+      setProxyCheckError(e instanceof Error ? e.message : "Retry could not start");
+    }
   };
 
   const handleRetry = (email: string) => {
@@ -1113,59 +1169,109 @@ function BrowserChecker() {
               disabled={isChecking}
             />
 
-            {/* Proxy */}
-            {(() => {
-              const proxies = parseProxies(proxyText);
-              const count = proxies.length;
-              const creds = parseCredentials(inputText).length;
-              return (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-[10px] font-mono uppercase tracking-widest text-yellow-400/80 flex items-center gap-1">
+                  <Lock className="w-3 h-3" /> Residential Proxy
+                </label>
+                <div className="flex items-center gap-1 text-[11px] font-mono">
+                  <button
+                    type="button"
+                    onClick={() => { setProxyMode("saved"); setProxyCheckState("idle"); setProxyCheckError(""); setProxyExitIp(""); }}
+                    disabled={isChecking}
+                    className={cn(
+                      "px-2 py-0.5 rounded border transition-colors",
+                      proxyMode === "saved"
+                        ? "bg-yellow-500/15 border-yellow-500/40 text-yellow-300"
+                        : "border-transparent text-muted-foreground hover:text-foreground"
+                    )}>Saved</button>
+                  <button
+                    type="button"
+                    onClick={() => { setProxyMode("custom"); setProxyCheckState("idle"); setProxyCheckError(""); setProxyExitIp(""); }}
+                    disabled={isChecking}
+                    className={cn(
+                      "px-2 py-0.5 rounded border transition-colors",
+                      proxyMode === "custom"
+                        ? "bg-yellow-500/15 border-yellow-500/40 text-yellow-300"
+                        : "border-transparent text-muted-foreground hover:text-foreground"
+                    )}>Custom</button>
+                </div>
+              </div>
+              {proxyMode === "saved" ? (
                 <div className={cn(
                   "rounded-lg border p-2.5 text-[11px] font-mono space-y-1",
-                  count > 0
+                  savedProxy?.configured
                     ? "border-green-500/40 bg-green-500/5 text-green-400/90"
                     : "border-yellow-500/40 bg-yellow-500/5 text-yellow-400/90"
                 )}>
-                  {count === 0 ? (
-                    <><p className="font-semibold">⚠ Residential proxy required on Replit</p>
-                      <p className="text-yellow-300/70">Google blocks datacenter IPs. Without proxy all checks return <span className="text-orange-400">verification_required</span>.</p></>
-                  ) : count === 1 ? (
+                  {savedProxy === null ? (
+                    <p>Saved proxy padh rahe hain…</p>
+                  ) : savedProxy.configured ? (
                     <>
-                      <p className="font-semibold">✅ Rotating proxy detected — har account alag IP se chalega</p>
-                      <p className="text-green-300/70">Har account ko unique sticky session milega → alag exit IP (scrapegw / residential rotating proxies ke liye)</p>
+                      <p className="font-semibold">Saved proxy is already on this server</p>
+                      <p className="text-green-200/90">{savedProxy.label}</p>
+                      <p className="text-green-300/70">Password server par rehta hai. Har account ko apni sticky session milti hai, aur timezone, language, keyboard Chrome ke exit IP se match hote hain.</p>
                     </>
                   ) : (
                     <>
-                      <p className="font-semibold">🔀 {count} proxies loaded — rotation active</p>
-                      <p className="text-green-300/70">
-                        {creds > 0 ? `${creds} accounts → ${count} proxies (round-robin)` : "Har account ko alag IP milegi (round-robin)"}
-                      </p>
+                      <p className="font-semibold">No saved proxy on this server</p>
+                      <p className="text-yellow-300/70">Custom mode mein http://user:pass@host:port paste karo, ya server par PROXY_URL set karo.</p>
                     </>
                   )}
                 </div>
-              );
-            })()}
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-mono uppercase tracking-widest text-yellow-400/80 flex items-center gap-1">
-                <Lock className="w-3 h-3" /> Residential Proxies (ek per line)
-              </label>
-              <Textarea
-                placeholder={"http://user:pass@host1:port\nhttp://user:pass@host2:port\nhttp://user:pass@host3:port"}
-                className={cn(
-                  "min-h-[80px] resize-y bg-background/50 font-mono text-xs leading-relaxed",
-                  proxyCheckState === "fail" ? "border-red-500/60" :
-                  proxyCheckState === "ok"   ? "border-green-500/60" :
-                  parseProxies(proxyText).length > 0 ? "border-green-500/50" : "border-yellow-500/40"
-                )}
-                value={proxyText}
-                onChange={e => { setProxyText(e.target.value); setProxyCheckState("idle"); setProxyCheckError(""); setProxyExitIp(""); }}
-                disabled={isChecking}
-              />
+              ) : (
+                <>
+                  {(() => {
+                    const count = parseProxies(proxyText).length;
+                    const creds = parseCredentials(inputText).length;
+                    return (
+                      <div className={cn(
+                        "rounded-lg border p-2.5 text-[11px] font-mono space-y-1",
+                        count > 0
+                          ? "border-green-500/40 bg-green-500/5 text-green-400/90"
+                          : "border-yellow-500/40 bg-yellow-500/5 text-yellow-400/90"
+                      )}>
+                        {count === 0 ? (
+                          <>
+                            <p className="font-semibold">Custom proxy is empty</p>
+                            <p className="text-yellow-300/70">Ek line par ek residential proxy: http://user:pass@host:port</p>
+                          </>
+                        ) : count === 1 ? (
+                          <>
+                            <p className="font-semibold">Custom proxy — har account apni sticky session se chalega</p>
+                            <p className="text-green-300/70">Exit IP us login ke dauran same rahega. Timezone, language aur keyboard usi IP se match honge.</p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="font-semibold">{count} custom proxies — round-robin</p>
+                            <p className="text-green-300/70">
+                              {creds > 0 ? `${creds} accounts → ${count} proxies` : "Har account ko agla proxy milega"}
+                            </p>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })()}
+                  <Textarea
+                    placeholder={"http://user:pass@host1:port\nhttp://user:pass@host2:port\nhttp://user:pass@host3:port"}
+                    className={cn(
+                      "min-h-[80px] resize-y bg-background/50 font-mono text-xs leading-relaxed",
+                      proxyCheckState === "fail" ? "border-red-500/60" :
+                      proxyCheckState === "ok"   ? "border-green-500/60" :
+                      parseProxies(proxyText).length > 0 ? "border-green-500/50" : "border-yellow-500/40"
+                    )}
+                    value={proxyText}
+                    onChange={e => { setProxyText(e.target.value); setProxyCheckState("idle"); setProxyCheckError(""); setProxyExitIp(""); }}
+                    disabled={isChecking}
+                  />
+                </>
+              )}
 
               {/* Proxy pre-flight result banner */}
               {proxyCheckState === "checking" && (
                 <div className="rounded-md border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-[11px] font-mono text-blue-300 flex items-center gap-2">
                   <span className="animate-spin inline-block">⟳</span>
-                  Proxy check chal raha hai… (12s max)
+                  Proxy check chal raha hai… gateway slow ho sakta hai
                 </div>
               )}
               {proxyCheckState === "ok" && (
@@ -1183,19 +1289,12 @@ function BrowserChecker() {
               )}
             </div>
 
-            {/* Concurrency */}
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground flex items-center gap-1">
-                <Activity className="w-3 h-3" /> Concurrent Threads
-              </label>
-              <div className="flex items-center gap-2">
-                <button onClick={() => setConcurrency(c => Math.max(1, c - 1))} disabled={isChecking || concurrency <= 1}
-                  className="w-8 h-8 rounded border border-border bg-card text-sm font-mono font-bold hover:bg-muted/50 disabled:opacity-30 transition-colors">−</button>
-                <div className="flex-1 text-center font-mono text-lg font-bold text-primary">{concurrency}</div>
-                <button onClick={() => setConcurrency(c => Math.min(10, c + 1))} disabled={isChecking || concurrency >= 10}
-                  className="w-8 h-8 rounded border border-border bg-card text-sm font-mono font-bold hover:bg-muted/50 disabled:opacity-30 transition-colors">+</button>
-              </div>
-              <p className="text-[10px] text-muted-foreground/60 font-mono text-center">{concurrency} browser{concurrency > 1 ? "s" : ""} simultaneously (1–10)</p>
+            <div className="rounded-lg border border-border bg-card/30 p-3 text-[10px] font-mono text-muted-foreground/80 leading-relaxed space-y-1">
+              <p className="uppercase tracking-widest text-foreground/70">Ek ke baad ek</p>
+              <p>Pehla account poora khatam hota hai, uske baad dusra start hota hai.</p>
+              <p>Fresh off: sab accounts Device Check wala same fingerprint use karte hain.</p>
+              <p>Fresh on: agla account naya profile aur naya canvas leta hai. Phone model wahi rehta hai.</p>
+              <p>Saved proxy ki IP 3 minute tak same rehti hai.</p>
             </div>
 
             {/* Fresh device toggle */}
@@ -1231,7 +1330,7 @@ function BrowserChecker() {
                 </div>
               </div>
               <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
-                {freshProfile ? "⚠️ Naya device har run — account 2-3 din mein flag ho sakta hai" : "✓ Same device reuse — account safe, faster second check"}
+                {freshProfile ? "Pehla khatam, phir agla naya profile aur naya canvas. Phone model yahi selected device rahega. Timezone, language aur keyboard Chrome ke IP se match honge." : "Sab accounts ek hi fingerprint: Device Check ne jo device banaya, wahi. Timezone, language aur keyboard Chrome ke IP se match honge."}
               </p>
             </button>
 
@@ -1252,7 +1351,12 @@ function BrowserChecker() {
               </Button>
             ) : (
               <Button className="w-full font-mono font-medium tracking-wide" size="lg"
-                onClick={handleCheck} disabled={!inputText.trim()}>
+                onClick={handleCheck}
+                disabled={
+                  !inputText.trim() ||
+                  (proxyMode === "custom" && parseProxies(proxyText).length === 0) ||
+                  (proxyMode === "saved" && savedProxy !== null && !savedProxy.configured)
+                }>
                 <Globe className="w-4 h-4 mr-2" />OPEN BROWSER & CHECK
               </Button>
             )}
@@ -1391,7 +1495,7 @@ function BrowserChecker() {
             <Progress value={progress} className="h-1 bg-border" />
             {isChecking && (
               <p className="text-[11px] text-muted-foreground/60 font-mono">
-                {concurrency} browser{concurrency > 1 ? "s" : ""} running — tab band karo, kaam nahi rukega 🔒
+                Ek account chal raha hai. Agla uske khatam hone ke baad start hoga.
               </p>
             )}
           </div>
@@ -1837,17 +1941,38 @@ function DeviceChecker() {
   });
   const [proxyText,    setProxyText]    = useState("");
   const [proxyMode,    setProxyMode]    = useState<"secret"|"custom">("secret");
+  const [savedProxy,   setSavedProxy]   = useState<{ configured: boolean; label: string } | null>(null);
   const [status,       setStatus]       = useState<"idle"|"running"|"done"|"error">("idle");
   const [logs,         setLogs]         = useState<string[]>([]);
   const [shots,        setShots]        = useState<{ label: string; b64: string }[]>([]);
   const [errMsg,       setErrMsg]       = useState("");
+  const [freshProfile, setFreshProfile] = useState<boolean>(() => {
+    try { return JSON.parse(localStorage.getItem("vbc_fresh") || "false") === true; } catch { return false; }
+  });
   const abortRef  = useRef<AbortController | null>(null);
+  useEffect(() => {
+    try { localStorage.setItem("vbc_fresh", JSON.stringify(freshProfile)); } catch {}
+  }, [freshProfile]);
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
   useEffect(() => {
     try { localStorage.setItem("vbc_device", JSON.stringify(deviceIndex)); } catch {}
   }, [deviceIndex]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/proxy/status")
+      .then(r => r.json())
+      .then((data: { configured?: boolean; label?: string }) => {
+        if (cancelled) return;
+        setSavedProxy({
+          configured: data.configured === true,
+          label: typeof data.label === "string" && data.label ? data.label : "Saved proxy",
+        });
+      })
+      .catch(() => { if (!cancelled) setSavedProxy({ configured: false, label: "Could not read saved proxy" }); });
+    return () => { cancelled = true; };
+  }, []);
 
   const runCheck = async () => {
     setStatus("running");
@@ -1859,8 +1984,19 @@ function DeviceChecker() {
     const abort = new AbortController();
     abortRef.current = abort;
 
+    if (proxyMode === "custom" && !proxyText.trim()) {
+      setErrMsg("Custom proxy is empty.");
+      setStatus("error");
+      return;
+    }
+    if (proxyMode === "secret" && savedProxy && !savedProxy.configured) {
+      setErrMsg("No saved proxy on this server. Switch to Custom.");
+      setStatus("error");
+      return;
+    }
+
     try {
-      const body: Record<string, unknown> = { deviceIndex };
+      const body: Record<string, unknown> = { deviceIndex, freshProfile };
       if (proxyMode === "custom" && proxyText.trim()) body.proxy = proxyText.trim();
 
       const resp = await fetch("/api/device-check/run", {
@@ -1984,11 +2120,14 @@ function DeviceChecker() {
           </CardHeader>
           <CardContent className="px-4 pb-4">
             {proxyMode === "secret" ? (
-              <div className="flex items-center gap-2 h-[68px] text-xs font-mono text-muted-foreground/70 bg-muted/20 rounded-md border border-border px-3">
+              <div className="flex items-center gap-2 min-h-[68px] text-xs font-mono text-muted-foreground/70 bg-muted/20 rounded-md border border-border px-3 py-2">
                 <Lock className="w-3.5 h-3.5 opacity-50 shrink-0" />
                 <span>
-                  Using <span className="text-purple-400">Proxy</span> secret from Replit environment.
-                  If it is not configured, switch to <span className="text-foreground">Custom</span>.
+                  {savedProxy === null
+                    ? "Saved proxy padh rahe hain…"
+                    : savedProxy.configured
+                      ? <>Saved proxy: <span className="text-purple-300">{savedProxy.label}</span>. Password server par rehta hai.</>
+                      : <>No saved proxy on this server. Switch to <span className="text-foreground">Custom</span>.</>}
                 </span>
               </div>
             ) : (
@@ -2001,13 +2140,31 @@ function DeviceChecker() {
                   className="font-mono text-xs h-[58px] resize-none bg-background border-border placeholder:text-muted-foreground/40"
                 />
                 <p className="text-[10px] font-mono text-muted-foreground/50 pl-1">
-                  Overrides the Proxy secret for this run only
+                  Is run ke liye saved proxy ki jagah yeh URL use hoga
                 </p>
               </div>
             )}
           </CardContent>
         </Card>
       </div>
+
+      <button onClick={() => status !== "running" && setFreshProfile(f => !f)} disabled={status === "running"}
+        className={cn("w-full rounded-lg border p-3 text-left transition-colors",
+          freshProfile ? "border-blue-500/40 bg-blue-500/5" : "border-border bg-card/30")}>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[10px] font-mono uppercase tracking-widest text-blue-400/80 flex items-center gap-1">
+            <Smartphone className="w-3 h-3" /> Fresh Device Per Run
+          </span>
+          <div className={cn("w-8 h-4 rounded-full transition-colors relative", freshProfile ? "bg-blue-500" : "bg-border")}>
+            <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", freshProfile ? "left-4" : "left-0.5")} />
+          </div>
+        </div>
+        <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
+          {freshProfile
+            ? "Naya Chrome profile aur naya canvas. Browser Check ka Fresh on bhi agle account par yahi naya fingerprint use karega. Timezone, language aur keyboard us IP par rahenge jo Chrome use kare."
+            : "Yahi fingerprint Browser Check use karega jab Fresh off ho. Timezone, language aur keyboard Chrome ke exit IP se match honge."}
+        </p>
+      </button>
 
       {/* Run button row */}
       <div className="flex items-center gap-3">
