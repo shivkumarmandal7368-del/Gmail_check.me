@@ -3967,9 +3967,15 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     except Exception as _warm_err:
         log(f"{email} — warmup skipped: {_warm_err}")
 
-    log(f"{email} — Opening https://myaccount.google.com/")
+    # Sign-in starts on accounts.google.com. continue sends a finished login
+    # to myaccount.google.com, which classify() marks as Open.
+    log(f"{email} — Opening https://accounts.google.com")
     try:
-        driver.get(ACCOUNT_HOME)
+        driver.get(
+            "https://accounts.google.com/ServiceLogin"
+            "?continue=https%3A%2F%2Fmyaccount.google.com%2F"
+            "&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
+        )
         rand_sleep(600, 1000)
     except Exception as e:
         # Navigation failure = Chrome/ChromeDriver crashed — treat as retriable
