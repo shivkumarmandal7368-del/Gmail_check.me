@@ -496,6 +496,9 @@ function BrowserChecker() {
   const [proxyCheckState, setProxyCheckState] = useState<"idle"|"checking"|"ok"|"fail">("idle");
   const [proxyExitIp,     setProxyExitIp]     = useState<string>("");
   const [proxyCheckError, setProxyCheckError] = useState<string>("");
+  const [serverProxyConfigured, setServerProxyConfigured] = useState(false);
+  const [serverProxyMasked, setServerProxyMasked] = useState<string | null>(null);
+  const [jobStartError, setJobStartError] = useState<string>("");
   const [browserLogs, setBrowserLogs] = useState<Array<{ email?: string; message: string }>>([]);
 
   // refs
@@ -537,6 +540,15 @@ function BrowserChecker() {
   useEffect(() => {
     const saved = localStorage.getItem(LS.jobId);
     if (saved) restoreJobFromServer(saved);
+    fetch("/api/proxy/status")
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d?.configured) {
+          setServerProxyConfigured(true);
+          setServerProxyMasked(typeof d.proxy === "string" ? d.proxy : null);
+        }
+      })
+      .catch(() => {});
     return () => {
       sseAbortRef.current?.abort();
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
@@ -884,13 +896,22 @@ function BrowserChecker() {
     appendModeRef.current = false;
     setResults([]); setTotal(credentials.length); setReconnectedAt(null); setRestoredAt(null); setSelectedUnknown(new Set());
     setJobStatus("running"); setPauseRequested(false); setResumeReady(false);
+    setJobStartError("");
     try {
       const res = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: buildBody(credentials) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        throw new Error(errBody ? errBody.slice(0, 200) : `HTTP ${res.status}`);
+      }
       const { jobId: id } = await res.json();
       setJobId(id); activeJobIdRef.current = id; setIsRunning(true);
       connectToJobStream(id, 0);
-    } catch (e) { console.error("[BrowserChecker] handleCheck:", e); }
+    } catch (e) {
+      console.error("[BrowserChecker] handleCheck:", e);
+      setJobStartError(e instanceof Error ? e.message : "Job start failed — API server reachable hai?");
+      setJobStatus("idle");
+      setIsRunning(false);
+    }
   };
 
   const handlePause = async () => {
@@ -1114,18 +1135,33 @@ function BrowserChecker() {
             />
 
             {/* Proxy */}
+            {jobStartError && (
+              <div className="rounded-lg border border-red-500/50 bg-red-500/10 p-2.5 text-[11px] font-mono text-red-300">
+                <p className="font-semibold">Job start failed</p>
+                <p className="text-red-300/80 break-all">{jobStartError}</p>
+              </div>
+            )}
             {(() => {
               const proxies = parseProxies(proxyText);
               const count = proxies.length;
               const creds = parseCredentials(inputText).length;
+              const hasProxy = count > 0 || serverProxyConfigured;
               return (
                 <div className={cn(
                   "rounded-lg border p-2.5 text-[11px] font-mono space-y-1",
-                  count > 0
+                  hasProxy
                     ? "border-green-500/40 bg-green-500/5 text-green-400/90"
                     : "border-yellow-500/40 bg-yellow-500/5 text-yellow-400/90"
                 )}>
-                  {count === 0 ? (
+                  {count === 0 && serverProxyConfigured ? (
+                    <>
+                      <p className="font-semibold">✅ Server proxy (PROXY_URL secret) configured</p>
+                      <p className="text-green-300/70 break-all">
+                        Browser Check isi proxy ko use karega jab tak aap neeche alag proxy na likhein.
+                        {serverProxyMasked ? ` ${serverProxyMasked}` : ""}
+                      </p>
+                    </>
+                  ) : count === 0 ? (
                     <><p className="font-semibold">⚠ Residential proxy required on Replit</p>
                       <p className="text-yellow-300/70">Google blocks datacenter IPs. Without proxy all checks return <span className="text-orange-400">verification_required</span>.</p></>
                   ) : count === 1 ? (

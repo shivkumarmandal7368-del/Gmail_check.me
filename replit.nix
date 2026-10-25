@@ -28,5 +28,6 @@
     pkgs.gtk3
     pkgs.alsa-lib
     pkgs.libxkbcommon
+    pkgs.xdotool
   ];
 }

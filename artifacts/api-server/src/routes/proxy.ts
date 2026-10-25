@@ -3,6 +3,32 @@ import { spawn } from "child_process";
 
 const router = Router();
 
+function maskProxyUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.password) u.password = "****";
+    return u.toString();
+  } catch {
+    return "configured";
+  }
+}
+
+/**
+ * GET /api/proxy/status
+ * Whether a default residential proxy is configured on the server (PROXY_URL secret).
+ * Browser Check uses this when the UI proxy field is empty.
+ */
+router.get("/proxy/status", (_req, res) => {
+  const raw =
+    process.env.PROXY_URL?.trim() ||
+    process.env.Proxy?.trim() ||
+    "";
+  res.json({
+    configured: raw.length > 0,
+    proxy: raw ? maskProxyUrl(raw) : null,
+  });
+});
+
 /**
  * POST /api/proxy/check
  * Body: { proxy: string }
