@@ -4295,7 +4295,8 @@ def _do_login(
                 body = ""
             if any(x in body for x in (
                 "your devices", "device activity", "where you're signed in",
-                "signed in", "sign out", "sessions",
+                "signed in", "sign out", "sessions", "android", "windows",
+                "linux", "chrome",
             )):
                 log(f"{email} — device activity page loaded")
                 return True
@@ -4399,9 +4400,39 @@ def _do_login(
             """
         ))
 
-    def open_next_device_from_list() -> str | None:
-        """Click a device row → detail page (not Find device)."""
-        return driver.execute_script(
+    _SESSION_KIND_ORDER = (
+        "android_phone",
+        "chrome_device",
+        "windows_computer",
+        "linux_computer",
+        "ios",
+        "mac",
+        "session",
+    )
+
+    def detect_session_kind(label: str) -> str:
+        """Map Google device-activity row text → session kind (4 demo types + extras)."""
+        t = label.lower()
+        if "iphone" in t or "ipad" in t:
+            return "ios"
+        if "android phone" in t or "android" in t:
+            return "android_phone"
+        if "phone" in t and "iphone" not in t and "smartphone" not in t:
+            return "android_phone"
+        if "windows computer" in t or "windows" in t or "windows pc" in t:
+            return "windows_computer"
+        if "linux computer" in t or "linux" in t:
+            return "linux_computer"
+        if "chrome device" in t or "chromebook" in t or "chrome os" in t:
+            return "chrome_device"
+        if "chrome" in t and "windows" not in t and "linux" not in t and "mac" not in t:
+            return "chrome_device"
+        if "mac" in t or "macos" in t:
+            return "mac"
+        return "session"
+
+    def _gather_device_sessions_js() -> list[dict]:
+        raw = driver.execute_script(
             _DEVICE_JS_HELPERS
             + """
             function isDetailPath(pathname) {
@@ -4413,42 +4444,102 @@ def _do_login(
               if (t.indexOf('find device') !== -1 && t.indexOf('sign out') === -1) return false;
               return true;
             }
-            var candidates = [];
-            var links = Array.from(document.querySelectorAll('a[href*="device-activity"]'));
-            for (var i = 0; i < links.length; i++) {
-              var L = links[i];
-              if (!__visible(L)) continue;
+            function sessionKind(label) {
+              var t = (label || '').toLowerCase();
+              if (t.indexOf('iphone') !== -1 || t.indexOf('ipad') !== -1) return 'ios';
+              if (t.indexOf('android phone') !== -1 || t.indexOf('android') !== -1) return 'android_phone';
+              if (t.indexOf('phone') !== -1 && t.indexOf('iphone') === -1) return 'android_phone';
+              if (t.indexOf('windows computer') !== -1 || t.indexOf('windows') !== -1) return 'windows_computer';
+              if (t.indexOf('linux computer') !== -1 || t.indexOf('linux') !== -1) return 'linux_computer';
+              if (t.indexOf('chrome device') !== -1 || t.indexOf('chromebook') !== -1
+                  || t.indexOf('chrome os') !== -1) return 'chrome_device';
+              if (t.indexOf('chrome') !== -1 && t.indexOf('windows') === -1 && t.indexOf('linux') === -1
+                  && t.indexOf('mac') === -1) return 'chrome_device';
+              if (t.indexOf('mac') !== -1 || t.indexOf('macos') !== -1) return 'mac';
+              return 'session';
+            }
+            function pushLink(L, seen, out) {
               try {
-                if (!isDetailPath(new URL(L.href).pathname)) continue;
-              } catch(e) { continue; }
-              var block = L.closest('[role="listitem"], li, tr, c-wiz') || L.parentElement || L;
-              var label = (block.innerText || L.innerText || '').trim();
-              if (!rowStillSignedIn(label)) continue;
-              candidates.push({el: L, label: label.slice(0, 55)});
+                var href = (L.href || '').split('#')[0];
+                if (!href || seen[href]) return;
+                if (!isDetailPath(new URL(href).pathname)) return;
+                var block = L.closest('[role="listitem"], li, tr, c-wiz, [data-device-id]')
+                  || L.parentElement || L;
+                var label = (block.innerText || L.innerText || '').trim();
+                if (!rowStillSignedIn(label)) return;
+                seen[href] = true;
+                out.push({
+                  href: href,
+                  label: label.slice(0, 120),
+                  kind: sessionKind(label),
+                });
+              } catch(e) {}
             }
-            if (candidates.length) {
-              __click(candidates[0].el);
-              return candidates[0].label;
+            var seen = {};
+            var out = [];
+            var roots = [document.querySelector('[role="main"]'), document.body];
+            for (var r = 0; r < roots.length; r++) {
+              if (!roots[r]) continue;
+              var links = roots[r].querySelectorAll('a[href*="device-activity"]');
+              for (var i = 0; i < links.length; i++) pushLink(links[i], seen, out);
             }
-            var rows = Array.from(document.querySelectorAll('[role="listitem"], li'));
-            for (var r = 0; r < rows.length; r++) {
-              var row = rows[r];
-              if (!__visible(row)) continue;
-              var label = (row.innerText || '').trim();
-              if (!rowStillSignedIn(label)) continue;
-              if (label.toLowerCase().indexOf('find device') !== -1) continue;
-              var link = row.querySelector('a[href*="device-activity"]');
-              if (link && __visible(link)) {
-                __click(link);
-                return label.slice(0, 55);
-              }
-              __click(row);
-              return label.slice(0, 55);
-            }
-            window.scrollBy(0, 400);
-            return null;
+            return out;
             """
         )
+        return raw if isinstance(raw, list) else []
+
+    def collect_active_device_sessions() -> list[dict]:
+        """Scroll full list — Android phone, Chrome device, Windows/Linux computer, etc."""
+        merged: dict[str, dict] = {}
+        try:
+            height = driver.execute_script(
+                "return Math.max(document.body.scrollHeight, "
+                "(document.querySelector('[role=main]')||{}).scrollHeight||0, 1600);"
+            )
+        except Exception:
+            height = 2000
+        steps = max(4, int(height // 400) + 1)
+        for step in range(steps + 1):
+            y = min(step * 400, height)
+            try:
+                driver.execute_script(
+                    "window.scrollTo(0, arguments[0]);"
+                    "var m=document.querySelector('[role=main]');"
+                    "if(m&&m.scrollHeight>m.clientHeight)m.scrollTop=arguments[0];",
+                    y,
+                )
+            except Exception:
+                pass
+            rand_sleep(280, 450)
+            for item in _gather_device_sessions_js():
+                href = item.get("href") or ""
+                if href:
+                    merged[href] = item
+        try:
+            driver.execute_script("window.scrollTo(0, 0);")
+        except Exception:
+            pass
+        out = list(merged.values())
+        out.sort(
+            key=lambda s: (
+                _SESSION_KIND_ORDER.index(s.get("kind") or "session")
+                if (s.get("kind") or "session") in _SESSION_KIND_ORDER
+                else 99,
+                s.get("label") or "",
+            )
+        )
+        return out
+
+    def open_device_session(session: dict) -> str:
+        """Open device detail by URL (reliable for every session type)."""
+        href = session.get("href") or ""
+        label = session.get("label") or ""
+        kind = session.get("kind") or detect_session_kind(label)
+        try:
+            driver.get(href)
+        except Exception:
+            return ""
+        return f"[{kind}] {label[:70]}"
 
     def click_sign_out_on_device_detail() -> str | None:
         """Detail page: click Sign out only (skip Find device)."""
@@ -4473,10 +4564,10 @@ def _do_login(
                   return t.slice(0, 40);
                 }
               }
-              for (var k = 0; k < root.querySelectorAll('*').length; k++) {
-                var n = root.querySelectorAll('*')[k];
-                if (n.shadowRoot) {
-                  var sub = walk(n.shadowRoot);
+              var kids = root.querySelectorAll('*');
+              for (var k = 0; k < kids.length; k++) {
+                if (kids[k].shadowRoot) {
+                  var sub = walk(kids[k].shadowRoot);
                   if (sub) return sub;
                 }
               }
@@ -4486,9 +4577,13 @@ def _do_login(
             """
         )
 
-    def sign_out_current_device_from_list() -> bool:
+    def sign_out_current_device_from_list(signed_out_hrefs: set[str]) -> bool:
         """Last step: open this device → Sign out (same flow as others)."""
-        opened = open_next_device_from_list()
+        sessions = collect_active_device_sessions()
+        pending = [s for s in sessions if (s.get("href") or "") not in signed_out_hrefs]
+        if not pending:
+            return False
+        opened = open_device_session(pending[0])
         if not opened:
             return False
         rand_sleep(1500, 2500)
@@ -4496,6 +4591,9 @@ def _do_login(
         label = click_sign_out_on_device_detail()
         if not label:
             return False
+        href = pending[0].get("href") or ""
+        if href:
+            signed_out_hrefs.add(href)
         log(f"{email} — current device sign-out: {label}")
         rand_sleep(500, 900)
         confirm_device_dialog()
@@ -4525,9 +4623,12 @@ def _do_login(
 
         signed_out_count = 0
         idle_passes = 0
+        signed_out_hrefs: set[str] = set()
+        kinds_done: dict[str, int] = {}
+        kinds_seen: set[str] = set()
 
-        # Flow: list → click device → detail → Sign out (not Find device) → back to list → repeat
-        for _round in range(35):
+        # Flow: scan all session types → open detail → Sign out (not Find device) → repeat
+        for _round in range(50):
             goto_device_activity_list()
             handle_totp_if_prompted("Device list TOTP", max_rounds=2)
 
@@ -4535,17 +4636,32 @@ def _do_login(
                 log(f"{email} — all devices show signed out on list")
                 break
 
-            device_label = open_next_device_from_list()
-            if not device_label:
+            sessions = collect_active_device_sessions()
+            for s in sessions:
+                kinds_seen.add(s.get("kind") or "session")
+            pending = [s for s in sessions if (s.get("href") or "") not in signed_out_hrefs]
+            kinds_on_page = sorted({s.get("kind", "session") for s in sessions})
+            log(
+                f"{email} — sessions on page: {len(sessions)} total, "
+                f"{len(pending)} pending, kinds={kinds_on_page}"
+            )
+
+            if not pending:
                 idle_passes += 1
-                log(f"{email} — no active device row to open (idle {idle_passes}/4)")
-                if idle_passes >= 4:
+                log(f"{email} — no new session to open (idle {idle_passes}/5)")
+                if idle_passes >= 5:
                     break
                 rand_sleep(800, 1200)
                 continue
 
             idle_passes = 0
-            log(f"{email} — opened device: {device_label[:50]}")
+            target = pending[0]
+            href = target.get("href") or ""
+            kind = target.get("kind") or "session"
+            device_label = open_device_session(target)
+            if not device_label:
+                continue
+            log(f"{email} — opened device: {device_label[:80]}")
             rand_sleep(1800, 2800)
             handle_totp_if_prompted("Device detail TOTP", max_rounds=3)
 
@@ -4560,7 +4676,9 @@ def _do_login(
                 continue
 
             signed_out_count += 1
-            log(f"{email} — device sign-out #{signed_out_count}: {sign_out_label}")
+            signed_out_hrefs.add(href)
+            kinds_done[kind] = kinds_done.get(kind, 0) + 1
+            log(f"{email} — device sign-out #{signed_out_count} [{kind}]: {sign_out_label}")
             rand_sleep(500, 900)
             confirm_device_dialog()
             rand_sleep(400, 700)
@@ -4573,11 +4691,15 @@ def _do_login(
 
         if not all_devices_signed_out_on_page():
             log(f"{email} — signing out current device via detail page")
-            sign_out_current_device_from_list()
+            sign_out_current_device_from_list(signed_out_hrefs)
             goto_device_activity_list()
         else:
             log(f"{email} — list already all signed out — logging out browser session")
 
+        kinds_seen_sorted = sorted(kinds_seen)
+        log(
+            f"{email} — session types seen on device activity: {kinds_seen_sorted or ['none']}"
+        )
         log(f"{email} — final logout ({signed_out_count} other device(s) signed out)")
         try:
             driver.get("https://accounts.google.com/Logout?continue=https://myaccount.google.com/")
@@ -4590,8 +4712,11 @@ def _do_login(
         return {
             "status": "opened",
             "reason": (
-                f"Demo password set + device activity cleanup ✅ "
-                f"({signed_out_count} sign-out clicks, naya password export mein — {len(new_pw)} chars)"
+                f"Demo password + saare devices signed out ✅ "
+                f"({signed_out_count} sign-outs; types seen: "
+                f"{', '.join(kinds_seen_sorted) or 'none'}; "
+                f"signed out: {', '.join(f'{k}×{v}' for k, v in sorted(kinds_done.items())) or 'none'}; "
+                f"naya password export — {len(new_pw)} chars)"
             ),
             "totpCode": totp_code,
             "newPassword": new_pw,
