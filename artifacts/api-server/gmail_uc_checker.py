@@ -4389,7 +4389,7 @@ def _do_login(
             except Exception as exc:
                 log(f"{email} — authenticator click: {exc}")
             rand_sleep(600, 900)
-            if find_totp_input() is None:
+            if find_totp_input(driver) is None:
                 try:
                     driver.execute_script("""
                         var links = Array.from(document.querySelectorAll('a, button, [role="button"]'));
@@ -4407,7 +4407,7 @@ def _do_login(
                 except Exception:
                     pass
                 rand_sleep(500, 800)
-        if is_totp_challenge_url(driver.current_url) or find_totp_input() is not None:
+        if is_totp_challenge_url(driver.current_url) or find_totp_input(driver) is not None:
             enter_fresh_totp_once(label)
             deadline = time.time() + 12
             while time.time() < deadline:
