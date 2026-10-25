@@ -447,6 +447,7 @@ log(
     f"{profile['screenW']}x{profile['screenH']} dpr={profile['dpr']}"
 )
 try:
+    os.environ["FP_WEBGL_ONLY"] = "1"
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": make_stealth_js(device_fp),
     })

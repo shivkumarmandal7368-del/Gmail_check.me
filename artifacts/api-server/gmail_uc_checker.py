@@ -1402,6 +1402,54 @@ def make_stealth_js(fp: dict) -> str:
     _wgl1, _wgl2 = _webgl_extensions(fp["webglVendor"], fp["webglRenderer"])
     wgl1_js = _json.dumps(_wgl1)
     wgl2_js = _json.dumps(_wgl2)
+    if os.environ.get("FP_WEBGL_ONLY") == "1":
+        # Device-check experiment: only the WebGL Proxy. The rest of this
+        # script's JS lies are what raised Tampering 8 → 16 and Bot 7.
+        return f"""
+(function(){{
+  var _wv='{wv}', _wr='{wr}', _e1={wgl1_js}, _e2={wgl2_js};
+  function _answer(p, gp, ctx){{
+    if(p===37445||p===7936)return _wv;
+    if(p===37446||p===7937)return _wr;
+    if(p===7938)return '{gl_ver}';
+    if(p===35724)return 'OpenGL ES GLSL ES 3.20';
+    if(p===3379||p===34024||p===34076)return 16384;
+    if(p===36348)return 15;
+    if(p===36349)return 224;
+    if(p===36347)return 256;
+    if(p===33901)return new Float32Array([1,511]);
+    if(p===34930)return 8;
+    try{{return gp.call(ctx,p);}}catch(e){{return null;}}
+  }}
+  function _hook(proto){{
+    if(!proto||proto.__fpgc||typeof proto.getContext!=='function')return;
+    var orig=proto.getContext;
+    proto.getContext=function(type){{
+      var ctx=orig.apply(this,arguments);
+      try{{
+        if(ctx&&type&&String(type).indexOf('webgl')!==-1){{
+          var Ctor=(String(type).indexOf('2')!==-1&&window.WebGL2RenderingContext)?WebGL2RenderingContext:WebGLRenderingContext;
+          var extList=Ctor===WebGL2RenderingContext?_e2:_e1;
+          var nativeGP=Ctor.prototype.getParameter;
+          var wrapped=function(p){{return _answer(p,nativeGP,ctx);}};
+          Ctor.prototype.getParameter=function(p){{return _answer(p,nativeGP,this);}};
+          var ge=ctx.getExtension.bind(ctx);
+          return new Proxy(ctx,{{get:function(t,prop){{
+            if(prop==='getParameter')return wrapped;
+            if(prop==='getSupportedExtensions')return function(){{return extList.slice();}};
+            if(prop==='getExtension')return function(name){{if(extList.indexOf(name)===-1)return null;return ge(name);}};
+            var v=t[prop]; return typeof v==='function'?v.bind(t):v;
+          }}}});
+        }}
+      }}catch(e){{}}
+      return ctx;
+    }};
+    try{{Object.defineProperty(proto,'__fpgc',{{value:1}});}}catch(e){{}}
+  }}
+  _hook(HTMLCanvasElement.prototype);
+  if(window.OffscreenCanvas)_hook(OffscreenCanvas.prototype);
+}})();
+"""
     cv   = fp["chromeVersion"]
     cv_major = cv.split(".")[0]   # e.g. "151" — used in UA-CH brands low-entropy array
     av   = fp["androidVersion"]
