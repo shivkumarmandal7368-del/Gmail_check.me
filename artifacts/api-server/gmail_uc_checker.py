@@ -418,14 +418,48 @@ def is_totp_challenge_url(url: str) -> bool:
     return False
 
 
-def next_fresh_totp(totp_secret: str | None, fallback: str | None = None) -> str | None:
-    """New 30s TOTP window — wait if the current window is about to expire."""
+def totp_window_remaining() -> int:
+    return 30 - (int(time.time()) % 30)
+
+
+def totp_current_window() -> int:
+    return int(time.time()) // 30
+
+
+def next_fresh_totp(
+    totp_secret: str | None,
+    fallback: str | None = None,
+    *,
+    cache: dict | None = None,
+    force_new: bool = False,
+) -> str | None:
+    """TOTP for the current 30s window — reuse cached code until the window rolls."""
     if not totp_secret:
         return fallback
-    secs_left = 30 - (int(time.time()) % 30)
-    if secs_left <= 5:
-        time.sleep(secs_left + 1)
-    return generate_totp(totp_secret) or fallback
+
+    win = totp_current_window()
+    if cache is not None and not force_new:
+        if cache.get("code") and cache.get("window") == win:
+            cache["reused"] = True
+            return cache["code"]
+
+    if force_new:
+        secs_until_next = totp_window_remaining()
+        if secs_until_next > 1:
+            time.sleep(secs_until_next + 0.5)
+        win = totp_current_window()
+    else:
+        secs_left = totp_window_remaining()
+        if secs_left <= 5:
+            time.sleep(secs_left + 1)
+            win = totp_current_window()
+
+    code = generate_totp(totp_secret) or fallback
+    if cache is not None and code:
+        cache["code"] = code
+        cache["window"] = win
+        cache["reused"] = False
+    return code
 
 
 def browser_result_category(result: dict) -> str:
@@ -3822,6 +3856,13 @@ def _do_login(
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
 
+    # One TOTP code per 30s window — reuse across multiple prompts in the same window.
+    _totp_cache: dict = {
+        "code": totp_code,
+        "window": totp_current_window() if totp_code else None,
+        "reused": False,
+    }
+
     def page_state():
         url = driver.current_url
         try:
@@ -4149,18 +4190,21 @@ def _do_login(
             time.sleep(0.15)
         return None
 
-    def enter_fresh_totp_once(label: str) -> bool:
-        """Generate a new TOTP and submit it (retries stale field refs)."""
+    def enter_fresh_totp_once(label: str, force_new: bool = False) -> bool:
+        """Submit TOTP — reuse the current 30s code unless force_new."""
         nonlocal totp_code
         if not totp_secret and not totp_code:
             return False
         from selenium.common.exceptions import StaleElementReferenceException
 
-        code = next_fresh_totp(totp_secret, totp_code)
+        code = next_fresh_totp(
+            totp_secret, totp_code, cache=_totp_cache, force_new=force_new,
+        )
         if not code:
             return False
-        secs_remaining = 30 - (int(time.time()) % 30)
-        log(f"{email} — {label}: fresh TOTP ({secs_remaining}s left in window)")
+        secs_remaining = totp_window_remaining()
+        mode = "reuse same 30s code" if _totp_cache.get("reused") else "new 30s code"
+        log(f"{email} — {label}: TOTP {mode} ({secs_remaining}s left in window)")
 
         for attempt in range(4):
             deadline = time.time() + 14
@@ -4212,7 +4256,7 @@ def _do_login(
         return False
 
     def clear_totp_pages(max_rounds: int = 3, pause_label: str = "TOTP") -> None:
-        """Google may show the TOTP page once or twice — enter a fresh code each time."""
+        """Google may show the TOTP page once or twice — same 30s code until window ends."""
         for round_i in range(max_rounds):
             url_now = driver.current_url
             if not is_totp_challenge_url(url_now):
@@ -4411,7 +4455,8 @@ def _do_login(
         wait_for_device_activity_loaded()
 
         signed_out_count = 0
-        try_sign_out_all_other_sessions()
+        if try_sign_out_all_other_sessions():
+            signed_out_count += 1
 
         idle_passes = 0
         for _round in range(45):
@@ -4428,6 +4473,27 @@ def _do_login(
             clicked = click_next_device_sign_out()
 
             if not clicked:
+                opened_detail = driver.execute_script(
+                    _DEVICE_JS_HELPERS
+                    + """
+                    var here = location.href.replace(/\\/$/, '');
+                    var links = Array.from(document.querySelectorAll('a[href*="device-activity"]'));
+                    for (var i = 0; i < links.length; i++) {
+                      var L = links[i];
+                      if (!__visible(L)) continue;
+                      var h = (L.href || '').replace(/\\/$/, '');
+                      if (h === here) continue;
+                      if (h.indexOf('device-activity') === -1) continue;
+                      if (__click(L)) return h.slice(-40);
+                    }
+                    return null;
+                    """
+                )
+                if opened_detail:
+                    log(f"{email} — opened device detail: …{opened_detail}")
+                    rand_sleep(1500, 2500)
+                    idle_passes = 0
+                    continue
                 idle_passes += 1
                 if idle_passes >= 5:
                     break
@@ -5412,49 +5478,29 @@ def _do_login(
         ]
         if any(x in text for x in _wrong_totp_phrases):
             if totp_secret:
-                # Wait for next TOTP window and try once more
-                secs_until_next = 30 - (int(time.time()) % 30)
-                log(f"{email} — Wrong TOTP, waiting {secs_until_next}s for next window…")
-                time.sleep(secs_until_next + 0.5)
-                retry_code = generate_totp(totp_secret)
-                if retry_code:
-                    log(f"{email} — TOTP retry with fresh code: {retry_code}")
-                    try:
-                        totp_field_retry = wait_for_any([
-                            'input[name="totpPin"]', 'input[name="Pin"]', 'input[id="totpPin"]',
-                            'input[autocomplete="one-time-code"]', 'input[type="tel"]',
-                            'input[aria-label*="code"]', 'input[type="number"]',
-                        ], timeout=8)
-                        if totp_field_retry:
-                            totp_field_retry.clear()
-                            rand_sleep(40, 80)
-                            clipboard_type(driver, totp_field_retry, retry_code)
-                            rand_sleep(100, 200)
-                            totp_field_retry.send_keys(Keys.ENTER)
-                            rand_sleep(700, 1200)
-                            totp_code = retry_code
-                            url, text = page_state()
-                            log(f"{email} — After TOTP retry: {url[:70]}")
-                            # Check again — if still wrong, give up
-                            if any(x in text for x in _wrong_totp_phrases):
-                                # v3/signin/TL=... page: user confirmed these accounts
-                                # are accessible even when TOTP timing fails — mark opened.
-                                if "v3/signin" in url and "challenge" not in url:
-                                    log(f"{email} — Wrong TOTP on v3/signin/TL page (2 attempts) → opened per user rule")
-                                    shot = screenshot_b64()
-                                    return {
-                                        "status": "opened",
-                                        "reason": "Mailbox opened successfully ✅",
-                                        "totpCode": retry_code,
-                                        "debugScreenshot": shot,
-                                    }
-                                return {
-                                    "status": "wrong_password",
-                                    "reason": f"TOTP codes wrong on 2 attempts ({totp_code}, {retry_code}) — check secret",
-                                    "totpCode": retry_code,
-                                }
-                    except Exception as _te:
-                        log(f"{email} — TOTP retry error: {_te}")
+                log(f"{email} — Wrong TOTP — waiting for next 30s window, then retry")
+                _totp_cache["code"] = None
+                _totp_cache["window"] = None
+                if enter_fresh_totp_once("TOTP wrong-code retry", force_new=True):
+                    rand_sleep(700, 1200)
+                    url, text = page_state()
+                    log(f"{email} — After TOTP retry: {url[:70]}")
+                    retry_code = totp_code
+                    if any(x in text for x in _wrong_totp_phrases):
+                        if "v3/signin" in url and "challenge" not in url:
+                            log(f"{email} — Wrong TOTP on v3/signin/TL page (2 attempts) → opened per user rule")
+                            shot = screenshot_b64()
+                            return {
+                                "status": "opened",
+                                "reason": "Mailbox opened successfully ✅",
+                                "totpCode": retry_code,
+                                "debugScreenshot": shot,
+                            }
+                        return {
+                            "status": "wrong_password",
+                            "reason": "TOTP codes wrong on 2 attempts — check 2FA secret",
+                            "totpCode": retry_code,
+                        }
             _cur_url_for_wrong = driver.current_url if hasattr(driver, 'current_url') else url
             if any(x in driver.page_source if hasattr(driver, 'page_source') else "" for x in _wrong_totp_phrases):
                 # v3/signin/TL=... page: mark opened per user confirmation
