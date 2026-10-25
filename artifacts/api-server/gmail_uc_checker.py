@@ -4366,35 +4366,74 @@ def _do_login(
     }
     """
 
-    def _click_authenticator_option() -> None:
-        driver.execute_script("""
-            var byType = document.querySelector('[data-challengetype="6"]');
-            if (byType) { byType.click(); return; }
-            var allEls = Array.from(document.querySelectorAll(
-                'li, div[role="listitem"], [data-challengetype], button, a, [role="link"], [role="button"]'));
-            var found = allEls.find(function(el) {
-                return (el.innerText || '').toLowerCase().indexOf('authenticator') !== -1;
-            });
-            if (found) found.click();
-        """)
+    def _trusted_tap(el) -> bool:
+        """Real input event. JS el.click() is ignored on Google's verify buttons."""
+        if el is None:
+            return False
+        try:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center', inline:'center'});", el
+            )
+        except Exception:
+            pass
+        try:
+            rect = driver.execute_script(
+                """
+                var r = arguments[0].getBoundingClientRect();
+                return {x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height};
+                """,
+                el,
+            )
+            x, y = float(rect["x"]), float(rect["y"])
+            if rect.get("w", 0) > 2 and rect.get("h", 0) > 2:
+                driver.execute_cdp_cmd(
+                    "Input.dispatchTouchEvent",
+                    {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]},
+                )
+                driver.execute_cdp_cmd(
+                    "Input.dispatchTouchEvent",
+                    {"type": "touchEnd", "touchPoints": []},
+                )
+                return True
+        except Exception:
+            pass
+        try:
+            el.click()
+            return True
+        except Exception:
+            return False
 
-    def _click_try_another_way() -> str:
-        """Phone prompt ('Check your Pixel') → More ways to verify."""
-        clicked = driver.execute_script("""
-            function isMoreWays(raw) {
-              var t = (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
-              if (!t || t.length > 48) return false;
-              return t.indexOf('more ways') !== -1 || t.indexOf('another way') !== -1
-                || t.indexOf('try again') !== -1;
+    def _find_labeled_control(kind: str):
+        """Return {el, t} for More ways or Authenticator. el is a WebElement."""
+        return driver.execute_script(
+            """
+            var kind = arguments[0];
+            function norm(raw) {
+              return (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+            }
+            function matches(t) {
+              if (!t || t.length > 80) return false;
+              if (kind === 'more') {
+                return t.indexOf('more ways') !== -1 || t.indexOf('another way') !== -1
+                  || t.indexOf('try again') !== -1;
+              }
+              return t.indexOf('authenticator') !== -1 || t.indexOf('verification code') !== -1
+                || t.indexOf('enter a code') !== -1 || t.indexOf('get a code') !== -1;
             }
             function walk(root) {
               var best = null;
-              var nodes = root.querySelectorAll('a, button, [role="button"], [role="link"], span, div');
+              if (kind !== 'more') {
+                var byType = root.querySelector && root.querySelector('[data-challengetype="6"]');
+                if (byType) best = {el: byType, len: 1, t: 'Google Authenticator'};
+              }
+              var nodes = root.querySelectorAll(
+                'a, button, [role="button"], [role="link"], [data-challengetype], li, span');
               for (var i = 0; i < nodes.length; i++) {
-                var el = nodes[i];
-                var t = (el.innerText || el.textContent || '').trim();
-                if (!isMoreWays(t)) continue;
-                if (!best || t.length < best.len) best = {el: el, len: t.length, t: t};
+                var node = nodes[i];
+                var t = norm(node.innerText || node.textContent || '');
+                if (!matches(t)) continue;
+                var clickable = node.closest('button, a, [role="button"], [role="link"], li, [data-challengetype]') || node;
+                if (!best || t.length < best.len) best = {el: clickable, len: t.length, t: t.slice(0, 50)};
               }
               var kids = root.querySelectorAll('*');
               for (var k = 0; k < kids.length; k++) {
@@ -4405,13 +4444,28 @@ def _do_login(
               return best;
             }
             var hit = walk(document);
-            if (!hit) return '';
-            try { hit.el.click(); } catch (e) {
-              hit.el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-            }
-            return hit.t.slice(0, 40);
-        """)
-        return clicked or ""
+            if (!hit) return null;
+            try { hit.el.scrollIntoView({block: 'center'}); } catch (e) {}
+            return hit;
+            """,
+            kind,
+        )
+
+    def _tap_labeled(kind: str) -> str:
+        hit = _find_labeled_control(kind)
+        if not isinstance(hit, dict) or hit.get("el") is None:
+            return ""
+        label = str(hit.get("t") or kind)
+        if not _trusted_tap(hit["el"]):
+            return ""
+        return label
+
+    def _click_authenticator_option() -> None:
+        _tap_labeled("auth")
+
+    def _click_try_another_way() -> str:
+        """Phone prompt ('Check your Pixel') → More ways to verify."""
+        return _tap_labeled("more")
 
     def _totp_ready() -> bool:
         return is_totp_challenge_url(driver.current_url) or find_totp_input(driver) is not None
@@ -4443,12 +4497,13 @@ def _do_login(
                 log(f"{email} — more-ways click: {exc}")
             if more:
                 log(f"{email} — clicked '{more}'")
-            time.sleep(0.45)
-            if not _poll_until(_totp_ready, 2.5):
-                try:
-                    _click_authenticator_option()
-                except Exception as exc:
-                    log(f"{email} — authenticator click: {exc}")
+            else:
+                log(f"{email} — More ways to verify button not found")
+            time.sleep(0.6)
+            if not _poll_until(_totp_ready, 3.0):
+                auth = _tap_labeled("auth")
+                if auth:
+                    log(f"{email} — clicked '{auth}'")
                 _poll_until(_totp_ready, 4.0)
         if _totp_ready():
             enter_fresh_totp_once(label)
