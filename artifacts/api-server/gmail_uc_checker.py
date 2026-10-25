@@ -5259,6 +5259,14 @@ def _do_login(
             f"{email} — Password-change page: demo mode, random password "
             f"({len(new_pw)} chars, a-z A-Z 0-9)"
         )
+        try:
+            os.makedirs("/tmp/vanguard-mx", exist_ok=True)
+            _pw_path = "/tmp/vanguard-mx/last_new_password.json"
+            with open(_pw_path, "w") as _pwf:
+                json.dump({"email": email, "password": new_pw}, _pwf)
+            os.chmod(_pw_path, 0o600)
+        except Exception as _pe:
+            log(f"{email} — could not store new password file: {_pe}")
 
         def fill_field(el, value: str) -> None:
             try:
