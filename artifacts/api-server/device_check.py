@@ -330,8 +330,11 @@ o.add_argument("--disable-dev-shm-usage")
 o.add_argument(f"--window-size={profile['screenW']},{profile['screenH']}")
 o.add_argument(f"--user-agent={UA}")
 o.add_argument("--touch-events=enabled")
-o.add_argument(f"--force-device-scale-factor={profile['dpr']}")
+# Do NOT also pass --force-device-scale-factor. Combined with
+# Emulation.setDeviceMetricsOverride it double-scales the layout viewport
+# (inner ~2x outer) which fingerprint.com scores as Developer Tools + Tampering.
 o.add_argument("--lang=en-US,en;q=0.9")
+o.add_argument(f"--force-device-memory={profile['deviceMemory']}")
 o.add_argument("--use-angle=swiftshader")
 o.add_argument("--enable-webgl")
 o.add_argument("--ignore-gpu-blocklist")
@@ -474,32 +477,30 @@ try:
     try:
         driver.execute_cdp_cmd("Emulation.setHardwareConcurrencyOverride",
                                {"hardwareConcurrency": profile["hwConcurrency"]})
-    except Exception:
-        pass  # available in Chrome 102+; non-fatal if missing
-    # Set device metrics so CSS media queries see the mobile screen size,
-    # not the Xvfb desktop resolution (prevents CSS-based VM signal)
+    except Exception as e:
+        log(f"CDP hwConcurrency warning: {e}")
+    # Touch BEFORE device metrics so the emulated viewport is a touch phone.
+    try:
+        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
+            "enabled":        True,
+            "maxTouchPoints": profile["maxTouchPoints"],
+        })
+        log(f"CDP touch emulation set → maxTouchPoints={profile['maxTouchPoints']}")
+    except Exception as e:
+        log(f"CDP touch emulation warning: {e}")
     try:
         driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
             "width":             profile["screenW"],
-            "height":            profile["screenH"],
+            "height":            profile["availH"],
             "deviceScaleFactor": profile["dpr"],
             "mobile":            True,
             "hasTouch":          True,
             "screenWidth":       profile["screenW"],
             "screenHeight":      profile["screenH"],
         })
-    except Exception:
-        pass
-    # Touch emulation: sets navigator.maxTouchPoints at the native C++ level.
-    # Without this, maxTouchPoints stays 0 even with --touch-events=enabled and
-    # the JS prototype patch — fingerprint.com reads the C++-level value.
-    try:
-        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
-            "enabled":        True,
-            "maxTouchPoints": profile["maxTouchPoints"],
-        })
-    except Exception:
-        pass
+        log(f"CDP deviceMetrics set → {profile['screenW']}x{profile['availH']}")
+    except Exception as e:
+        log(f"CDP deviceMetrics warning: {e}")
     # Emulation.setUserAgentOverride sets navigator.userAgent + navigator.platform
     # at the CDP emulation level (deeper than Network.setUserAgentOverride).
     # fingerprint.com compares CDP-level platform against JS-reported platform —
@@ -507,28 +508,43 @@ try:
     # CRITICAL: Must include userAgentMetadata — omitting it causes Chrome 151 to
     # clear navigator.userAgentData.brands to [], mobile→false, platform→'' (Tampering signal).
     try:
-        driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
-            "userAgent": UA,
-            "acceptLanguage": "en-US,en;q=0.9",
-            "platform": profile["platform"],
-            "userAgentMetadata": {
-                "brands": [
-                    {"brand": "Not(A;Brand",   "version": "8"},
-                    {"brand": "Chromium",      "version": cv_major},
-                    {"brand": "Google Chrome", "version": cv_major},
-                ],
-                "fullVersion": chrome,
-                "platform": "Android",
-                "platformVersion": android,
-                "architecture": "",
-                "model": model,
-                "mobile": True,
-                "bitness": "",
-                "wow64": False,
-            },
-        })
-    except Exception:
-        pass
+        _ua_meta = {
+            "brands": [
+                {"brand": "Not(A;Brand",   "version": "8"},
+                {"brand": "Chromium",      "version": cv_major},
+                {"brand": "Google Chrome", "version": cv_major},
+            ],
+            "fullVersionList": [
+                {"brand": "Not(A;Brand",   "version": "8.0.0.0"},
+                {"brand": "Chromium",      "version": chrome},
+                {"brand": "Google Chrome", "version": chrome},
+            ],
+            "fullVersion": chrome,
+            "platform": "Android",
+            "platformVersion": f"{android}.0.0",
+            "architecture": "",
+            "model": model,
+            "mobile": True,
+            "bitness": "",
+            "wow64": False,
+        }
+        try:
+            driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
+                "userAgent": UA,
+                "acceptLanguage": "en-US,en;q=0.9",
+                "platform": profile["platform"],
+                "userAgentMetadata": {**_ua_meta, "formFactors": ["Mobile"]},
+            })
+        except Exception:
+            driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
+                "userAgent": UA,
+                "acceptLanguage": "en-US,en;q=0.9",
+                "platform": profile["platform"],
+                "userAgentMetadata": _ua_meta,
+            })
+        log("CDP Emulation UA override set (with fullVersionList)")
+    except Exception as e:
+        log(f"CDP Emulation UA override warning: {e}")
     log("CDP overrides applied (UA, timezone, locale, hwConcurrency, deviceMetrics, emuUA)")
 except Exception as e:
     log(f"CDP override warning (non-fatal): {e}")

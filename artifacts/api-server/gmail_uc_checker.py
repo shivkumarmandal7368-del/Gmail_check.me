@@ -1467,10 +1467,14 @@ def make_stealth_js(fp: dict) -> str:
   }}
   _pd('hardwareConcurrency',{fp['hwConcurrency']});
   _pd('deviceMemory',{fp['deviceMemory']});
-  // Also attempt instance-level override for deviceMemory — in Chrome 151 this is
-  // a [SecureContext] attribute; the prototype descriptor may be non-configurable
-  // or the instance own-property may shadow it. Belt-and-suspenders both levels.
-  try{{Object.defineProperty(navigator,'deviceMemory',{{get:function(){{return {fp['deviceMemory']};}},configurable:true,enumerable:true}});}}catch(e){{}}
+  // Chrome 149+ marks several Navigator accessors non-configurable until deleted.
+  // Delete first, then redefine on the prototype AND the instance.
+  ['deviceMemory','maxTouchPoints'].forEach(function(k){{
+    try{{delete _np[k];}}catch(e){{}}
+    try{{delete navigator[k];}}catch(e){{}}
+  }});
+  _pd('deviceMemory',{fp['deviceMemory']});
+  try{{Object.defineProperty(navigator,'deviceMemory',{{get:function(){{return {fp['deviceMemory']};}},configurable:true,enumerable:true}});if(window.__nr){{var _dm=Object.getOwnPropertyDescriptor(navigator,'deviceMemory');if(_dm&&_dm.get)window.__nr(_dm.get,'deviceMemory',true);}}}}catch(e){{}}
   _pd('cookieEnabled',true);
   _pd('doNotTrack',{dnt_val});
   _pd('maxTouchPoints',{fp['maxTouchPoints']});
@@ -1539,6 +1543,21 @@ def make_stealth_js(fp: dict) -> str:
   _wd('innerHeight',{fp['availH']});
   _wd('outerWidth',{fp['screenW']});
   _wd('outerHeight',{fp['screenH']});
+  // Chrome 149 often keeps innerWidth as a non-configurable own accessor on the
+  // window proxy, so the prototype override never wins. Mirror onto window itself
+  // and visualViewport so outer/inner stay consistent (devtools heuristic).
+  ['innerWidth','outerWidth'].forEach(function(k){{
+    try{{Object.defineProperty(window,k,{{get:function(){{return {fp['screenW']};}},configurable:true}});}}catch(e){{}}
+  }});
+  try{{Object.defineProperty(window,'innerHeight',{{get:function(){{return {fp['availH']};}},configurable:true}});}}catch(e){{}}
+  try{{Object.defineProperty(window,'outerHeight',{{get:function(){{return {fp['screenH']};}},configurable:true}});}}catch(e){{}}
+  try{{
+    if(window.visualViewport){{
+      Object.defineProperty(window.visualViewport,'width',{{get:function(){{return {fp['screenW']};}},configurable:true}});
+      Object.defineProperty(window.visualViewport,'height',{{get:function(){{return {fp['availH']};}},configurable:true}});
+      Object.defineProperty(window.visualViewport,'scale',{{get:function(){{return 1;}},configurable:true}});
+    }}
+  }}catch(e){{}}
 }})();
 // maxTouchPoints, platform, vendor, appVersion now set on Navigator.prototype above
 try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable:true}});}}catch(e){{}}
@@ -2820,8 +2839,9 @@ def check_gmail(
     options.add_argument("--disable-prompt-on-repost")
     options.add_argument(f"--user-agent={MOBILE_UA}")
     options.add_argument("--touch-events=enabled")
-    # Match the fingerprint DPR so window.devicePixelRatio equals screen.dpr
-    options.add_argument(f"--force-device-scale-factor={fp['dpr']}")
+    # DPR comes from Emulation.setDeviceMetricsOverride only. Combining it with
+    # --force-device-scale-factor double-scales innerWidth vs outerWidth, which
+    # fingerprint.com scores as Developer Tools + Tampering.
     # Chrome 151 removed Emulation.setDeviceMemoryOverride CDP command.
     # Use the Chrome flag instead so navigator.deviceMemory reports the correct
     # spoofed value (instead of undefined which is a strong automation signal).
@@ -3037,14 +3057,20 @@ def check_gmail(
                     {"brand": "Chromium",      "version": fp["chromeVersion"].split(".")[0]},
                     {"brand": "Google Chrome", "version": fp["chromeVersion"].split(".")[0]},
                 ],
+                "fullVersionList": [
+                    {"brand": "Not(A;Brand",   "version": "8.0.0.0"},
+                    {"brand": "Chromium",      "version": fp["chromeVersion"]},
+                    {"brand": "Google Chrome", "version": fp["chromeVersion"]},
+                ],
                 "fullVersion": fp["chromeVersion"],
                 "platform": "Android",
-                "platformVersion": fp["androidVersion"],
+                "platformVersion": str(fp["androidVersion"]) + ".0.0",
                 "architecture": "",
                 "model": fp["model"],
                 "mobile": True,
                 "bitness": "",
                 "wow64": False,
+                "formFactors": ["Mobile"],
             },
         })
         log(f"CDP Emulation UA override set → platform={fp['platform']} (with userAgentMetadata)")
