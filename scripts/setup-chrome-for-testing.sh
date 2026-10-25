@@ -38,41 +38,49 @@ ln -sfn "${chrome_dir}/chrome-linux64" "${cache_root}/current"
 chrome_binary="${cache_root}/current/chrome"
 
 # Chrome for Testing is not wrapped by Nix, so explicitly provide the runtime
-# library closure needed by the unwrapped binary.
-library_path="$(
-  nix eval --raw --impure --expr '
-    let pkgs = import <nixpkgs> {};
-    in pkgs.lib.makeLibraryPath [
-      pkgs.glib
-      pkgs.nss
-      pkgs.nspr
-      pkgs.atk
-      pkgs.at-spi2-atk
-      pkgs.cups
-      pkgs.dbus
-      pkgs.libdrm
-      pkgs.libgbm
-      pkgs.mesa
-      pkgs.systemd
-      pkgs.pango
-      pkgs.cairo
-      pkgs.gtk3
-      pkgs.alsa-lib
-      pkgs.libxkbcommon
-      pkgs.xorg.libXi
-      pkgs.xorg.libXrandr
-      pkgs.xorg.libXfixes
-      pkgs.xorg.libXext
-      pkgs.xorg.libXdamage
-      pkgs.xorg.libXcomposite
-      pkgs.xorg.libX11
-      pkgs.xorg.libxcb
-      pkgs.xorg.libXrender
-      pkgs.xorg.libXtst
-      pkgs.expat
-    ]
-  '
-)"
+# library closure needed by the unwrapped binary (Replit). On a plain Linux VPS
+# without Nix, apt packages from scripts/vps-install.sh are enough — keep any
+# existing LD_LIBRARY_PATH.
+chrome_lib_dir="${cache_root}/current"
+if command -v nix >/dev/null 2>&1; then
+  library_path="$(
+    nix eval --raw --impure --expr '
+      let pkgs = import <nixpkgs> {};
+      in pkgs.lib.makeLibraryPath [
+        pkgs.glib
+        pkgs.nss
+        pkgs.nspr
+        pkgs.atk
+        pkgs.at-spi2-atk
+        pkgs.cups
+        pkgs.dbus
+        pkgs.libdrm
+        pkgs.libgbm
+        pkgs.mesa
+        pkgs.systemd
+        pkgs.pango
+        pkgs.cairo
+        pkgs.gtk3
+        pkgs.alsa-lib
+        pkgs.libxkbcommon
+        pkgs.xorg.libXi
+        pkgs.xorg.libXrandr
+        pkgs.xorg.libXfixes
+        pkgs.xorg.libXext
+        pkgs.xorg.libXdamage
+        pkgs.xorg.libXcomposite
+        pkgs.xorg.libX11
+        pkgs.xorg.libxcb
+        pkgs.xorg.libXrender
+        pkgs.xorg.libXtst
+        pkgs.expat
+      ]
+    '
+  )"
+else
+  echo "[chrome-setup] Nix not found — using system libraries (VPS mode)" >&2
+  library_path="${chrome_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
 
 chrome_major="${chrome_version%%.*}"
 runtime_ld_library_path="${library_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"

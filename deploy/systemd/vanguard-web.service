@@ -1,0 +1,18 @@
+[Unit]
+Description=Vanguard MX Web UI
+After=network-online.target vanguard-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__REPO_DIR__
+EnvironmentFile=__REPO_DIR__/deploy/.env
+ExecStart=__REPO_DIR__/scripts/vps-web.sh
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/home/__APP_USER__
+
+[Install]
+WantedBy=multi-user.target

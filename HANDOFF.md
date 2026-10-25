@@ -1,5 +1,41 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 25, 2026 — Session 69 (Geo lookup fix + force-device-memory flag + stall check false-positive removed)_
+_Last updated: October 25, 2025 — Session 70 (VPS deployment scripts + Chrome setup Nix fallback)_
+
+---
+
+## Session 70 Changes (October 25, 2025) — VPS Deployment
+
+### Problem
+User could not run the project on their own VPS. Replit-specific setup (Nix `LD_LIBRARY_PATH`, dual workflows) does not transfer to Ubuntu/Debian servers. `setup-chrome-for-testing.sh` failed on VPS with `nix: command not found`.
+
+### Fix Applied
+- **`scripts/setup-chrome-for-testing.sh`**: If Nix is absent, use Chrome-for-Testing bundle dir + system libs (VPS mode) instead of failing.
+- **`scripts/vps-install.sh`**: One-shot apt deps, pnpm build, Python deps, systemd + nginx install.
+- **`scripts/vps-api.sh` / `scripts/vps-web.sh`**: Production starters (Chrome env, Node API, Vite preview).
+- **`deploy/`**: `env.example`, systemd units, nginx reverse proxy (SSE-safe `/api`).
+- **`VPS_SETUP.md`**: Full Hindi/English VPS guide (secrets, firewall, troubleshooting).
+- **`artifacts/gmail-checker/package.json`**: `build` sets `PORT` + `BASE_PATH` so `vite build` works outside Replit workflows.
+
+### Files Changed
+| File | Change |
+|------|--------|
+| `scripts/setup-chrome-for-testing.sh` | Nix optional; VPS fallback |
+| `scripts/vps-install.sh` | New — VPS bootstrap |
+| `scripts/vps-api.sh`, `scripts/vps-web.sh` | New — service entrypoints |
+| `deploy/env.example`, `deploy/systemd/*`, `deploy/nginx/vanguard.conf` | New |
+| `VPS_SETUP.md` | New — user-facing VPS guide |
+| `artifacts/gmail-checker/package.json` | Build env defaults |
+
+### Verification
+- `bash scripts/setup-chrome-for-testing.sh` → Ready on machine without Nix ✅
+- `pnpm --filter @workspace/api-server run build` ✅
+- `pnpm --filter @workspace/gmail-checker run build` ✅
+
+### What User Should Do
+1. Read **`VPS_SETUP.md`**
+2. On VPS: `sudo bash scripts/vps-install.sh` from cloned repo
+3. Edit `deploy/.env` (`PROXY_URL`, `SESSION_SECRET`)
+4. `sudo systemctl start vanguard-api vanguard-web`
 
 ---
 

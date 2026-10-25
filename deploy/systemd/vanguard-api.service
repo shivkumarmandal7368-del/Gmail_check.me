@@ -1,0 +1,21 @@
+[Unit]
+Description=Vanguard MX API (Gmail checker + device check)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__REPO_DIR__
+EnvironmentFile=__REPO_DIR__/deploy/.env
+ExecStart=__REPO_DIR__/scripts/vps-api.sh
+Restart=on-failure
+RestartSec=5
+# Chrome + Xvfb need a writable home and /tmp
+Environment=HOME=/home/__APP_USER__
+Environment=TMPDIR=/tmp
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
