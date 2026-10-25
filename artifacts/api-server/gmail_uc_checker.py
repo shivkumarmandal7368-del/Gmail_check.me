@@ -3151,6 +3151,7 @@ def main():
     change_password   = bool(data.get("changePasswordAfterLogin", False))
     sign_out_sessions = bool(data.get("signOutSessions", False))
     robot_check_only  = bool(data.get("robotCheckOnly", False))
+    robot_check_batch = bool(data.get("robotCheckBatch", False))
     raw_device_index  = data.get("deviceIndex")
     device_index      = (
         int(raw_device_index)
@@ -3158,7 +3159,53 @@ def main():
         else None
     )
 
+    def _emit_result(result: dict, account_email: str) -> None:
+        result.setdefault("email", account_email)
+        result["category"] = browser_result_category(result)
+        result["durationMs"] = int((time.time() - _t0) * 1000)
+        log(f"{account_email} — Total duration: {result['durationMs']}ms ({result['durationMs']//1000}s)")
+        print(json.dumps(result), flush=True)
+
     _t0 = time.time()
+
+    if robot_check_only and robot_check_batch:
+        raw_emails = data.get("emails")
+        batch_emails: list[str] = []
+        if isinstance(raw_emails, list):
+            for item in raw_emails:
+                if isinstance(item, str) and "@" in item:
+                    batch_emails.append(item.strip().lower())
+        if not batch_emails and email:
+            batch_emails = [email.strip().lower()]
+        if not batch_emails:
+            print(json.dumps({
+                "status": "unknown",
+                "reason": "Robot batch: no emails provided",
+                "totpCode": None,
+                "email": email or "",
+            }), flush=True)
+            return
+        # One Chrome for the whole job — no per-account fresh cookies.
+        batch_fresh = bool(data.get("freshProfile", False))
+        session: dict = {}
+        total = len(batch_emails)
+        log(f"Robot batch: {total} email(s), one Chrome session (fresh={batch_fresh})")
+        for idx, batch_email in enumerate(batch_emails):
+            _t0 = time.time()
+            log(f"ROBOT_CHECKING:{batch_email}")
+            log(f"Robot batch {idx + 1}/{total}: {batch_email}")
+            result = check_gmail(
+                batch_email, password or "robot-check-only", totp_secret, proxy,
+                batch_fresh and idx == 0,
+                proxy_for_ip_check, device_index, change_password,
+                sign_out_sessions, robot_check_only,
+                robot_batch_session=session,
+                robot_batch_finalize=(idx == total - 1),
+                robot_batch_continue=(idx > 0),
+            )
+            _emit_result(result, batch_email)
+        return
+
     result = check_gmail(
         email, password, totp_secret, proxy, fresh_profile,
         proxy_for_ip_check, device_index, change_password,
@@ -3211,10 +3258,7 @@ def main():
         )
         _blocked_reason = result.get("reason", "")
 
-    result["category"] = browser_result_category(result)
-    result["durationMs"] = int((time.time() - _t0) * 1000)
-    log(f"{email} — Total duration: {result['durationMs']}ms ({result['durationMs']//1000}s)")
-    print(json.dumps(result), flush=True)
+    _emit_result(result, email)
 
 
 # ── Browser check ─────────────────────────────────────────────────────────────
@@ -3373,6 +3417,9 @@ def check_gmail(
     change_password_after_login: bool = False,
     sign_out_sessions: bool = False,
     robot_check_only: bool = False,
+    robot_batch_session: dict | None = None,
+    robot_batch_finalize: bool = True,
+    robot_batch_continue: bool = False,
 ) -> dict:
     totp_code = generate_totp(totp_secret) if totp_secret else None
 
@@ -3384,6 +3431,31 @@ def check_gmail(
             "reason": "undetected-chromedriver not installed. Run: pip install -r requirements.txt",
             "totpCode": totp_code,
         }
+
+    _reuse_batch = bool(
+        robot_batch_session is not None and robot_batch_session.get("driver") is not None
+    )
+    if _reuse_batch:
+        driver = robot_batch_session["driver"]
+        _xvfb_proc = robot_batch_session.get("xvfb")
+        _session_lock_fd = robot_batch_session.get("session_lock_fd")
+        _local_proxy_server = robot_batch_session.get("local_proxy_server")
+        profile_dir = robot_batch_session.get("profile_dir") or ""
+        fp = robot_batch_session.get("fp") or {}
+        fp_summary = robot_batch_session.get("fp_summary") or ""
+        exit_ip = robot_batch_session.get("exit_ip")
+        MOBILE_UA = robot_batch_session.get("mobile_ua") or ""
+        log(f"{email} — Robot batch: reusing open Chrome")
+        _login_result = _do_login(
+            driver, email, password, totp_code, totp_secret, fresh_profile,
+            change_password_after_login,
+            sign_out_sessions,
+            robot_check_only,
+            robot_batch_continue=robot_batch_continue,
+        )
+        _login_result["exitIp"] = exit_ip
+        _login_result["fingerprint"] = fp_summary
+        return _login_result
 
     display = ensure_xvfb()
     headless = display is None
@@ -3401,7 +3473,10 @@ def check_gmail(
     _ensure_chromedriver_patched(version_main=chrome_version_main)
 
     # Profile directory — wiped on fresh_profile=True so Google sees a brand-new device
-    safe_email = email.replace("@", "_at_").replace(".", "_")
+    if robot_batch_session is not None:
+        safe_email = "_robot_check_shared"
+    else:
+        safe_email = email.replace("@", "_at_").replace(".", "_")
     profile_base = os.path.join(tempfile.gettempdir(), "gmail_checker_profiles", safe_email)
 
     def _profile_dir_writable(path: str) -> bool:
@@ -3623,6 +3698,19 @@ def check_gmail(
 
     log("Chrome launched")
 
+    if robot_batch_session is not None:
+        robot_batch_session.update({
+            "driver": driver,
+            "xvfb": _xvfb_proc,
+            "session_lock_fd": _session_lock_fd,
+            "local_proxy_server": _local_proxy_server,
+            "profile_dir": profile_dir,
+            "fp": fp,
+            "fp_summary": fp_summary,
+            "exit_ip": exit_ip,
+            "mobile_ua": MOBILE_UA,
+        })
+
     # Locale follows the IP Chrome is actually using, not the preflight request.
     # A rotating gateway can hand those two calls different exits.
     exit_ip = read_browser_exit_ip(driver)
@@ -3763,6 +3851,7 @@ def check_gmail(
             change_password_after_login,
             sign_out_sessions,
             robot_check_only,
+            robot_batch_continue=robot_batch_continue,
         )
 
         # ── Post-login geo fallback (driver still open here!) ──────────────────
@@ -3803,23 +3892,31 @@ def check_gmail(
         log(f"Login exception: {e}")
         _login_result = {"status": "unknown", "reason": f"Login error: {str(e)[:300]}", "totpCode": totp_code}
     finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
-        _cleanup(None, _xvfb_proc)
-        if _local_proxy_server is not None:
+        _keep_chrome_for_batch = (
+            robot_batch_session is not None and not robot_batch_finalize
+        )
+        if _keep_chrome_for_batch:
+            log(f"{email} — Robot batch: Chrome stays open for next email")
+        else:
             try:
-                _local_proxy_server.shutdown()
+                driver.quit()
             except Exception:
                 pass
-        # Release Chrome session slot — next queued account can now start its Chrome
-        try:
-            fcntl.flock(_session_lock_fd, fcntl.LOCK_UN)
-            _session_lock_fd.close()
-            log("Chrome session slot released")
-        except Exception:
-            pass
+            _cleanup(None, _xvfb_proc)
+            if _local_proxy_server is not None:
+                try:
+                    _local_proxy_server.shutdown()
+                except Exception:
+                    pass
+            # Release Chrome session slot — next queued account can now start its Chrome
+            try:
+                fcntl.flock(_session_lock_fd, fcntl.LOCK_UN)
+                _session_lock_fd.close()
+                log("Chrome session slot released")
+            except Exception:
+                pass
+            if robot_batch_session is not None:
+                robot_batch_session.clear()
 
     _login_result["exitIp"] = exit_ip
     _login_result["fingerprint"] = fp_summary
@@ -3878,6 +3975,7 @@ def _do_login(
     change_password_after_login: bool = False,
     sign_out_sessions: bool = False,
     robot_check_only: bool = False,
+    robot_batch_continue: bool = False,
 ) -> dict:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
@@ -5673,50 +5771,66 @@ def _do_login(
                 "debugScreenshot": shot,
             }
 
-    # A phone already has Google cookies and a little mouse history. A cold
-    # profile that opens the sign-in form immediately is what makes the
-    # checkbox escalate to a puzzle. One homepage load is enough; no search.
-    try:
-        log(f"{email} — Warmup: google.com")
-        driver.get("https://www.google.com")
-        _warm_deadline = time.time() + 8
-        while time.time() < _warm_deadline:
+    def _open_signin_page(fast: bool) -> dict | None:
+        label = "Robot batch: next email sign-in" if robot_batch_continue else "Opening sign-in link"
+        log(f"{email} — {label}")
+        try:
+            driver.get(LOGIN_START)
+            if fast:
+                time.sleep(0.35)
+            else:
+                rand_sleep(600, 1000)
+        except Exception as e:
+            shot = None
             try:
-                if driver.execute_script("return document.readyState") == "complete":
-                    break
+                shot = screenshot_b64()
             except Exception:
                 pass
-            time.sleep(0.3)
-        _xdt = _get_xdotool()
-        _win = _get_chrome_win_id()
-        if _xdt and _win:
-            _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
-            subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
-            for _mv in range(3):
-                subprocess.run(
-                    [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
-                    capture_output=True, timeout=3, env=_denv,
-                )
-                time.sleep(random.uniform(0.15, 0.35))
-        rand_sleep(600, 1100)
-    except Exception as _warm_err:
-        log(f"{email} — warmup skipped: {_warm_err}")
+            return {
+                "status": "unknown",
+                "reason": f"Chrome crash while opening accounts.google.com. ({type(e).__name__}: {str(e).splitlines()[0][:150]})",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
+        return None
 
-    log(f"{email} — Opening password-page sign-in link")
-    try:
-        driver.get(LOGIN_START)
-        rand_sleep(600, 1000)
-    except Exception as e:
-        # Navigation failure = Chrome/ChromeDriver crashed — treat as retriable
-        shot = None
-        try: shot = screenshot_b64()
-        except Exception: pass
-        return {
-            "status": "unknown",
-            "reason": f"Chrome crash while opening accounts.google.com. ({type(e).__name__}: {str(e).splitlines()[0][:150]})",
-            "totpCode": totp_code,
-            "debugScreenshot": shot,
-        }
+    if robot_batch_continue or robot_check_only:
+        _nav_err = _open_signin_page(fast=True)
+        if _nav_err:
+            return _nav_err
+    else:
+        # A phone already has Google cookies and a little mouse history. A cold
+        # profile that opens the sign-in form immediately is what makes the
+        # checkbox escalate to a puzzle. One homepage load is enough; no search.
+        try:
+            log(f"{email} — Warmup: google.com")
+            driver.get("https://www.google.com")
+            _warm_deadline = time.time() + 8
+            while time.time() < _warm_deadline:
+                try:
+                    if driver.execute_script("return document.readyState") == "complete":
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.3)
+            _xdt = _get_xdotool()
+            _win = _get_chrome_win_id()
+            if _xdt and _win:
+                _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
+                subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
+                for _mv in range(3):
+                    subprocess.run(
+                        [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
+                        capture_output=True, timeout=3, env=_denv,
+                    )
+                    time.sleep(random.uniform(0.15, 0.35))
+            rand_sleep(600, 1100)
+        except Exception as _warm_err:
+            log(f"{email} — warmup skipped: {_warm_err}")
+
+        _nav_err = _open_signin_page(fast=False)
+        if _nav_err:
+            return _nav_err
 
     url, text = page_state()
     log(f"{email} — After nav: {url[:70]}")
@@ -6006,8 +6120,9 @@ def _do_login(
     if "challenge/recaptcha" in url:
         log(f"{email} — I'm not a robot checkbox — clicking it")
         _rc_result = "missed"
+        _rc_fast = robot_check_only
         try:
-            _iframe_deadline = time.time() + 8
+            _iframe_deadline = time.time() + (3.5 if _rc_fast else 8)
             _anchor_frame = None
             while time.time() < _iframe_deadline and _anchor_frame is None:
                 driver.switch_to.default_content()
@@ -6022,10 +6137,13 @@ def _do_login(
                     time.sleep(0.3)
             if _anchor_frame is not None:
                 driver.switch_to.frame(_anchor_frame)
-                _box = wait_for_any(["#recaptcha-anchor", ".recaptcha-checkbox-border"], timeout=6)
+                _box = wait_for_any(["#recaptcha-anchor", ".recaptcha-checkbox-border"], timeout=4 if _rc_fast else 6)
                 if _box:
                     # Look at the box the way a phone user does, then click once.
-                    rand_sleep(1200, 2200)
+                    if _rc_fast:
+                        time.sleep(0.35)
+                    else:
+                        rand_sleep(1200, 2200)
                     try:
                         natural_mouse_move(driver, _box)
                     except Exception:
@@ -6053,7 +6171,7 @@ def _do_login(
 
             # The puzzle iframe is often already in the DOM. Success is the
             # checkbox ticking, same as on a phone — not the iframe existing.
-            _rc_deadline = time.time() + 10
+            _rc_deadline = time.time() + (4.0 if _rc_fast else 10)
             while time.time() < _rc_deadline:
                 driver.switch_to.default_content()
                 if "challenge/recaptcha" not in driver.current_url or _checkbox_ticked():
@@ -6111,25 +6229,21 @@ def _do_login(
 
     if robot_check_only:
         log(f"{email} — Robot check: looking for password page (no password typed)")
-        pw_probe = wait_for_any(PW_SELECTORS, timeout=8)
+        pw_probe = wait_for_any(PW_SELECTORS, timeout=3.5)
         url, text = page_state()
         if pw_probe:
-            shot = screenshot_b64()
             return {
                 "status": "opened",
                 "reason": "Robot check: password page (not robot)",
                 "totpCode": totp_code,
                 "robotOutcome": "not_robot",
-                "debugScreenshot": shot,
             }
         if "challenge/recaptcha" in url:
-            shot = screenshot_b64()
             return {
                 "status": "verification_required",
                 "reason": "Robot check: captcha / I'm not a robot",
                 "totpCode": totp_code,
                 "robotOutcome": "robot",
-                "debugScreenshot": shot,
             }
         if result:
             out = dict(result)
@@ -6143,16 +6257,13 @@ def _do_login(
                 out["robotOutcome"] = "robot"
             else:
                 out["robotOutcome"] = "unknown"
-            out.setdefault("debugScreenshot", screenshot_b64())
             out.setdefault("totpCode", totp_code)
             return out
-        shot = screenshot_b64()
         return {
             "status": "unknown",
             "reason": f"Robot check: password page nahi mila ({url[:80]})",
             "totpCode": totp_code,
             "robotOutcome": "unknown",
-            "debugScreenshot": shot,
         }
 
     # ── Step 3: Enter password ────────────────────────────────────────────────

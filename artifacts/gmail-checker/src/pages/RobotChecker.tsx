@@ -73,7 +73,7 @@ export function RobotChecker() {
     () => (lsGet<string>(LS.proxyMode, "saved") === "custom" ? "custom" : "saved"),
   );
   const [savedProxy, setSavedProxy] = useState<{ configured: boolean; label: string } | null>(null);
-  const [freshProfile, setFreshProfile] = useState(() => lsGet(LS.fresh, true));
+  const [freshProfile, setFreshProfile] = useState(() => lsGet(LS.fresh, false));
   const deviceIndex = lsGet(LS.device, 0);
   const [activeTab, setActiveTab] = useState<ResultTab>("not_robot");
   const [results, setResults] = useState<ExtResult[]>(() => lsGet(LS.results, []));
@@ -275,9 +275,10 @@ export function RobotChecker() {
     const proxies = proxyMode === "custom" ? parseProxies(proxyText) : [];
     return JSON.stringify({
       robotCheckOnly: true,
+      robotCheckBatch: true,
       emails,
       concurrency: 1,
-      freshProfile,
+      freshProfile: false,
       deviceIndex,
       ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
     });
@@ -405,10 +406,9 @@ export function RobotChecker() {
             {proxyCheckState === "fail" && (
               <p className="text-[10px] text-red-400 font-mono">{proxyCheckError}</p>
             )}
-            <label className="flex items-center gap-2 text-[11px] font-mono cursor-pointer">
-              <input type="checkbox" checked={freshProfile} onChange={e => setFreshProfile(e.target.checked)} disabled={isRunning} />
-              Fresh profile har account
-            </label>
+            <p className="text-[10px] font-mono text-muted-foreground">
+              Ek hi Chrome — har Gmail ke baad sign-in page par wapas, naya browser nahi.
+            </p>
             <div className="flex gap-2 flex-wrap">
               {!isRunning ? (
                 <Button onClick={handleCheck} className="flex-1" disabled={!parseEmails(inputText).length}>

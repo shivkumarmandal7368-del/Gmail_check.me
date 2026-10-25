@@ -310,6 +310,145 @@ async function runWithConcurrency<T>(
   return results;
 }
 
+/** Robot Check only: one Chrome, many emails, NDJSON results on stdout. */
+async function checkRobotBatch(
+  credentials: Array<{ email: string; password: string; totp?: string }>,
+  proxy: string | undefined,
+  deviceIndex: number | undefined,
+  killSet: Set<ChildProcess>,
+  signal: AbortSignal | undefined,
+  onAccountComplete: ((result: BrowserLoginResult) => void) | undefined,
+  onAccountStart: ((email: string) => void) | undefined,
+  onLog: ((email: string, line: string) => void) | undefined,
+): Promise<BrowserLoginResult[]> {
+  const emails = credentials.map(c => c.email);
+  const timeoutMs = Math.min(600_000, Math.max(120_000, emails.length * 90_000));
+  const python = getPython3();
+  const input = JSON.stringify({
+    robotCheckOnly: true,
+    robotCheckBatch: true,
+    emails,
+    freshProfile: false,
+    proxy: proxy ?? null,
+    proxyForIpCheck: proxy ?? null,
+    deviceIndex: Number.isInteger(deviceIndex) ? deviceIndex : null,
+  });
+
+  console.log(`[ROBOT] batch ${emails.length} email(s) — one Chrome session`);
+
+  return new Promise((resolve) => {
+    const proc = spawn(python, [PYTHON_SCRIPT], {
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    killSet.add(proc);
+
+    const results: BrowserLoginResult[] = [];
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    let activeEmail = emails[0] ?? "";
+
+    const timer = setTimeout(() => {
+      try { proc.kill("SIGTERM"); } catch {}
+      resolve(results);
+    }, timeoutMs);
+
+    const pushResult = (parsed: Record<string, unknown>) => {
+      const email = String(parsed.email ?? activeEmail);
+      const result: BrowserLoginResult = {
+        email,
+        status: (parsed.status as BrowserLoginStatus) ?? "unknown",
+        category: (parsed.category as BrowserResultCategory) ?? "unknown",
+        reason: String(parsed.reason ?? "No reason returned"),
+        totpCode: (parsed.totpCode as string | null) ?? null,
+        robotOutcome: typeof parsed.robotOutcome === "string" ? parsed.robotOutcome : undefined,
+        durationMs: typeof parsed.durationMs === "number" ? parsed.durationMs : undefined,
+      };
+      results.push(result);
+      onAccountComplete?.(result);
+    };
+
+    proc.stdout.on("data", (chunk: Buffer) => {
+      stdoutBuf += chunk.toString();
+      const lines = stdoutBuf.split("\n");
+      stdoutBuf = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          pushResult(JSON.parse(trimmed) as Record<string, unknown>);
+        } catch {
+          stderrBuf += trimmed + "\n";
+        }
+      }
+    });
+
+    proc.stderr.on("data", (chunk: Buffer) => {
+      const line = chunk.toString();
+      process.stdout.write(line);
+      for (const raw of line.split(/\r?\n/)) {
+        const trimmed = raw.trim();
+        if (!trimmed) continue;
+        const m = trimmed.match(/ROBOT_CHECKING:([^\s]+)/);
+        if (m?.[1]) {
+          activeEmail = m[1];
+          onAccountStart?.(activeEmail);
+        }
+        onLog?.(activeEmail, redactBrowserLog(trimmed));
+      }
+    });
+
+    proc.stdin.write(input, "utf8");
+    proc.stdin.end();
+
+    proc.on("close", () => {
+      clearTimeout(timer);
+      killSet.delete(proc);
+      const tail = stdoutBuf.trim();
+      if (tail) {
+        try {
+          pushResult(JSON.parse(tail) as Record<string, unknown>);
+        } catch {}
+      }
+      for (const email of emails) {
+        if (!results.some(r => r.email === email)) {
+          const missing: BrowserLoginResult = {
+            email,
+            status: "unknown",
+            category: "unknown",
+            reason: "Robot batch ended without a result for this email",
+            totpCode: null,
+          };
+          results.push(missing);
+          onAccountComplete?.(missing);
+        }
+      }
+      resolve(results);
+    });
+
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      killSet.delete(proc);
+      for (const email of emails) {
+        if (!results.some(r => r.email === email)) {
+          onAccountComplete?.({
+            email,
+            status: "unknown",
+            category: "unknown",
+            reason: `Failed to spawn Python: ${err.message}`,
+            totpCode: null,
+          });
+        }
+      }
+      resolve(results);
+    });
+
+    signal?.addEventListener("abort", () => {
+      try { proc.kill("SIGTERM"); } catch {}
+    }, { once: true });
+  });
+}
+
 export async function browserLoginCheck(
   credentials: Array<{ email: string; password: string; totp?: string }>,
   proxy?: string,
@@ -324,6 +463,32 @@ export async function browserLoginCheck(
   robotCheckOnly = false,
   onLog?: (email: string, line: string) => void, // Python progress for the browser terminal
 ): Promise<BrowserLoginResult[]> {
+  if (robotCheckOnly && credentials.length > 0) {
+    const killSet = new Set<ChildProcess>();
+    const onAbort = () => {
+      for (const p of killSet) {
+        try { p.kill("SIGTERM"); } catch {}
+      }
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      const baseProxy = proxies?.[0] ?? proxy;
+      const pinned = baseProxy ? assignJobProxy(baseProxy, randomSessionId()) : undefined;
+      return await checkRobotBatch(
+        credentials,
+        pinned?.url ?? baseProxy,
+        deviceIndex,
+        killSet,
+        signal,
+        onAccountComplete,
+        onAccountStart,
+        onLog,
+      );
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
   // Proxy selection: rotation list takes priority over single proxy
   const getProxy = (idx: number): string | undefined => {
     if (proxies && proxies.length > 0) return proxies[idx % proxies.length];

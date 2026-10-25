@@ -91,7 +91,7 @@ router.post("/jobs", (req: Request, res: Response) => {
     return;
   }
 
-  const freshProfile = req.body.freshProfile === true;
+  const freshProfile = robotCheckOnly ? false : req.body.freshProfile === true;
   const changePasswordAfterLogin = req.body.changePasswordAfterLogin === true;
   const deviceIndex =
     typeof req.body.deviceIndex === "number" &&
