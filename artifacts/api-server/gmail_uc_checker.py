@@ -350,6 +350,35 @@ def collect_password_fields(driver) -> list:
     return found
 
 
+TOTP_INPUT_SELECTORS = [
+    'input[name="totpPin"]', 'input[name="Pin"]', 'input[id="totpPin"]',
+    'input[autocomplete="one-time-code"]', 'input[type="tel"]',
+    'input[aria-label*="code"]', 'input[aria-label*="Code"]',
+    'input[placeholder*="code"]', 'input[placeholder*="Code"]',
+    'input[type="number"]',
+]
+
+
+def is_totp_challenge_url(url: str) -> bool:
+    """True when the browser is on a Google Authenticator code entry page."""
+    u = url.lower()
+    if "challenge/totp" in u or "challenge/ipp" in u:
+        return True
+    if "v3/signin" in u and "v3/signin/identifier" not in u and "challenge" not in u:
+        return True
+    return False
+
+
+def next_fresh_totp(totp_secret: str | None, fallback: str | None = None) -> str | None:
+    """New 30s TOTP window — wait if the current window is about to expire."""
+    if not totp_secret:
+        return fallback
+    secs_left = 30 - (int(time.time()) % 30)
+    if secs_left <= 5:
+        time.sleep(secs_left + 1)
+    return generate_totp(totp_secret) or fallback
+
+
 def browser_result_category(result: dict) -> str:
     """Return the stable UI category for a browser-check result."""
     status = result.get("status", "")
@@ -4071,6 +4100,57 @@ def _do_login(
             time.sleep(0.15)
         return None
 
+    def enter_fresh_totp_once(label: str) -> bool:
+        """Generate a new TOTP and submit it (retries stale field refs)."""
+        nonlocal totp_code
+        if not totp_secret and not totp_code:
+            return False
+        from selenium.common.exceptions import StaleElementReferenceException
+
+        code = next_fresh_totp(totp_secret, totp_code)
+        if not code:
+            return False
+        secs_remaining = 30 - (int(time.time()) % 30)
+        log(f"{email} — {label}: fresh TOTP ({secs_remaining}s left in window)")
+
+        for attempt in range(4):
+            field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=12)
+            if not field:
+                log(f"{email} — {label}: TOTP field not found")
+                return False
+            try:
+                touch_click(driver, field)
+                rand_sleep(60, 120)
+                try:
+                    field.clear()
+                except Exception:
+                    pass
+                rand_sleep(40, 80)
+                clipboard_type(driver, field, code)
+                rand_sleep(100, 200)
+                field.send_keys(Keys.ENTER)
+                totp_code = code
+                log(f"{email} — {label}: TOTP submitted")
+                return True
+            except StaleElementReferenceException:
+                log(f"{email} — {label}: stale TOTP field, re-finding ({attempt + 1}/4)")
+                time.sleep(0.35)
+            except Exception as exc:
+                log(f"{email} — {label}: TOTP entry error: {exc}")
+                time.sleep(0.35)
+        return False
+
+    def clear_totp_pages(max_rounds: int = 3, pause_label: str = "TOTP") -> None:
+        """Google may show the TOTP page once or twice — enter a fresh code each time."""
+        for round_i in range(max_rounds):
+            url_now = driver.current_url
+            if not is_totp_challenge_url(url_now):
+                return
+            log(f"{email} — {pause_label} page round {round_i + 1}/{max_rounds}")
+            if not enter_fresh_totp_once(f"{pause_label} round {round_i + 1}"):
+                return
+            rand_sleep(900, 1400)
+
     def complete_password_change_if_needed(current_url: str) -> dict | None:
         """College demo: fill random new password on myaccount signinoptions/password."""
         if not change_password_after_login or not is_google_password_change_url(current_url):
@@ -4169,6 +4249,7 @@ def _do_login(
             rand_sleep(400, 700)
             click_submit()
             rand_sleep(3000, 4500)
+            clear_totp_pages(max_rounds=2, pause_label="After password change")
 
             url_after, text_after = page_state()
             if is_google_password_change_url(url_after):
@@ -4187,6 +4268,7 @@ def _do_login(
                     rand_sleep(200, 400)
                     click_submit()
                     rand_sleep(3000, 4500)
+                    clear_totp_pages(max_rounds=2, pause_label="After password change retry")
                     url_after, text_after = page_state()
 
             if not is_google_password_change_url(url_after):
@@ -4726,29 +4808,14 @@ def _do_login(
 
     # Broad TOTP input selectors — used in multiple places below.
     # Covers all known Google Authenticator input variants across UI versions.
-    TOTP_SELECTORS = [
-        'input[name="totpPin"]', 'input[name="Pin"]', 'input[id="totpPin"]',
-        'input[autocomplete="one-time-code"]', 'input[type="tel"]',
-        'input[aria-label*="code"]', 'input[aria-label*="Code"]',
-        'input[placeholder*="code"]', 'input[placeholder*="Code"]',
-        'input[type="number"]',
-    ]
-
-    # True when Google has already landed on the TOTP input page directly
-    # (e.g. "Verify that it's you — Get a verification code from Google Authenticator")
-    # URL: challenge/totp, challenge/ipp, OR v3/signin/TL=... (same page, different URL format)
-    _on_totp_url = (
-        "challenge/totp" in url
-        or "challenge/ipp" in url
-        or ("v3/signin" in url and "v3/signin/identifier" not in url and "challenge" not in url)
-    )
+    _on_totp_url = is_totp_challenge_url(url)
 
     # Detect direct TOTP-input page (input already visible).
     # If we know we're on a TOTP URL, wait briefly for the field — single
     # find_element with no wait misses the field when the page is still rendering.
     totp_field = None
     if _on_totp_url:
-        totp_field = wait_for_any(TOTP_SELECTORS, timeout=8)
+        totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=8)
         log(f"{email} — TOTP URL detected ({url[:60]}), field={'found' if totp_field else 'not yet visible'}")
     else:
         try:
@@ -4797,7 +4864,7 @@ def _do_login(
             # Already on the TOTP input page (challenge/totp or challenge/ipp).
             # Do NOT click Authenticator — just wait longer for the input field.
             log(f"{email} — Already on TOTP input page, waiting for field to render…")
-            totp_field = wait_for_any(TOTP_SELECTORS, timeout=15)
+            totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=15)
             if totp_field is None:
                 log(f"{email} — TOTP field still not found on challenge/totp page after 15s wait")
         else:
@@ -4832,7 +4899,7 @@ def _do_login(
             rand_sleep(700, 1100)
 
             # Wait for the TOTP input to appear (longer timeout — SPA navigation on dp page)
-            totp_field = wait_for_any(TOTP_SELECTORS, timeout=18)
+            totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=18)
 
             # Fallback: try "Try another way" → then click authenticator again
             if totp_field is None:
@@ -4850,7 +4917,7 @@ def _do_login(
                     rand_sleep(700, 1200)
                     _click_authenticator()
                     rand_sleep(700, 1200)
-                    totp_field = wait_for_any(TOTP_SELECTORS, timeout=15)
+                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=15)
                 except Exception as e:
                     log(f"Try another way error: {e}")
 
@@ -4869,77 +4936,24 @@ def _do_login(
                 return {"status": "opened", "reason": "Mailbox opened successfully ✅", "totpCode": None, "debugScreenshot": shot}
             return {"status": "2fa_required", "reason": "2FA required — provide TOTP secret", "totpCode": None, "debugScreenshot": shot}
 
-        # CRITICAL: regenerate TOTP right before entry.
-        # The original code was generated at check start (~60s ago) and may have expired.
-        # TOTP codes rotate every 30 seconds — stale code = "wrong code" from Google.
-        if totp_secret:
-            fresh_code = generate_totp(totp_secret)
-            if fresh_code:
-                secs_left = 30 - (int(time.time()) % 30)
-                if secs_left <= 4:
-                    # Window ends in <4s — wait for next fresh window to avoid race
-                    log(f"{email} — TOTP window ending in {secs_left}s, waiting for next window…")
-                    time.sleep(secs_left + 1)
-                    fresh_code = generate_totp(totp_secret)
-                totp_code = fresh_code
-                secs_remaining = 30 - (int(time.time()) % 30)
-                log(f"{email} — Fresh TOTP code: {totp_code} ({secs_remaining}s left in window)")
-
-        log(f"{email} — Entering TOTP code: {totp_code}")
-        try:
-            touch_click(driver, totp_field)   # TouchEvent tap to focus field
-            rand_sleep(60, 120)
-            totp_field.clear()
-            rand_sleep(40, 80)
-            clipboard_type(driver, totp_field, totp_code)  # paste TOTP code instantly
-            rand_sleep(100, 200)
-            totp_field.send_keys(Keys.ENTER)
-        except Exception as e:
-            log(f"TOTP entry error: {e}")
+        # Fresh code each time — Google may show TOTP once or twice (or again after password change).
+        enter_fresh_totp_once("Step 4 — TOTP")
+        clear_totp_pages(max_rounds=2, pause_label="Step 4 — extra TOTP")
 
         rand_sleep(700, 1200)
 
-        # Wait for Gmail to fully load (signin/continue is an auto-redirect page)
         log(f"{email} — Waiting for Google Account after TOTP…")
         _totp_redirect_early = None
-        _second_totp_done = False   # guard: only enter second TOTP once
         deadline = time.time() + 30
         while time.time() < deadline:
             url = driver.current_url
-            if signed_in_host(url):
+            if signed_in_host(url) or is_google_password_change_url(url):
                 break
 
-            # ── Second TOTP: Google sometimes asks for TOTP twice ─────────────
-            # After first TOTP is submitted, Google may redirect back to another
-            # TOTP page (challenge/totp OR v3/signin/TL=...).  Re-enter fresh code.
-            _on_second_totp = (
-                "challenge/totp" in url
-                or "challenge/ipp" in url
-                or ("v3/signin" in url and "challenge" not in url and "v3/signin/identifier" not in url)
-            )
-            if _on_second_totp and not _second_totp_done:
-                log(f"{email} — Second TOTP page detected ({url[:60]}), entering fresh code")
-                _sec_code = generate_totp(totp_secret) if totp_secret else totp_code
-                if _sec_code:
-                    _sec_field = wait_for_any(TOTP_SELECTORS, timeout=6)
-                    if _sec_field:
-                        try:
-                            _sec_field.clear()
-                            rand_sleep(40, 80)
-                            clipboard_type(driver, _sec_field, _sec_code)
-                            rand_sleep(100, 200)
-                            _sec_field.send_keys(Keys.ENTER)
-                            log(f"{email} — Second TOTP entered: {_sec_code}")
-                            rand_sleep(700, 1200)
-                        except Exception as _ste:
-                            log(f"{email} — Second TOTP entry error: {_ste}")
-                else:
-                    # No TOTP secret — can't enter code, mark opened per user rule
-                    log(f"{email} — Second TOTP page, no secret → opened per user rule")
-                    shot = screenshot_b64()
-                    return {"status": "opened", "reason": "Mailbox opened successfully ✅", "totpCode": None, "debugScreenshot": shot}
-                _second_totp_done = True
-                continue  # restart loop with fresh URL check
+            if is_totp_challenge_url(url):
+                enter_fresh_totp_once("TOTP while waiting for redirect")
+                rand_sleep(700, 1200)
+                continue
 
             # ── Early exit: detect "Verify your info to continue" immediately ──
             # Any non-TOTP challenge URL = verification_required, no need to wait
