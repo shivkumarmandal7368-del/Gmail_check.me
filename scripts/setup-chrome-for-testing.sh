@@ -85,6 +85,26 @@ fi
 chrome_major="${chrome_version%%.*}"
 runtime_ld_library_path="${library_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
+# Google sign-in rejects Chrome for Testing with "this browser or app may not
+# be secure" (signin/rejected) even when the UA is spoofed. Prefer the normal
+# Chrome stable package when it is installed; keep CfT as the fallback.
+stable_chrome=""
+for candidate in /usr/bin/google-chrome-stable /usr/bin/google-chrome /opt/google/chrome/chrome; do
+  if [[ -x "${candidate}" ]]; then
+    stable_chrome="${candidate}"
+    break
+  fi
+done
+if [[ -n "${stable_chrome}" ]]; then
+  chrome_binary="${stable_chrome}"
+  detected="$("${stable_chrome}" --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+){3}' | head -1 || true)"
+  if [[ -n "${detected}" ]]; then
+    chrome_version="${detected}"
+    chrome_major="${chrome_version%%.*}"
+  fi
+  runtime_ld_library_path="${LD_LIBRARY_PATH:-}"
+fi
+
 # stdout is deliberately shell-sourceable; diagnostics stay on stderr.
 printf 'export CHROME_BINARY=%q\n' "${chrome_binary}"
 printf 'export CHROME_VERSION_MAIN=%q\n' "${chrome_major}"

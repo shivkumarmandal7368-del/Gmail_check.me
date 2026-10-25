@@ -2441,6 +2441,51 @@ try{{
 """
 
 
+def make_login_stealth_js(fp: dict) -> str:
+    """Small patch for Google sign-in.
+
+    The full stealth script rewrites navigator, plugins, canvas, and toString.
+    That raises bot/tamper scores and Google answers with signin/rejected
+    ("this browser or app may not be secure") before the password field.
+    Keep only the mismatches that are real on this host: WebGL vendor,
+    desktop chrome.app, and the Keyboard API.
+    """
+    wv = str(fp.get("webglVendor", "")).replace("\\", "\\\\").replace("'", "\\'")
+    wr = str(fp.get("webglRenderer", "")).replace("\\", "\\\\").replace("'", "\\'")
+    return f"""
+(function(){{
+  ['log','debug','info','warn','error','table','dir','dirxml','trace'].forEach(function(k){{
+    try{{console[k]=function(){{}};}}catch(e){{}}
+  }});
+  try{{delete window.chrome.app;}}catch(e){{}}
+  try{{
+    if(window.chrome) Object.defineProperty(window.chrome,'app',{{
+      get:function(){{return undefined;}}, configurable:true, enumerable:false
+    }});
+  }}catch(e){{}}
+  try{{delete Navigator.prototype.keyboard;}}catch(e){{}}
+  try{{delete navigator.keyboard;}}catch(e){{}}
+  try{{
+    Object.defineProperty(Navigator.prototype,'keyboard',{{
+      get:function(){{return undefined;}}, configurable:false, enumerable:false
+    }});
+  }}catch(e){{}}
+  function _patch(Ctor){{
+    if(!Ctor||!Ctor.prototype||!Ctor.prototype.getParameter)return;
+    if(!Ctor.prototype.__fpNative) Ctor.prototype.__fpNative=Ctor.prototype.getParameter;
+    var native=Ctor.prototype.__fpNative;
+    Ctor.prototype.getParameter=function(p){{
+      if(p===37445||p===7936)return '{wv}';
+      if(p===37446||p===7937)return '{wr}';
+      return native.call(this,p);
+    }};
+  }}
+  _patch(window.WebGLRenderingContext);
+  _patch(window.WebGL2RenderingContext);
+}})();
+"""
+
+
 def get_chromium_path() -> str | None:
     """Prefer the bootstrapped Chrome for Testing binary over Nix Chromium."""
     candidates = [
@@ -3179,13 +3224,9 @@ def check_gmail(
     # "invalid session id" crash after launch.
     options.add_argument("--disable-sync")
     options.add_argument("--no-pings")
-    # NOTE: --disable-background-networking, --disable-client-side-phishing-detection,
-    # --disable-domain-reliability, --disable-hang-monitor intentionally removed —
-    # these are well-known Selenium/automation fingerprint flags that Google's bot
-    # detection actively checks for. They are not needed for the login flow.
-    options.add_argument("--disable-component-update")
-    options.add_argument("--disable-default-apps")
-    options.add_argument("--disable-prompt-on-repost")
+    # Do not pass the usual Selenium flag bundle (--disable-component-update,
+    # --disable-default-apps, --disable-background-networking, etc.). Google's
+    # sign-in page treats that set as an insecure/automated browser.
     options.add_argument(f"--user-agent={MOBILE_UA}")
     options.add_argument("--touch-events=enabled")
     # DPR comes from Emulation.setDeviceMetricsOverride only. Combining it with
@@ -3326,16 +3367,12 @@ def check_gmail(
             f"tz={fp.get('timezone')} lang={fp.get('language')} keyboard={fp.get('keyboard')}"
         )
 
-    # Inject stealth patches on every new page (fingerprint-specific values)
+    # Login uses the small patch only. The full stealth script is what Google
+    # flags on the identifier page (signin/rejected / "browser may not be secure").
     try:
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
-                               {"source": make_stealth_js(fp)})
-        # Second-pass inject: plugins/mimeTypes override must run after main stealth JS
-        # because Chrome's C++ only makes Navigator.prototype.plugins configurable
-        # after the first injected script completes. See make_plugins_override_js().
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
-                               {"source": make_plugins_override_js()})
-        log("Stealth JS injected via CDP")
+                               {"source": make_login_stealth_js(fp)})
+        log("Login stealth JS injected via CDP")
     except Exception as e:
         log(f"Stealth JS warning: {e}")
 
@@ -3369,34 +3406,35 @@ def check_gmail(
     except Exception as e:
         log(f"CDP hwConcurrency warning (non-fatal): {e}")
 
-    # VM detection fix: CSS media queries see the real Xvfb desktop resolution
-    # (1440x1024) unless we override device metrics. This leaks as a VM signal.
+    # Touch BEFORE device metrics so the viewport is a phone, not a desktop
+    # window with a mobile UA (Google rejects that mix as an insecure browser).
+    try:
+        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
+            "enabled":        True,
+            "maxTouchPoints": fp["maxTouchPoints"],
+            "configuration":  "mobile",
+        })
+        log(f"CDP touch emulation set → maxTouchPoints={fp['maxTouchPoints']}")
+    except Exception as e:
+        log(f"CDP touch emulation warning (non-fatal): {e}")
+
+    # Viewport height is the usable screen (availH), not the full panel height.
+    # Using screenH here makes innerHeight larger than a real phone and is scored
+    # as DevTools / tampering.
+    _view_h = int(fp.get("availH") or fp["screenH"])
     try:
         driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
             "width":             fp["screenW"],
-            "height":            fp["screenH"],
+            "height":            _view_h,
             "deviceScaleFactor": fp["dpr"],
             "mobile":            True,
             "hasTouch":          True,
             "screenWidth":       fp["screenW"],
             "screenHeight":      fp["screenH"],
         })
-        log(f"CDP deviceMetrics set → {fp['screenW']}x{fp['screenH']} dpr={fp['dpr']}")
+        log(f"CDP deviceMetrics set → {fp['screenW']}x{_view_h} dpr={fp['dpr']}")
     except Exception as e:
         log(f"CDP deviceMetrics warning (non-fatal): {e}")
-
-    # Touch emulation: sets navigator.maxTouchPoints at the native C++ level.
-    # Without this CDP call, maxTouchPoints is 0 (desktop default) even with
-    # --touch-events=enabled and the JS prototype patch — fingerprint.com reads
-    # the C++-level value which bypasses JS prototype overrides entirely.
-    try:
-        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
-            "enabled":        True,
-            "maxTouchPoints": fp["maxTouchPoints"],
-        })
-        log(f"CDP touch emulation set → maxTouchPoints={fp['maxTouchPoints']}")
-    except Exception as e:
-        log(f"CDP touch emulation warning (non-fatal): {e}")
 
     # deviceMemory override at C++ level — the JS prototype patch alone can be
     # bypassed by fingerprint.com reading the CDP-reported value directly.
