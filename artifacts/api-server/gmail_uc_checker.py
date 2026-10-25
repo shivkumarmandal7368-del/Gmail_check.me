@@ -4378,15 +4378,40 @@ def _do_login(
             if (found) found.click();
         """)
 
-    def _click_try_another_way() -> None:
-        driver.execute_script("""
-            var links = Array.from(document.querySelectorAll('a, button, [role="button"], [role="link"]'));
-            var found = links.find(function(el) {
-                var t = (el.innerText || '').toLowerCase();
-                return t.indexOf('another way') !== -1 || t.indexOf('try again') !== -1;
-            });
-            if (found) found.click();
+    def _click_try_another_way() -> str:
+        """Phone prompt ('Check your Pixel') → More ways to verify."""
+        clicked = driver.execute_script("""
+            function isMoreWays(raw) {
+              var t = (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+              if (!t || t.length > 48) return false;
+              return t.indexOf('more ways') !== -1 || t.indexOf('another way') !== -1
+                || t.indexOf('try again') !== -1;
+            }
+            function walk(root) {
+              var best = null;
+              var nodes = root.querySelectorAll('a, button, [role="button"], [role="link"], span, div');
+              for (var i = 0; i < nodes.length; i++) {
+                var el = nodes[i];
+                var t = (el.innerText || el.textContent || '').trim();
+                if (!isMoreWays(t)) continue;
+                if (!best || t.length < best.len) best = {el: el, len: t.length, t: t};
+              }
+              var kids = root.querySelectorAll('*');
+              for (var k = 0; k < kids.length; k++) {
+                if (!kids[k].shadowRoot) continue;
+                var sub = walk(kids[k].shadowRoot);
+                if (sub && (!best || sub.len < best.len)) best = sub;
+              }
+              return best;
+            }
+            var hit = walk(document);
+            if (!hit) return '';
+            try { hit.el.click(); } catch (e) {
+              hit.el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+            }
+            return hit.t.slice(0, 40);
         """)
+        return clicked or ""
 
     def _totp_ready() -> bool:
         return is_totp_challenge_url(driver.current_url) or find_totp_input(driver) is not None
@@ -4410,20 +4435,20 @@ def _do_login(
             return False
         log(f"{email} — {label}: Google re-auth ({url[:70]})")
         if on_picker and not _totp_ready():
+            # "Check your Pixel / tap 83" is a phone prompt. More ways → TOTP.
             try:
-                _click_authenticator_option()
+                more = _click_try_another_way()
             except Exception as exc:
-                log(f"{email} — authenticator click: {exc}")
-            if not _poll_until(_totp_ready, 3.5):
-                try:
-                    _click_try_another_way()
-                except Exception:
-                    pass
-                time.sleep(0.4)
+                more = ""
+                log(f"{email} — more-ways click: {exc}")
+            if more:
+                log(f"{email} — clicked '{more}'")
+            time.sleep(0.45)
+            if not _poll_until(_totp_ready, 2.5):
                 try:
                     _click_authenticator_option()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log(f"{email} — authenticator click: {exc}")
                 _poll_until(_totp_ready, 4.0)
         if _totp_ready():
             enter_fresh_totp_once(label)
@@ -5786,7 +5811,8 @@ def _do_login(
                         var links = Array.from(document.querySelectorAll('a, button, [role="button"]'));
                         var found = links.find(function(el) {
                             var t = (el.innerText || '').toLowerCase();
-                            return t.indexOf('another way') !== -1 || t.indexOf('different') !== -1
+                            return t.indexOf('more ways') !== -1 || t.indexOf('another way') !== -1
+                                || t.indexOf('different') !== -1
                                 || t.indexOf('more options') !== -1 || t.indexOf('try again') !== -1;
                         });
                         if (found) found.click();
