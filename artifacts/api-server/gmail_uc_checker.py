@@ -1776,9 +1776,11 @@ try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable
   try{{Object.defineProperty(Navigator.prototype,'userAgentData',{{get:function(){{return d;}},configurable:true,enumerable:true}});if(window.__nr){{var _uadd=Object.getOwnPropertyDescriptor(Navigator.prototype,'userAgentData');if(_uadd&&_uadd.get)window.__nr(_uadd.get,'userAgentData',true);}}}}catch(e){{}}
 }})();
 (function(){{
-  if(!window.chrome)window.chrome={{}};
-  if(!window.chrome.runtime){{
-    window.chrome.runtime={{
+  // Intercept Chrome's late window.chrome = {{app, runtime}} assignment (runs AFTER this script).
+  // Direct delete/defineProperty on window.chrome.app fails when window.chrome is still undefined here.
+  var _chromeRef=undefined;
+  function _mockRuntime(){{
+    return{{
       connect:function(){{throw new Error('Could not establish connection. Receiving end does not exist.');}},
       sendMessage:function(){{throw new Error('Could not establish connection. Receiving end does not exist.');}},
       onMessage:{{addListener:function(){{}},removeListener:function(){{}},hasListener:function(){{return false;}}}},
@@ -1786,25 +1788,39 @@ try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable
       id:undefined
     }};
   }}
-  // Register chrome.runtime methods as native-looking so .toString() doesn't reveal JS source.
-  // Real Chrome's runtime is a C++ native object — unregistered overrides expose JS source.
-  if(window.__nr&&window.chrome.runtime){{
-    window.__nr(window.chrome.runtime.connect,'connect');
-    window.__nr(window.chrome.runtime.sendMessage,'sendMessage');
-    if(window.chrome.runtime.onMessage){{
-      window.__nr(window.chrome.runtime.onMessage.addListener,'addListener');
-      window.__nr(window.chrome.runtime.onMessage.removeListener,'removeListener');
-      window.__nr(window.chrome.runtime.onMessage.hasListener,'hasListener');
+  function _registerRuntimeNative(rt){{
+    if(!window.__nr||!rt)return;
+    window.__nr(rt.connect,'connect');
+    window.__nr(rt.sendMessage,'sendMessage');
+    if(rt.onMessage){{
+      window.__nr(rt.onMessage.addListener,'addListener');
+      window.__nr(rt.onMessage.removeListener,'removeListener');
+      window.__nr(rt.onMessage.hasListener,'hasListener');
     }}
   }}
-  // chrome.app must be absent on Android Chrome — delete it, then unconditionally
-  // defineProperty so Chrome's internal restoration cannot re-expose it.
-  // The old conditional guard (if app!==undefined) was wrong: if delete succeeded,
-  // the guard skipped defineProperty, allowing Chrome to restore app after script exit.
-  try{{delete window.chrome.app;}}catch(e){{}}
-  try{{Object.defineProperty(window.chrome,'app',{{get:function(){{return undefined;}},configurable:true,enumerable:false}});}}catch(e){{}}
-  if(!window.chrome.loadTimes){{var _lt=Date.now()/1000;window.chrome.loadTimes=function(){{var _t=Date.now()/1000;return{{requestTime:_t-0.5,startLoadTime:_t-0.5,commitLoadTime:_t-0.3,finishDocumentLoadTime:_t-0.1,finishLoadTime:_t,firstPaintTime:_lt-0.25,firstPaintAfterLoadTime:_lt-0.18,navigationType:'Other',wasFetchedViaSpdy:false,wasNpnNegotiated:false,npnNegotiatedProtocol:'',wasAlternateProtocolAvailable:false,connectionInfo:''}}}};if(window.__nr)window.__nr(window.chrome.loadTimes,'loadTimes');}}
-  if(!window.chrome.csi)window.chrome.csi=function(){{return{{startE:Date.now()-1000,onloadT:Date.now()-500,pageT:500,tran:15}}}};
+  function _sanitizeChrome(c){{
+    if(!c||typeof c!=='object')return c;
+    try{{delete c.app;}}catch(e){{}}
+    try{{delete c.webstore;}}catch(e){{}}
+    if(!c.runtime)c.runtime=_mockRuntime();
+    else{{
+      try{{Object.defineProperty(c.runtime,'id',{{get:function(){{return undefined;}},configurable:true}});}}catch(e){{}}
+    }}
+    _registerRuntimeNative(c.runtime);
+    try{{Object.defineProperty(c,'app',{{get:function(){{return undefined;}},configurable:true,enumerable:false}});}}catch(e){{}}
+    if(!c.loadTimes){{var _lt=Date.now()/1000;c.loadTimes=function(){{var _t=Date.now()/1000;return{{requestTime:_t-0.5,startLoadTime:_t-0.5,commitLoadTime:_t-0.3,finishDocumentLoadTime:_t-0.1,finishLoadTime:_t,firstPaintTime:_lt-0.25,firstPaintAfterLoadTime:_lt-0.18,navigationType:'Other',wasFetchedViaSpdy:false,wasNpnNegotiated:false,npnNegotiatedProtocol:'',wasAlternateProtocolAvailable:false,connectionInfo:''}}}};if(window.__nr)window.__nr(c.loadTimes,'loadTimes');}}
+    if(!c.csi)c.csi=function(){{return{{startE:Date.now()-1000,onloadT:Date.now()-500,pageT:500,tran:15}}}};
+    return c;
+  }}
+  try{{
+    Object.defineProperty(window,'chrome',{{
+      configurable:false,enumerable:true,
+      get:function(){{return _chromeRef;}},
+      set:function(v){{_chromeRef=_sanitizeChrome(v);}}
+    }});
+  }}catch(e){{}}
+  // Seed Android-like chrome before the browser assigns its desktop object.
+  try{{window.chrome=_sanitizeChrome({{}});}}catch(e){{}}
 }})();
 if(window.Notification){{Object.defineProperty(Notification,'permission',{{get:()=>'default'}});}}
 try{{
@@ -1849,7 +1865,7 @@ try{{
 // Delete from both prototype and instance (Chrome 149 may set it as own property).
 try{{delete Navigator.prototype.keyboard;}}catch(e){{}}
 try{{delete navigator.keyboard;}}catch(e){{}}
-try{{Object.defineProperty(Navigator.prototype,'keyboard',{{get:function(){{return undefined;}},configurable:true,enumerable:false}});}}catch(e){{}}
+try{{Object.defineProperty(Navigator.prototype,'keyboard',{{get:function(){{return undefined;}},configurable:false,enumerable:false}});}}catch(e){{}}
 // pdfViewerEnabled: exists on Navigator.prototype in Chrome 113+ — must be on prototype, not instance
 try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function(){{return true;}},configurable:true,enumerable:true}});}}catch(e){{}}
 (function(){{
@@ -2571,18 +2587,29 @@ def make_plugins_override_js() -> str:
       get: _tpGet, configurable: true, enumerable: true
     });
   } catch(e) {}
+
+  // Re-lock keyboard on HTTPS — Chrome may add Keyboard API after script-1 runs.
+  try { delete Navigator.prototype.keyboard; } catch(e) {}
+  try { delete navigator.keyboard; } catch(e) {}
   try {
-    delete Navigator.prototype.keyboard;
-    delete navigator.keyboard;
+    Object.defineProperty(Navigator.prototype, 'keyboard', {
+      get: function() { return undefined; },
+      configurable: false,
+      enumerable: false
+    });
   } catch(e) {}
+
+  // Strip desktop-only chrome.app if the browser assigned window.chrome between scripts.
   try {
     if (window.chrome) {
-      delete window.chrome.app;
-      Object.defineProperty(window.chrome, 'app', {
-        get: function(){ return undefined; },
-        configurable: true,
-        enumerable: false
-      });
+      try { delete window.chrome.app; } catch(e) {}
+      try {
+        Object.defineProperty(window.chrome, 'app', {
+          get: function() { return undefined; },
+          configurable: true,
+          enumerable: false
+        });
+      } catch(e) {}
     }
   } catch(e) {}
 
@@ -4067,6 +4094,12 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     log(f"{email} — Step 3: typing password")
     pw_field = wait_for_any(PW_SELECTORS, timeout=8)
 
+    if pw_field:
+        url, text = page_state()
+        result = classify(url, text)
+        if result:
+            return result
+
     if not pw_field:
         url, text = page_state()
         result = classify(url, text)
@@ -4151,6 +4184,12 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                 log(f"{email} — After Continue: {url[:70]}")
         except Exception as _ppe:
             log(f"Post-password Continue click error: {_ppe}")
+
+    # Hard block / "browser not secure" can appear on challenge/pwd — classify first
+    # (also wipes stale profile) before treating a pwd URL as a silent bounce.
+    result = classify(url, text)
+    if result:
+        return result
 
     # If Google returned us BACK to the password page WITHOUT an error message
     # → this is automation detection, NOT a wrong password.
