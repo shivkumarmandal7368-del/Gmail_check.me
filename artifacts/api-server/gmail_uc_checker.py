@@ -3697,8 +3697,12 @@ def _do_login(
 
     def classify(url: str, text: str) -> dict | None:
         host = get_hostname(url)
-        # Password-settings page means sign-in already finished. Do not fill a new password.
-        if host == "myaccount.google.com" and "signinoptions/password" in url.lower():
+        # Password-settings page after sign-in — demo mode fills it elsewhere.
+        if (
+            host == "myaccount.google.com"
+            and is_google_password_change_url(url)
+            and not change_password_after_login
+        ):
             rand_sleep(400, 700)
             shot = screenshot_b64()
             log("Signed in — password page reached, password not changed")
@@ -3708,6 +3712,8 @@ def _do_login(
                 "totpCode": totp_code,
                 "debugScreenshot": shot,
             }
+        if host == "myaccount.google.com" and is_google_password_change_url(url):
+            return None
 
         # Signed-in Google Account home is the success page. The inbox is not required.
         if signed_in_host(url):
@@ -4931,6 +4937,10 @@ def _do_login(
                     "reason": f"TOTP code {totp_code} was wrong or expired — check your TOTP secret",
                     "totpCode": totp_code,
                 }
+
+        _pc_after_totp = complete_password_change_if_needed(url)
+        if _pc_after_totp:
+            return _pc_after_totp
 
         result = classify(url, text)
         if result:

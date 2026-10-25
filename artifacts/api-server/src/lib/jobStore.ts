@@ -150,6 +150,7 @@ export function createJob(params: {
   concurrency: number;
   freshProfile: boolean;
   deviceIndex?: number;
+  changePasswordAfterLogin?: boolean;
 }): Job {
   const id = randomBytes(8).toString("hex");
   const job: Job = {

@@ -413,9 +413,18 @@ function BrowserChecker() {
     } else if (evt.type === "result") {
       const { type: _t, ...result } = evt;
       const cred = credsMapRef.current[result.email];
+      const newPw = typeof (result as { newPassword?: string }).newPassword === "string"
+        ? (result as { newPassword?: string }).newPassword
+        : undefined;
+      if (newPw) {
+        credsMapRef.current[result.email] = {
+          password: newPw,
+          totpSecret: cred?.totpSecret,
+        };
+      }
       const withCreds: ExtBrowserResult = {
         ...result,
-        password:   cred?.password,
+        password:   newPw ?? cred?.password,
         totpSecret: cred?.totpSecret,
       };
       setResults(prev => {
