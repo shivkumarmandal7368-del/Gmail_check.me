@@ -5124,7 +5124,7 @@ def _do_login(
                 var links = document.querySelectorAll('a[href*="device-activity"]');
                 for (var i = 0; i < links.length; i++) {
                   var href = (links[i].href || '').split('#')[0];
-                  if (href !== want) continue;
+                  if (href !== want && href.indexOf(want) === -1) continue;
                   var block = links[i].closest('[role="listitem"], li, tr') || links[i].parentElement;
                   var t = ((block && block.innerText) || '').toLowerCase();
                   if (t.indexOf('signed out') !== -1) return true;
