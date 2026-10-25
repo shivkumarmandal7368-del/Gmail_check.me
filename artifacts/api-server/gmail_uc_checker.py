@@ -1193,10 +1193,105 @@ _RANDOM_TIMEZONES = [
     "America/Denver", "America/Toronto", "America/Vancouver",
     "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Madrid",
     "Europe/Rome", "Europe/Amsterdam", "Europe/Warsaw",
-    "Asia/Calcutta", "Asia/Tokyo", "Asia/Seoul", "Asia/Singapore",
+    "Asia/Kolkata", "Asia/Tokyo", "Asia/Seoul", "Asia/Singapore",
     "Asia/Dubai", "Asia/Bangkok", "Asia/Jakarta", "Asia/Hong_Kong",
     "Australia/Sydney", "Australia/Melbourne",
 ]
+
+_IN_TIMEZONES = [
+    "Asia/Kolkata", "Asia/Kolkata", "Asia/Kolkata",
+    "Asia/Calcutta", "Asia/Kolkata",
+]
+
+
+def _normalize_timezone(tz: str | None) -> str | None:
+    if not tz:
+        return tz
+    if tz == "Asia/Calcutta":
+        return "Asia/Kolkata"
+    return tz
+
+
+def _proxy_implies_india(proxy_url: str) -> bool:
+    if _proxy_country_hint(proxy_url) == "IN":
+        return True
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(proxy_url).hostname or "").lower()
+        if "localtonet" in host:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _india_geo_fallback(ip: str | None = None) -> dict:
+    return {
+        "timezone": "Asia/Kolkata",
+        "language": "en-IN",
+        "countryCode": "IN",
+        "lat": 28.6139,
+        "lon": 77.2090,
+        "ip": ip,
+        "geoLocked": True,
+        "keyboard": "in",
+    }
+
+
+def _us_geo_fallback(ip: str | None = None) -> dict:
+    tz = random.choice([
+        "America/New_York", "America/Chicago", "America/Los_Angeles",
+        "America/Denver", "America/Phoenix",
+    ])
+    return {
+        "timezone": tz,
+        "language": "en-US",
+        "countryCode": "US",
+        "lat": 40.7128,
+        "lon": -74.0060,
+        "ip": ip,
+        "geoLocked": True,
+        "keyboard": "us",
+    }
+
+
+def _merge_geo_into_fingerprint(fp: dict, geo: dict) -> None:
+    for key in (
+        "timezone", "language", "countryCode", "lat", "lon", "ip",
+        "city", "district", "zip", "region", "country", "continent",
+        "continentCode", "isp", "org", "as", "asname", "reverse",
+        "currency", "offset", "mobile", "proxy", "hosting", "keyboard",
+    ):
+        if geo.get(key) is not None:
+            fp[key] = geo[key]
+    if fp.get("timezone"):
+        fp["timezone"] = _normalize_timezone(fp["timezone"])
+    if geo.get("geoLocked") is not None:
+        fp["geoLocked"] = geo["geoLocked"]
+    elif geo.get("timezone"):
+        fp["geoLocked"] = True
+
+
+def proxy_fetch_exit_ip(proxy_url: str, timeout: int = 15) -> str | None:
+    """Read the proxy's current exit IP (ipify). Works when ip-api via proxy JSON fails."""
+    import requests as req
+    try:
+        _safe_proxy = requests_proxy_url(proxy_url)
+        proxies = {"http": _safe_proxy, "https": _safe_proxy}
+    except Exception as exc:
+        log(f"[geo ipify] proxy URL parse failed: {exc}")
+        return None
+    for url in ("http://api.ipify.org?format=json", "https://api.ipify.org?format=json"):
+        try:
+            r = req.get(url, proxies=proxies, timeout=timeout)
+            data = r.json()
+            ip = (data.get("ip") or "").strip()
+            if ip and ip[0].isdigit():
+                return ip
+        except Exception:
+            continue
+    log("[geo ipify] could not read exit IP through proxy")
+    return None
 
 
 def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dict | None:
@@ -1227,10 +1322,12 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
                       continent=None, continentCode=None, isp=None, org=None,
                       asn=None, zip_=None, district=None, reverse=None,
                       currency=None, offset=None, mobile=None, proxy_flag=None, hosting=None):
+        cc = cc or "US"
+        tz = _normalize_timezone(tz) or random.choice(_RANDOM_TIMEZONES)
         lg = _COUNTRY_LANG.get(cc, "en-US")
-        log(f"{tag} Got IP {ip} — {city}, {cc} / {isp or org or 'unknown ISP'}")
+        log(f"{tag} Got IP {ip} — {city}, {cc} / {isp or org or 'unknown ISP'} tz={tz} lang={lg}")
         return {
-            "timezone": tz or random.choice(_RANDOM_TIMEZONES),
+            "timezone": tz,
             "language": lg, "countryCode": cc,
             "lat": float(lat or 39.8283), "lon": float(lon or -98.5795),
             "ip": ip, "city": city, "district": district, "zip": zip_,
@@ -1239,7 +1336,33 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
             "isp": isp, "org": org, "as": asn,
             "reverse": reverse, "currency": currency, "offset": offset,
             "mobile": mobile, "proxy": proxy_flag, "hosting": hosting,
+            "keyboard": keyboard_layout_for_language(lg),
         }
+
+    # ── Fast path: ipify (through proxy) + ip-api (direct on that IP) ────────
+    # LocalToNet and similar gateways often break long ip-api JSON via proxy;
+    # ipify is reliable and the IP lookup is direct so rotation cannot mismatch.
+    _ipify_ip = proxy_fetch_exit_ip(proxy_url)
+    if _ipify_ip:
+        _live = geo_lookup_ip(_ipify_ip)
+        if _live:
+            log(f"{tag} [0/3] ipify+ip-api → {_ipify_ip}")
+            return _build_result(
+                ip=_live.get("ip") or _ipify_ip,
+                tz=_live.get("timezone"),
+                cc=_live.get("countryCode", "US"),
+                lat=_live.get("lat"),
+                lon=_live.get("lon"),
+                city=_live.get("city"),
+                region=_live.get("region"),
+                country=_live.get("country"),
+                isp=_live.get("isp"),
+                org=_live.get("org"),
+                asn=_live.get("as"),
+                mobile=_live.get("mobile"),
+                proxy_flag=_live.get("proxy"),
+                hosting=_live.get("hosting"),
+            )
 
     for _attempt in range(1, _retries + 1):
         # ── Service 1: ip-api.com (HTTP, most comprehensive) ─────────────────
@@ -1316,7 +1439,53 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
             _time.sleep(3)
 
     log(f"{tag} ⚠️ GEO LOCK FAILED after {_retries} attempts (all 3 services) — timezone/language mismatch risk!")
+    _fallback_ip = _ipify_ip or proxy_fetch_exit_ip(proxy_url)
+    _hint = _proxy_country_hint(proxy_url)
+    if _hint == "IN" or _proxy_implies_india(proxy_url):
+        fb = _india_geo_fallback(_fallback_ip)
+        log(f"{tag} Using India locale fallback (proxy/localtonet) ip={_fallback_ip}")
+        return fb
+    if _hint == "US":
+        fb = _us_geo_fallback(_fallback_ip)
+        log(f"{tag} Using US locale fallback ip={_fallback_ip}")
+        return fb
+    if _fallback_ip:
+        _live2 = geo_lookup_ip(_fallback_ip)
+        if _live2:
+            log(f"{tag} Last-chance ip-api on ipify IP {_fallback_ip}")
+            return _build_result(
+                ip=_live2.get("ip") or _fallback_ip,
+                tz=_live2.get("timezone"),
+                cc=_live2.get("countryCode", "US"),
+                lat=_live2.get("lat"),
+                lon=_live2.get("lon"),
+                city=_live2.get("city"),
+                region=_live2.get("region"),
+                country=_live2.get("country"),
+                isp=_live2.get("isp"),
+                org=_live2.get("org"),
+                asn=_live2.get("as"),
+            )
     return None
+
+
+def _sync_fingerprint_geo_from_proxy(fp: dict, proxy: str, fp_path: str | None = None) -> dict:
+    """Always align timezone/language with the proxy exit IP before Chrome starts."""
+    geo = geo_lookup_proxy(proxy, _label="session-preflight", _retries=2)
+    if geo:
+        _merge_geo_into_fingerprint(fp, geo)
+        fp["keyboard"] = fp.get("keyboard") or keyboard_layout_for_language(fp.get("language") or "en-US")
+    elif _proxy_implies_india(proxy):
+        _merge_geo_into_fingerprint(fp, _india_geo_fallback(proxy_fetch_exit_ip(proxy)))
+    elif _proxy_country_hint(proxy) == "US":
+        _merge_geo_into_fingerprint(fp, _us_geo_fallback(proxy_fetch_exit_ip(proxy)))
+    if fp_path and fp.get("geoLocked"):
+        try:
+            with open(fp_path, "w") as handle:
+                json.dump(fp, handle, indent=2)
+        except Exception:
+            pass
+    return fp
 
 
 def _proxy_country_hint(proxy_url: str) -> str:
@@ -1403,7 +1572,7 @@ def geo_lookup_ip(ip: str) -> dict | None:
         cc = d.get("countryCode") or "US"
         language = _COUNTRY_LANG.get(cc, "en-US")
         return {
-            "timezone": d.get("timezone"),
+            "timezone": _normalize_timezone(d.get("timezone")),
             "language": language,
             "countryCode": cc,
             "lat": float(d.get("lat") or 0),
@@ -1547,6 +1716,10 @@ def get_or_create_fingerprint(
                     f"[fingerprint] Reusing exact Device Check snapshot → "
                     f"{device_snapshot['model']} | canvas={device_snapshot['canvasSeed']}"
                 )
+                if proxy:
+                    device_snapshot = _sync_fingerprint_geo_from_proxy(
+                        device_snapshot, proxy, fp_path
+                    )
                 return device_snapshot
         except (FileNotFoundError, ValueError, OSError):
             pass
@@ -1584,37 +1757,8 @@ def get_or_create_fingerprint(
                     ):
                         existing[key] = selected_profile[key]
                     existing["deviceIndex"] = device_index
-                # Detect proxy country mismatch — user switched from e.g. India proxy
-                # to US proxy but cached fingerprint still has Indian timezone.
-                _hint   = _proxy_country_hint(proxy) if proxy else ""
-                _cached = existing.get("countryCode", "")
-                _country_mismatch = bool(_hint and _cached and _hint != _cached)
-                if _country_mismatch:
-                    log(f"[fingerprint] Proxy country hint ({_hint}) ≠ cached countryCode ({_cached}) — forcing geo re-lock")
-
-                # If proxy is provided and geo hasn't been locked yet — OR geo was locked
-                # but ip field is missing (old fingerprint from before Session 29) —
-                # OR proxy country changed → re-lock now
-                _needs_geo = proxy and (
-                    not existing.get("geoLocked")
-                    or (existing.get("geoLocked") and not existing.get("ip"))
-                    or _country_mismatch
-                )
-                if _needs_geo:
-                    geo = geo_lookup_proxy(proxy, _label="fingerprint-update")
-                    if geo:
-                        existing["timezone"]    = geo["timezone"]
-                        existing["language"]    = geo["language"]
-                        existing["countryCode"] = geo["countryCode"]
-                        existing["geoLocked"]   = True
-                        for _k in ("ip","city","district","zip","region","country","continent","continentCode","isp","org","as","asname","reverse","currency","offset","mobile","proxy","hosting"):
-                            if geo.get(_k) is not None:
-                                existing[_k] = geo[_k]
-                        try:
-                            with open(fp_path, "w") as f:
-                                json.dump(existing, f, indent=2)
-                        except Exception:
-                            pass
+                if proxy:
+                    existing = _sync_fingerprint_geo_from_proxy(existing, proxy, fp_path)
                 if reuse_device_snapshot:
                     _remember_shared_fingerprint(existing, device_index)
                 return existing
@@ -1644,20 +1788,15 @@ def get_or_create_fingerprint(
         fp["geoLocked"] = False
         fp["lat"]       = 37.7749   # San Francisco fallback
         fp["lon"]       = -122.4194
-        # Session 46: If proxy has a US country hint, restrict fallback to US timezones
-        # so geo-lock failures don't produce obviously wrong non-American timestamps.
         _hint_cc = _proxy_country_hint(proxy) if proxy else ""
         if _hint_cc == "US":
-            fp["timezone"] = random.choice([
-                "America/New_York", "America/Chicago", "America/Los_Angeles",
-                "America/Denver", "America/Phoenix", "America/Anchorage",
-                "America/Toronto", "America/Vancouver",
-            ])
-            fp["language"] = random.choice(["en-US", "en-US", "en-US", "en-CA"])
+            _merge_geo_into_fingerprint(fp, _us_geo_fallback(None))
+        elif _proxy_implies_india(proxy):
+            _merge_geo_into_fingerprint(fp, _india_geo_fallback(None))
         else:
             fp["timezone"] = random.choice(_RANDOM_TIMEZONES)
             fp["language"] = random.choice([
-                "en-US", "en-US", "en-US", "en-US",  # weighted — most users are en-US
+                "en-US", "en-US", "en-US", "en-US",
                 "en-GB", "en-CA", "en-AU", "en-IN",
             ])
     # Timezone + language come from geo_lookup_proxy (if proxy provided) or random fallback above.
