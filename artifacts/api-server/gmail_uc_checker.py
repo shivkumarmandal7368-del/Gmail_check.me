@@ -4900,9 +4900,89 @@ def _do_login(
             return ""
         return str(hit.get("t") or "sign out")
 
+    def use_desktop_device_list() -> None:
+        """Wide layout so every device row is on screen, not cut off by the phone viewport."""
+        try:
+            driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        except Exception:
+            pass
+        try:
+            driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        except Exception:
+            pass
+        try:
+            driver.set_window_size(1440, 900)
+        except Exception:
+            pass
+        try:
+            driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                "width": 1440,
+                "height": 900,
+                "deviceScaleFactor": 1,
+                "mobile": False,
+                "screenWidth": 1440,
+                "screenHeight": 900,
+            })
+            log(f"{email} — device list layout: desktop 1440x900")
+        except Exception as exc:
+            log(f"{email} — desktop layout warning: {exc}")
+
+    def sign_out_via_profile_icon() -> bool:
+        """Header profile photo → Sign out. This is the current browser session."""
+        avatar = driver.execute_script(
+            """
+            function walk(root) {
+              var nodes = root.querySelectorAll('a, button, [role="button"]');
+              for (var i = 0; i < nodes.length; i++) {
+                var el = nodes[i];
+                var aria = ((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '')).toLowerCase();
+                var href = (el.getAttribute('href') || '').toLowerCase();
+                if (aria.indexOf('google account') !== -1 || aria.indexOf('account menu') !== -1
+                    || href.indexOf('signoutoptions') !== -1) {
+                  var r = el.getBoundingClientRect();
+                  if (r.width > 8 && r.height > 8) return el;
+                }
+              }
+              var kids = root.querySelectorAll('*');
+              for (var k = 0; k < kids.length; k++) {
+                if (!kids[k].shadowRoot) continue;
+                var sub = walk(kids[k].shadowRoot);
+                if (sub) return sub;
+              }
+              return null;
+            }
+            return walk(document);
+            """
+        )
+        if avatar is None or not _trusted_tap(avatar):
+            log(f"{email} — profile icon not found")
+            return False
+        log(f"{email} — opened profile menu")
+        time.sleep(0.7)
+        if _tap_sign_out_button():
+            log(f"{email} — profile menu: Sign out")
+            return True
+        frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+        for frame in frames:
+            try:
+                driver.switch_to.frame(frame)
+                if _tap_sign_out_button():
+                    log(f"{email} — profile menu: Sign out")
+                    driver.switch_to.default_content()
+                    return True
+            except Exception:
+                pass
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+        log(f"{email} — Sign out not in profile menu")
+        return False
+
     def run_device_activity_signouts(new_pw: str) -> dict:
         """After demo password change: sign out every device, then this session → Open."""
         log(f"{email} — Device activity: sign out all sessions")
+        use_desktop_device_list()
         try:
             driver.get(DEVICE_ACTIVITY_URL)
         except Exception as exc:
@@ -4924,7 +5004,7 @@ def _do_login(
                 "newPassword": new_pw,
                 "debugScreenshot": shot,
             }
-        def list_devices_fast() -> list[dict]:
+        def list_devices_fast(*, full_scroll: bool = False) -> list[dict]:
             merged: dict[str, dict] = {}
 
             def absorb() -> None:
@@ -4934,25 +5014,61 @@ def _do_login(
                         merged[href] = item
 
             absorb()
-            for y in (500, 1100, 1800):
+            # Desktop page still virtual-scrolls. Walk the window and any inner list.
+            try:
+                heights = driver.execute_script(
+                    """
+                    var hs = [document.body.scrollHeight || 0];
+                    var main = document.querySelector('[role=main]');
+                    if (main) hs.push(main.scrollHeight || 0);
+                    var divs = document.querySelectorAll('div');
+                    for (var i = 0; i < divs.length; i++) {
+                      var d = divs[i];
+                      if (d.scrollHeight > d.clientHeight + 50 && d.clientHeight > 100)
+                        hs.push(d.scrollHeight);
+                    }
+                    return Math.max.apply(null, hs.concat([900]));
+                    """
+                ) or 900
+            except Exception:
+                heights = 900
+            steps = min(12, max(3, int(heights / 350) + 1)) if full_scroll else 2
+            for step in range(steps):
+                y = step * 350
                 try:
                     driver.execute_script(
-                        "window.scrollTo(0, arguments[0]);"
-                        "var m=document.querySelector('[role=main]');"
-                        "if(m)m.scrollTop=arguments[0];",
+                        """
+                        var y = arguments[0];
+                        window.scrollTo(0, y);
+                        var main = document.querySelector('[role=main]');
+                        if (main) main.scrollTop = y;
+                        var divs = document.querySelectorAll('div');
+                        for (var i = 0; i < divs.length; i++) {
+                          var d = divs[i];
+                          if (d.scrollHeight > d.clientHeight + 50 && d.clientHeight > 100)
+                            d.scrollTop = y;
+                        }
+                        """,
                         y,
                     )
                 except Exception:
                     pass
-                time.sleep(0.12)
+                time.sleep(0.1)
                 absorb()
             try:
                 driver.execute_script("window.scrollTo(0, 0);")
             except Exception:
                 pass
+            def _current_session(label: str) -> int:
+                t = (label or "").lower()
+                if "this device" in t or "current session" in t or "your current" in t:
+                    return 1
+                return 0
+
             out = list(merged.values())
             out.sort(
                 key=lambda s: (
+                    _current_session(s.get("label") or ""),
                     _SESSION_KIND_ORDER.index(s.get("kind") or "session")
                     if (s.get("kind") or "session") in _SESSION_KIND_ORDER
                     else 99,
@@ -5006,7 +5122,7 @@ def _do_login(
                         break
                     continue
 
-            sessions = list_devices_fast()
+            sessions = list_devices_fast(full_scroll=(_round == 0))
             for s in sessions:
                 kinds_seen.add(s.get("kind") or "session")
             pending = [s for s in sessions if (s.get("href") or "") not in done_hrefs]
@@ -5048,12 +5164,22 @@ def _do_login(
         log(
             f"{email} — session types seen on device activity: {kinds_seen_sorted or ['none']}"
         )
-        log(f"{email} — final logout ({signed_out_count} other device(s) signed out)")
+        log(f"{email} — final logout via profile icon ({signed_out_count} other device(s) signed out)")
+        if _device_url_kind() != "list":
+            ensure_device_activity_list("Before profile sign-out")
+        signed_self = False
         try:
-            driver.get("https://accounts.google.com/Logout?continue=https://myaccount.google.com/")
+            signed_self = sign_out_via_profile_icon()
             rand_sleep(400, 700)
-        except Exception as _le:
-            log(f"{email} — Logout URL warning: {_le}")
+        except Exception as exc:
+            log(f"{email} — profile sign-out warning: {exc}")
+        if not signed_self:
+            log(f"{email} — profile menu missed, using logout URL")
+            try:
+                driver.get("https://accounts.google.com/Logout?continue=https://myaccount.google.com/")
+                rand_sleep(400, 700)
+            except Exception as _le:
+                log(f"{email} — Logout URL warning: {_le}")
 
         handle_totp_if_prompted("Self sign-out TOTP", max_rounds=2, quick=True)
         shot = screenshot_b64()
