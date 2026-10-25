@@ -3806,7 +3806,8 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             }
 
         if any(x in text for x in [
-            "couldn't find your google account", "no account found",
+            "couldn't find your google account", "couldn't find this account",
+            "no account found",
             "find your google account", "no google account found",
             "couldn't find an account", "email or phone number",
         ]):
