@@ -118,51 +118,65 @@ except ImportError as e:
 
 # ── Proxy — PROXY_OVERRIDE env takes priority over Proxy secret ───────────────
 PROXY_URL = os.environ.get("PROXY_OVERRIDE", "").strip() or os.environ.get("PROXY_URL", "").strip() or os.environ.get("Proxy", "").strip()
-if not PROXY_URL:
-    print(
-        "ERROR:No proxy configured. Select Custom and enter the residential proxy URL, "
-        "or configure the PROXY_URL secret before running Device Check.",
-        flush=True,
-    )
-    xvfb.terminate()
-    sys.exit(1)
+DIRECT_FP_AUDIT = os.environ.get("FP_AUDIT_DIRECT", "").strip() in ("1", "true", "yes")
+direct_exit = None
+proxy_exit = None
+proxy_info = None
 
-# Validate the exact proxy before launching Chrome. Without this guard Chrome can
-# fall back to the Replit datacenter IP while the audit still appears successful.
-proxy_info = parse_proxy(PROXY_URL)
-if not proxy_info or not proxy_info.get("host"):
-    print("ERROR:Invalid proxy URL. Use http://USERNAME:PASSWORD@HOST:PORT", flush=True)
-    xvfb.terminate()
-    sys.exit(1)
+if not PROXY_URL:
+    if not DIRECT_FP_AUDIT:
+        print(
+            "ERROR:No proxy configured. Select Custom and enter the residential proxy URL, "
+            "or configure the PROXY_URL secret before running Device Check.",
+            flush=True,
+        )
+        xvfb.terminate()
+        sys.exit(1)
+    log("FP_AUDIT_DIRECT=1 — no upstream proxy (datacenter IP; score includes hosting/VPN signals)")
 
 try:
     import requests
-    # Ignore any ambient environment proxy so this is a genuine Replit-origin
-    # baseline. The browser must not report this IP.
     direct_session = requests.Session()
     direct_session.trust_env = False
     direct_exit = direct_session.get(
         "https://api.ipify.org?format=json",
         timeout=15,
     ).json().get("ip")
-    proxy_session = requests.Session()
-    proxy_session.trust_env = False
-    # Force http:// scheme for proxy connection — residential proxies only do HTTP
-    _pu = PROXY_URL
-    if _pu.startswith("https://"):
-        _pu = "http://" + _pu[8:]
-    proxy_exit = proxy_session.get(
-        "http://api.ipify.org?format=json",
-        proxies={"http": _pu, "https": _pu},
-        timeout=15,
-    ).json().get("ip")
-    if not proxy_exit:
-        raise RuntimeError("proxy response did not include an exit IP")
-    log(f"Proxy validated ✓ — proxy exit IP: {proxy_exit} (direct Replit IP: {direct_exit or 'unavailable'})")
 except Exception as e:
-    print(f"ERROR:Proxy validation failed — {str(e)[:300]}", flush=True)
-    xvfb.terminate()
-    sys.exit(1)
+    if not DIRECT_FP_AUDIT:
+        print(f"ERROR:Proxy validation failed — {str(e)[:300]}", flush=True)
+        xvfb.terminate()
+        sys.exit(1)
+    log(f"Direct IP lookup skipped: {e}")
+
+if PROXY_URL:
+    # Validate the exact proxy before launching Chrome. Without this guard Chrome can
+    # fall back to the datacenter IP while the audit still appears successful.
+    proxy_info = parse_proxy(PROXY_URL)
+    if not proxy_info or not proxy_info.get("host"):
+        print("ERROR:Invalid proxy URL. Use http://USERNAME:PASSWORD@HOST:PORT", flush=True)
+        xvfb.terminate()
+        sys.exit(1)
+    try:
+        proxy_session = requests.Session()
+        proxy_session.trust_env = False
+        _pu = PROXY_URL
+        if _pu.startswith("https://"):
+            _pu = "http://" + _pu[8:]
+        proxy_exit = proxy_session.get(
+            "http://api.ipify.org?format=json",
+            proxies={"http": _pu, "https": _pu},
+            timeout=15,
+        ).json().get("ip")
+        if not proxy_exit:
+            raise RuntimeError("proxy response did not include an exit IP")
+        log(f"Proxy validated ✓ — proxy exit IP: {proxy_exit} (direct IP: {direct_exit or 'unavailable'})")
+    except Exception as e:
+        print(f"ERROR:Proxy validation failed — {str(e)[:300]}", flush=True)
+        xvfb.terminate()
+        sys.exit(1)
+else:
+    proxy_exit = direct_exit or "direct"
 
 ext_path = None
 
@@ -296,15 +310,18 @@ class _ThreadedProxyServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-upstream_user = proxy_info.get("username") or ""
-upstream_password = proxy_info.get("password") or ""
-upstream_host = proxy_info["host"]
-upstream_port = proxy_info["port"]
-proxy_server = _ThreadedProxyServer(("127.0.0.1", 0), _AuthenticatedProxyHandler)
-proxy_server.upstream = proxy_info  # type: ignore[attr-defined]
-threading.Thread(target=proxy_server.serve_forever, daemon=True).start()
-local_proxy_port = proxy_server.server_address[1]
-log(f"Local authenticated proxy ready on 127.0.0.1:{local_proxy_port}")
+proxy_server = None
+local_proxy_port = None
+if proxy_info:
+    upstream_user = proxy_info.get("username") or ""
+    upstream_password = proxy_info.get("password") or ""
+    upstream_host = proxy_info["host"]
+    upstream_port = proxy_info["port"]
+    proxy_server = _ThreadedProxyServer(("127.0.0.1", 0), _AuthenticatedProxyHandler)
+    proxy_server.upstream = proxy_info  # type: ignore[attr-defined]
+    threading.Thread(target=proxy_server.serve_forever, daemon=True).start()
+    local_proxy_port = proxy_server.server_address[1]
+    log(f"Local authenticated proxy ready on 127.0.0.1:{local_proxy_port}")
 
 # ── Chrome options ─────────────────────────────────────────────────────────────
 o = uc.ChromeOptions()
@@ -332,7 +349,8 @@ o.add_argument("--no-default-browser-check")
 o.add_argument("--no-first-run")
 o.add_argument("--disable-sync")
 o.add_argument("--password-store=basic")
-o.add_argument(f"--proxy-server=http://127.0.0.1:{local_proxy_port}")
+if local_proxy_port:
+    o.add_argument(f"--proxy-server=http://127.0.0.1:{local_proxy_port}")
 
 log("Launching Chrome...")
 chromium_path = get_chromium_path()
@@ -355,34 +373,36 @@ except Exception as e:
 time.sleep(5)
 log("Chrome launched ✓")
 
-# Confirm the browser itself is using the proxy. Rotating providers may return a
-# different residential IP for a second connection, so compare against the
-# direct Replit baseline rather than requiring preflight and Chrome to match.
-try:
-    driver.get("https://api.ipify.org?format=json")
-    browser_ip = json.loads(driver.find_element(By.TAG_NAME, "body").text).get("ip")
-    if not browser_ip:
-        raise RuntimeError("browser response did not include an exit IP")
-    log(f"Chrome proxy verified ✓ — browser exit IP: {browser_ip}")
-    if direct_exit and browser_ip == direct_exit:
-        raise RuntimeError(
-            f"browser exit IP {browser_ip} is the direct Replit IP, not the proxy"
-        )
-except Exception as e:
-    print(f"ERROR:Chrome proxy verification failed — {str(e)[:300]}", flush=True)
+if proxy_info:
+    # Confirm the browser itself is using the proxy.
     try:
-        driver.quit()
-    except Exception:
-        pass
-    if ext_path:
+        driver.get("https://api.ipify.org?format=json")
+        browser_ip = json.loads(driver.find_element(By.TAG_NAME, "body").text).get("ip")
+        if not browser_ip:
+            raise RuntimeError("browser response did not include an exit IP")
+        log(f"Chrome proxy verified ✓ — browser exit IP: {browser_ip}")
+        if direct_exit and browser_ip == direct_exit:
+            raise RuntimeError(
+                f"browser exit IP {browser_ip} is the direct IP, not the proxy"
+            )
+    except Exception as e:
+        print(f"ERROR:Chrome proxy verification failed — {str(e)[:300]}", flush=True)
         try:
-            os.unlink(ext_path)
-        except OSError:
+            driver.quit()
+        except Exception:
             pass
-    proxy_server.shutdown()
-    proxy_server.server_close()
-    xvfb.terminate()
-    sys.exit(1)
+        if ext_path:
+            try:
+                os.unlink(ext_path)
+            except OSError:
+                pass
+        if proxy_server:
+            proxy_server.shutdown()
+            proxy_server.server_close()
+        xvfb.terminate()
+        sys.exit(1)
+else:
+    log(f"Chrome direct egress (FP_AUDIT_DIRECT) — expected IP ~ {direct_exit or 'unknown'}")
 
 # ── Apply the selected real-phone profile before the first navigation ─────────
 # Device Check must use the same browser fingerprint engine as Browser Check;
@@ -709,8 +729,9 @@ driver.get_screenshot_as_file("/tmp/dc_3_scrolled.png")
 emit_screenshot("/tmp/dc_3_scrolled.png", "scrolled")
 
 driver.quit()
-proxy_server.shutdown()
-proxy_server.server_close()
+if proxy_server:
+    proxy_server.shutdown()
+    proxy_server.server_close()
 xvfb.terminate()
 log("Chrome and Xvfb closed cleanly")
 print("DONE", flush=True)
