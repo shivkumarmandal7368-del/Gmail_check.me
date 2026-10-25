@@ -50,6 +50,7 @@ try:
         accept_language_for,
         apply_keyboard_layout,
         keyboard_layout_for_language,
+        requests_proxy_url,
     )
 except Exception as e:
     print(f"ERROR:Cannot import PHONE_PROFILES: {e}", flush=True)
@@ -164,9 +165,7 @@ if PROXY_URL:
     try:
         proxy_session = requests.Session()
         proxy_session.trust_env = False
-        _pu = PROXY_URL
-        if _pu.startswith("https://"):
-            _pu = "http://" + _pu[8:]
+        _pu = requests_proxy_url(PROXY_URL)
         proxy_exit = proxy_session.get(
             "http://api.ipify.org?format=json",
             proxies={"http": _pu, "https": _pu},

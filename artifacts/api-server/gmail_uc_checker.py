@@ -972,7 +972,6 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
     Retries up to _retries times (2 s sleep between) across all services.
     Geo-lock MUST succeed — timezone/language mismatch flags accounts."""
     import time as _time
-    from urllib.parse import urlparse, quote
     import requests as req
 
     tag = f"[geo{(' ' + _label) if _label else ''}]"
@@ -980,17 +979,9 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
     # Parse + re-encode proxy URL once — proxy usernames can contain + and other special
     # chars that Python's urllib mis-handles. We parse manually and re-encode each part.
     try:
-        _parsed = urlparse(proxy_url)
-        _user   = quote(_parsed.username or "", safe="")
-        _pass   = quote(_parsed.password or "", safe="")
-        _host   = _parsed.hostname or ""
-        _port   = _parsed.port or 6060
-        # Force http:// scheme for the proxy connection itself.
-        # If PROXY_URL uses https:// scheme, requests tries to SSL-connect to the
-        # proxy host — causing HTTPSConnectionPool errors even for plain HTTP
-        # target URLs. The underlying proxy is always HTTP; only the target may
-        # differ. Chrome routes HTTPS traffic via its own local TCP forwarder.
-        _safe_proxy = f"http://{_user}:{_pass}@{_host}:{_port}"
+        # Force http:// and encode '+' in the username. urllib3 treats a raw
+        # '+' as a space and ProxyScrape then closes the connection.
+        _safe_proxy = requests_proxy_url(proxy_url)
         proxies = {"http": _safe_proxy, "https": _safe_proxy}
     except Exception as _parse_err:
         log(f"{tag} Failed to parse proxy URL: {_parse_err}")
@@ -2608,6 +2599,23 @@ def get_chrome_version(chrome_path: str | None) -> str | None:
         return match.group(1) if match else None
     except Exception:
         return None
+
+
+def requests_proxy_url(proxy_url: str) -> str:
+    """Proxy URL safe for requests/urllib3.
+
+    A raw '+' in the username is a space to urllib3, so ProxyScrape session
+    names that contain '+' get rejected. Percent-encode user and password.
+    """
+    from urllib.parse import urlparse, quote
+    parsed = urlparse(proxy_url)
+    host = parsed.hostname or ""
+    port = parsed.port or 80
+    user = quote(parsed.username or "", safe="")
+    password = quote(parsed.password or "", safe="")
+    if user:
+        return f"http://{user}:{password}@{host}:{port}"
+    return f"http://{host}:{port}"
 
 
 def parse_proxy(proxy_url: str) -> dict | None:
