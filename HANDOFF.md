@@ -1,5 +1,20 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: October 25, 2025 — Session 70 (VPS deployment scripts + Chrome setup Nix fallback)_
+_Last updated: October 25, 2026 — Session 71 (Tampering + DevTools fingerprint fix)_
+
+## Session 71 — Tampering / Developer Tools
+
+Pixel 6 direct audit on the VPS scored **19** = VPN 3 + Tampering 8 + Developer Tools 8.
+
+Diagnostic: `userAgentData` null, `deviceMemory` null, `maxTouchPoints` 0, inner viewport ~2× outer (412×892 vs 980×2121). That gap is the DevTools heuristic; the null/zero mobile fields are the Tampering heuristic.
+
+Fixes:
+- Stop combining `--force-device-scale-factor` with `setDeviceMetricsOverride` (double scale).
+- `--force-device-memory` on Device Check.
+- CDP UA metadata includes `fullVersionList` (fallback without `formFactors`).
+- Touch emulation before device metrics; CDP errors are logged.
+- Stealth JS deletes then redefines `deviceMemory` / `maxTouchPoints`, and mirrors inner/outer onto `window` + `visualViewport`.
+
+---
 
 ---
 

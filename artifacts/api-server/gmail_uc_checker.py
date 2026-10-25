@@ -1467,14 +1467,10 @@ def make_stealth_js(fp: dict) -> str:
   }}
   _pd('hardwareConcurrency',{fp['hwConcurrency']});
   _pd('deviceMemory',{fp['deviceMemory']});
-  // Chrome 149+ marks several Navigator accessors non-configurable until deleted.
-  // Delete first, then redefine on the prototype AND the instance.
-  ['deviceMemory','maxTouchPoints'].forEach(function(k){{
-    try{{delete _np[k];}}catch(e){{}}
-    try{{delete navigator[k];}}catch(e){{}}
-  }});
-  _pd('deviceMemory',{fp['deviceMemory']});
-  try{{Object.defineProperty(navigator,'deviceMemory',{{get:function(){{return {fp['deviceMemory']};}},configurable:true,enumerable:true}});if(window.__nr){{var _dm=Object.getOwnPropertyDescriptor(navigator,'deviceMemory');if(_dm&&_dm.get)window.__nr(_dm.get,'deviceMemory',true);}}}}catch(e){{}}
+  // Do NOT delete maxTouchPoints / deviceMemory here. On Chrome 149 those
+  // accessors are still non-configurable during the first injected script, so
+  // delete succeeds and the redefine fails — leaving maxTouchPoints at 0.
+  // The second script (make_plugins_override_js) applies them after C++ unlocks.
   _pd('cookieEnabled',true);
   _pd('doNotTrack',{dnt_val});
   _pd('maxTouchPoints',{fp['maxTouchPoints']});
@@ -2279,6 +2275,32 @@ def make_plugins_override_js() -> str:
     Object.defineProperty(Navigator.prototype, 'mimeTypes', {
       get: _fmGet, configurable: true, enumerable: true
     });
+  } catch(e) {}
+
+  // Second-pass: these are non-configurable during the first stealth script.
+  // All phone profiles use 5 touch points. chrome.app and Keyboard API are
+  // absent on real Android Chrome; leaving the desktop copies is tampering.
+  try {
+    delete Navigator.prototype.maxTouchPoints;
+    var _tpGet = function(){ return 5; };
+    _reg(_tpGet, 'maxTouchPoints', true);
+    Object.defineProperty(Navigator.prototype, 'maxTouchPoints', {
+      get: _tpGet, configurable: true, enumerable: true
+    });
+  } catch(e) {}
+  try {
+    delete Navigator.prototype.keyboard;
+    delete navigator.keyboard;
+  } catch(e) {}
+  try {
+    if (window.chrome) {
+      delete window.chrome.app;
+      Object.defineProperty(window.chrome, 'app', {
+        get: function(){ return undefined; },
+        configurable: true,
+        enumerable: false
+      });
+    }
   } catch(e) {}
 
   // ── Clean up __nr ───────────────────────────────────────────────────────────

@@ -484,6 +484,7 @@ try:
         driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
             "enabled":        True,
             "maxTouchPoints": profile["maxTouchPoints"],
+            "configuration":  "mobile",
         })
         log(f"CDP touch emulation set → maxTouchPoints={profile['maxTouchPoints']}")
     except Exception as e:
