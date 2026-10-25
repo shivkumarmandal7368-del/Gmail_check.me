@@ -4975,24 +4975,40 @@ def _do_login(
             log(f"{email} — profile icon not found")
             return False
         log(f"{email} — opened profile menu")
-        time.sleep(1.2)
-        if _tap_sign_out_button():
-            log(f"{email} — profile menu: Sign out")
-            return True
-        frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
-        for frame in frames:
-            try:
-                driver.switch_to.frame(frame)
-                if _tap_sign_out_button():
-                    log(f"{email} — profile menu: Sign out")
+        for _try in range(5):
+            time.sleep(0.45)
+            if _tap_sign_out_button():
+                log(f"{email} — profile menu: Sign out")
+                return True
+            frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+            for frame in frames:
+                try:
+                    driver.switch_to.frame(frame)
+                    if _tap_sign_out_button():
+                        log(f"{email} — profile menu: Sign out")
+                        driver.switch_to.default_content()
+                        return True
+                    logout = driver.execute_script(
+                        """
+                        var nodes = document.querySelectorAll('a, button, [role="button"], [role="menuitem"]');
+                        for (var i = 0; i < nodes.length; i++) {
+                          var href = (nodes[i].getAttribute('href') || '').toLowerCase();
+                          var t = (nodes[i].innerText || '').toLowerCase();
+                          if (href.indexOf('logout') !== -1 || t === 'sign out') return nodes[i];
+                        }
+                        return null;
+                        """
+                    )
+                    if logout is not None and _trusted_tap(logout):
+                        log(f"{email} — profile menu: Sign out")
+                        driver.switch_to.default_content()
+                        return True
+                except Exception:
+                    pass
+                try:
                     driver.switch_to.default_content()
-                    return True
-            except Exception:
-                pass
-            try:
-                driver.switch_to.default_content()
-            except Exception:
-                pass
+                except Exception:
+                    pass
         log(f"{email} — Sign out not in profile menu")
         return False
 
@@ -5188,7 +5204,11 @@ def _do_login(
                 f"{len(pending)} left, counts={by_kind}, rows={names}"
             )
             if not pending:
-                log(f"{email} — every listed device signed out — account logout")
+                if not sessions and signed_out_count == 0 and _round < 2:
+                    log(f"{email} — device list empty, waiting for rows")
+                    time.sleep(1.5)
+                    continue
+                log(f"{email} — every listed device handled — account logout")
                 break
 
             target = pending[0]
@@ -5235,21 +5255,37 @@ def _do_login(
                     done_hrefs.add(key)
                 continue
 
+            if not sign_out_label:
+                try:
+                    driver.execute_script("window.scrollTo(0, 700);")
+                except Exception:
+                    pass
+                time.sleep(0.3)
+                sign_out_label = click_sign_out_ready()
+            if not sign_out_label:
+                log(f"{email} — Sign out not found — yeh device page nahi, skip")
+                wait_auto_back_to_list()
+                done_hrefs.add(key)
+                continue
+
             log(f"{email} — clicked Sign out [{kind}]")
             time.sleep(0.35)
             back_ok = wait_auto_back_to_list()
             if not back_ok and _device_url_kind() != "list":
-                log(f"{email} — list par wapas nahi aaya, agla device")
+                log(f"{email} — list par wapas nahi aaya")
                 try:
                     driver.get(DEVICE_ACTIVITY_URL)
-                    time.sleep(0.8)
+                    time.sleep(1.0)
                 except Exception:
                     pass
-            if row_shows_signed_out(href) or row_shows_signed_out(key):
+            time.sleep(1.0)
+            still = list_devices_fast()
+            still_keys = {device_key(s.get("href") or "") for s in still}
+            if row_shows_signed_out(href) or key not in still_keys:
                 done_hrefs.add(key)
                 signed_out_count += 1
                 kinds_done[kind] = kinds_done.get(kind, 0) + 1
-                log(f"{email} — device sign-out #{signed_out_count} [{kind}] list shows Signed out")
+                log(f"{email} — device sign-out #{signed_out_count} [{kind}] list se hat gaya")
             else:
                 log(f"{email} — [{kind}] abhi bhi signed in ({attempts[key]}/2)")
                 if attempts[key] >= 2:
