@@ -4366,6 +4366,56 @@ def _do_login(
     }
     """
 
+    def pass_signin_challenge(label: str) -> bool:
+        """challenge/dp or TOTP during device activity — finish it, stay in flow."""
+        url = driver.current_url.lower()
+        on_picker = "challenge/dp" in url or "challenge/selection" in url
+        on_totp = is_totp_challenge_url(driver.current_url)
+        if not on_picker and not on_totp:
+            return False
+        log(f"{email} — {label}: Google re-auth ({url[:70]})")
+        if on_picker:
+            try:
+                driver.execute_script("""
+                    var byType = document.querySelector('[data-challengetype="6"]');
+                    if (byType) { byType.click(); return; }
+                    var allEls = Array.from(document.querySelectorAll(
+                        'li, div[role="listitem"], [data-challengetype], button, [role="link"]'));
+                    var found = allEls.find(function(el) {
+                        return (el.innerText || '').toLowerCase().indexOf('authenticator') !== -1;
+                    });
+                    if (found) found.click();
+                """)
+            except Exception as exc:
+                log(f"{email} — authenticator click: {exc}")
+            rand_sleep(600, 900)
+            if find_totp_input() is None:
+                try:
+                    driver.execute_script("""
+                        var links = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+                        var found = links.find(function(el) {
+                            var t = (el.innerText || '').toLowerCase();
+                            return t.indexOf('another way') !== -1 || t.indexOf('try again') !== -1;
+                        });
+                        if (found) found.click();
+                    """)
+                    rand_sleep(500, 800)
+                    driver.execute_script("""
+                        var byType = document.querySelector('[data-challengetype="6"]');
+                        if (byType) byType.click();
+                    """)
+                except Exception:
+                    pass
+                rand_sleep(500, 800)
+        if is_totp_challenge_url(driver.current_url) or find_totp_input() is not None:
+            enter_fresh_totp_once(label)
+            deadline = time.time() + 12
+            while time.time() < deadline:
+                if not is_totp_challenge_url(driver.current_url):
+                    break
+                time.sleep(0.3)
+        return True
+
     def _device_url_kind() -> str:
         """list | detail | other — without full page reload."""
         try:
@@ -4380,29 +4430,43 @@ def _do_login(
         except Exception:
             return "other"
 
-    def return_to_device_list(max_back: int = 4) -> bool:
-        """Back to device list — avoid driver.get (keeps session, less TOTP)."""
-        for attempt in range(max_back + 1):
-            handle_totp_if_prompted("Back to device list", max_rounds=2, quick=True)
+    def return_to_device_list(max_back: int = 3) -> bool:
+        """Back only from a device detail page. Never back() off a sign-in challenge."""
+        for _attempt in range(max_back + 1):
+            pass_signin_challenge("Device list")
             kind = _device_url_kind()
             if kind == "list":
-                rand_sleep(350, 550)
+                rand_sleep(300, 500)
                 return True
             if kind == "detail":
                 try:
                     driver.back()
                 except Exception:
                     pass
-                rand_sleep(400, 650)
+                rand_sleep(350, 550)
                 continue
-            if attempt == max_back:
-                break
+            break
+        return _device_url_kind() == "list"
+
+    def ensure_device_activity_list(label: str) -> bool:
+        """Land on the device list. Reload only when we are not already there."""
+        for attempt in range(3):
+            pass_signin_challenge(label)
+            if return_to_device_list():
+                return True
+            log(
+                f"{email} — {label}: opening device activity "
+                f"(attempt {attempt + 1}, was {driver.current_url[:70]})"
+            )
             try:
-                driver.back()
-            except Exception:
-                break
-            rand_sleep(400, 650)
-        log(f"{email} — device list: back() did not reach list (url={driver.current_url[:80]})")
+                driver.get(DEVICE_ACTIVITY_URL)
+            except Exception as exc:
+                log(f"{email} — device list navigation warning: {exc}")
+            rand_sleep(900, 1400)
+            pass_signin_challenge(label)
+            if wait_for_device_activity_loaded(16.0):
+                return True
+        log(f"{email} — could not open device list (url={driver.current_url[:90]})")
         return False
 
     def goto_device_activity_list(*, force_reload: bool = False) -> None:
@@ -4420,7 +4484,13 @@ def _do_login(
         return bool(driver.execute_script(
             _DEVICE_JS_HELPERS
             + """
+            var path = location.pathname || '';
+            if (path.indexOf('device-activity') === -1) return false;
+            if (/\\/device-activity\\/[^/]+/.test(path)) return false;
             var t = (document.body.innerText || '').toLowerCase();
+            var onList = t.indexOf('your devices') !== -1 || t.indexOf('device activity') !== -1
+              || t.indexOf("where you're signed in") !== -1 || t.indexOf('signed out') !== -1;
+            if (!onList) return false;
             if (t.indexOf('all your devices are signed out') !== -1) return true;
             if (t.indexOf("you're signed out on all") !== -1) return true;
             if (t.indexOf('signed out on all your devices') !== -1) return true;
@@ -4687,8 +4757,15 @@ def _do_login(
                 "debugScreenshot": shot,
             }
 
-        handle_totp_if_prompted("Device activity landing", max_rounds=4, quick=True)
-        wait_for_device_activity_loaded()
+        if not ensure_device_activity_list("Device activity landing"):
+            shot = screenshot_b64()
+            return {
+                "status": "unknown",
+                "reason": "Device activity list nahi khuli (re-auth / redirect)",
+                "totpCode": totp_code,
+                "newPassword": new_pw,
+                "debugScreenshot": shot,
+            }
         collect_active_device_sessions(thorough=True)
 
         signed_out_count = 0
@@ -4699,8 +4776,11 @@ def _do_login(
         # One device-activity URL load → click device → sign out → back → next (no re-get loop)
         for _round in range(40):
             if _device_url_kind() != "list":
-                return_to_device_list()
-            handle_totp_if_prompted("Device list", max_rounds=2, quick=True)
+                if not ensure_device_activity_list("Device list"):
+                    idle_passes += 1
+                    if idle_passes >= 3:
+                        break
+                    continue
 
             if all_devices_signed_out_on_page():
                 log(f"{email} — all devices show signed out on list")
@@ -4717,10 +4797,10 @@ def _do_login(
 
             if not sessions:
                 idle_passes += 1
-                log(f"{email} — no active device row (idle {idle_passes}/4)")
-                if idle_passes >= 4:
+                log(f"{email} — no active device row (idle {idle_passes}/3)")
+                if idle_passes >= 3:
                     break
-                return_to_device_list()
+                ensure_device_activity_list("Device list refresh")
                 rand_sleep(400, 600)
                 continue
 
@@ -4750,13 +4830,11 @@ def _do_login(
             confirm_device_dialog()
             handle_totp_if_prompted("After sign out", max_rounds=2, quick=True)
             if not return_to_device_list():
-                log(f"{email} — reload device list once (back failed)")
-                goto_device_activity_list(force_reload=True)
-                handle_totp_if_prompted("Device list reload", max_rounds=2, quick=True)
+                log(f"{email} — back missed list — opening device activity again")
+                ensure_device_activity_list("After sign out")
             rand_sleep(400, 650)
 
-        return_to_device_list()
-        handle_totp_if_prompted("Before self sign-out", max_rounds=2, quick=True)
+        ensure_device_activity_list("Before self sign-out")
 
         if not all_devices_signed_out_on_page():
             log(f"{email} — signing out remaining device(s) via detail page")
