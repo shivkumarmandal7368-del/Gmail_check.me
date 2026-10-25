@@ -79,7 +79,9 @@ router.post("/jobs", (req: Request, res: Response) => {
 
   // Saved mode omits proxy so the server secret is used. An empty string
   // must not override that secret. Custom mode sends the pasted URL(s).
-  const inlineProxy = (parsed.data.proxy ?? "").trim();
+  const inlineProxy = (
+    typeof req.body.proxy === "string" ? req.body.proxy : ""
+  ).trim();
   const savedProxy = (process.env.PROXY_URL ?? "").trim();
   const proxy = inlineProxy || (proxies.length > 0 ? undefined : savedProxy);
   if (!proxy && proxies.length === 0) {
