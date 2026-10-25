@@ -644,6 +644,27 @@ log("Waiting 16s for fingerprint widget to fully render...")
 time.sleep(16)
 
 try:
+    _page = driver.execute_script(
+        "return JSON.stringify({"
+        "mem:navigator.deviceMemory,touch:navigator.maxTouchPoints,"
+        "uad:navigator.userAgentData&&navigator.userAgentData.mobile,"
+        "iw:innerWidth,ih:innerHeight,ow:outerWidth,oh:outerHeight,dpr:devicePixelRatio,"
+        "app:!!(window.chrome&&window.chrome.app),kb:('keyboard' in navigator),"
+        "wd:navigator.webdriver});"
+    )
+    log(f"PAGE_DIAG {_page}")
+except Exception as _e:
+    log(f"PAGE_DIAG failed: {_e}")
+
+try:
+    driver.execute_script(
+        "var b=[...document.querySelectorAll('button')].find(x=>/accept/i.test(x.textContent||''));"
+        "if(b)b.click();"
+    )
+except Exception:
+    pass
+
+try:
     _score = driver.execute_script(
         "var t=document.body&&document.body.innerText||'';"
         "var m=t.match(/Suspect Score[^\\d]*(\\d+)/i)||t.match(/(\\d+)\\s*\\/\\s*100/);"

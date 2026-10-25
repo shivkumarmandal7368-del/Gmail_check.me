@@ -2277,6 +2277,17 @@ def make_plugins_override_js() -> str:
     });
   } catch(e) {}
 
+  // CDP's console domain invokes property getters on logged objects, which
+  // fingerprint.com treats as "developer tools open". Replace console methods
+  // with no-ops that do not touch their arguments, and label them native.
+  ['log','debug','info','warn','error','table','dir','dirxml','trace'].forEach(function(k){
+    try {
+      var fn = function(){};
+      _reg(fn, k, false);
+      console[k] = fn;
+    } catch(e) {}
+  });
+
   // Second-pass: these are non-configurable during the first stealth script.
   // All phone profiles use 5 touch points. chrome.app and Keyboard API are
   // absent on real Android Chrome; leaving the desktop copies is tampering.
