@@ -65,6 +65,7 @@ router.post("/jobs", (req: Request, res: Response) => {
   }
 
   const freshProfile = req.body.freshProfile === true;
+  const changePasswordAfterLogin = req.body.changePasswordAfterLogin === true;
   const deviceIndex =
     typeof req.body.deviceIndex === "number" &&
     Number.isInteger(req.body.deviceIndex) &&
@@ -80,6 +81,7 @@ router.post("/jobs", (req: Request, res: Response) => {
     concurrency,
     freshProfile,
     deviceIndex,
+    changePasswordAfterLogin,
   });
 
   res.json({ jobId });

