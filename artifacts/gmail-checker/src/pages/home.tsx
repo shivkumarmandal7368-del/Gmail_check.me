@@ -57,7 +57,7 @@ function BrowserChecker() {
   // ── localStorage keys ────────────────────────────────────────────────────
   const LS = {
     input: "vbc_input", proxy: "vbc_proxy", proxyMode: "vbc_proxy_mode", concurrency: "vbc_conc",
-    fresh: "vbc_fresh", device: "vbc_device", results: "vbc_results", total: "vbc_total",
+    fresh: "vbc_fresh", changePw: "vbc_change_pw", device: "vbc_device", results: "vbc_results", total: "vbc_total",
     active: "vbc_active", savedAt: "vbc_saved_at", jobId: "vbc_job_id",
     creds: "vbc_creds",
   } as const;
@@ -70,6 +70,7 @@ function BrowserChecker() {
   const [proxyMode,    setProxyMode]    = useState<"saved" | "custom">(() => lsGet<string>(LS.proxyMode, "saved") === "custom" ? "custom" : "saved");
   const [savedProxy,   setSavedProxy]   = useState<{ configured: boolean; label: string } | null>(null);
   const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, false));
+  const [changePasswordAfterLogin, setChangePasswordAfterLogin] = useState<boolean>(() => lsGet(LS.changePw, false));
   const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
 
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
@@ -135,6 +136,7 @@ function BrowserChecker() {
     return () => { cancelled = true; };
   }, []);
   useEffect(() => { try { localStorage.setItem(LS.fresh,       JSON.stringify(freshProfile)); } catch {} }, [freshProfile]);
+  useEffect(() => { try { localStorage.setItem(LS.changePw, JSON.stringify(changePasswordAfterLogin)); } catch {} }, [changePasswordAfterLogin]);
   useEffect(() => { try { localStorage.setItem(LS.device,      JSON.stringify(deviceIndex));  } catch {} }, [deviceIndex]);
   useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
   useEffect(() => { try { localStorage.setItem(LS.total,       JSON.stringify(total));        } catch {} }, [total]);
@@ -230,9 +232,18 @@ function BrowserChecker() {
       const merged = [...prev];
       for (const r of (job.results ?? [])) {
         const cred = credsMapRef.current[r.email];
+        const newPw = typeof (r as { newPassword?: string }).newPassword === "string"
+          ? (r as { newPassword?: string }).newPassword
+          : undefined;
+        if (newPw) {
+          credsMapRef.current[r.email] = {
+            password: newPw,
+            totpSecret: cred?.totpSecret,
+          };
+        }
         const withCreds: ExtBrowserResult = {
           ...r,
-          password:    cred?.password,
+          password:    newPw ?? cred?.password,
           totpSecret:  cred?.totpSecret,
         };
         const idx = merged.findIndex(x => x.email === r.email);
@@ -446,6 +457,7 @@ function BrowserChecker() {
       credentials: creds,
       ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
       concurrency: 1, freshProfile, deviceIndex,
+      ...(changePasswordAfterLogin ? { changePasswordAfterLogin: true } : {}),
     });
   };
 
@@ -942,6 +954,24 @@ function BrowserChecker() {
               </div>
               <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
                 {freshProfile ? "Pehla khatam, phir agla naya profile aur naya canvas. Phone model yahi selected device rahega. Timezone, language aur keyboard Chrome ke IP se match honge." : "Sab accounts ek hi fingerprint: Device Check ne jo device banaya, wahi. Timezone, language aur keyboard Chrome ke IP se match honge."}
+              </p>
+            </button>
+
+            <button onClick={() => !isChecking && setChangePasswordAfterLogin(v => !v)} disabled={isChecking}
+              className={cn("w-full rounded-lg border p-3 text-left transition-colors",
+                changePasswordAfterLogin ? "border-amber-500/40 bg-amber-500/5" : "border-border bg-card/30 opacity-60")}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] font-mono uppercase tracking-widest text-amber-400/80 flex items-center gap-1">
+                  <Lock className="w-3 h-3" /> Demo: Password change page
+                </span>
+                <div className={cn("w-8 h-4 rounded-full transition-colors relative", changePasswordAfterLogin ? "bg-amber-500" : "bg-border")}>
+                  <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", changePasswordAfterLogin ? "left-4" : "left-0.5")} />
+                </div>
+              </div>
+              <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
+                {changePasswordAfterLogin
+                  ? "Login ke baad myaccount signinoptions/password par random naya password + confirm bharega. Naya password export/table mein dikhega — sirf apne test accounts ke liye."
+                  : "Off: password change page skip karke seedha account home khulega (fields khali dikhenge)."}
               </p>
             </button>
 

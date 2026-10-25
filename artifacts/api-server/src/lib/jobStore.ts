@@ -40,6 +40,7 @@ export interface JobResult {
   fingerprint?: string;
   proxySession?: string;
   durationMs?: number;
+  newPassword?: string;
 }
 
 export interface Job {
@@ -57,6 +58,8 @@ export interface Job {
   freshProfile: boolean;
   /** Selected PHONE_PROFILES index shared with Device Check. */
   deviceIndex?: number;
+  /** Demo: random password on myaccount signinoptions/password after login */
+  changePasswordAfterLogin?: boolean;
 
   /** Progress */
   total: number;
