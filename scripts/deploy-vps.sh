@@ -60,29 +60,30 @@ pip3 install -q -r artifacts/api-server/requirements.txt
 eval "$(bash scripts/setup-chrome-for-testing.sh)"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
-  cat >"${ENV_FILE}" <<EOF
-# Vanguard MX — edit and restart services after changes
-PORT=${API_PORT}
-PROXY_URL=
-CHROME_BINARY=${CHROME_BINARY:-}
-CHROME_FOR_TESTING_ROOT=${CHROME_FOR_TESTING_ROOT:-}
-LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
-EOF
+  touch "${ENV_FILE}"
   chmod 600 "${ENV_FILE}"
-  echo "==> Created ${ENV_FILE} — set PROXY_URL (residential/mobile) before Browser Check"
-elif [[ -n "${PROXY_URL:-}" ]]; then
-  if grep -q '^PROXY_URL=' "${ENV_FILE}"; then
-    sed -i "s|^PROXY_URL=.*|PROXY_URL=${PROXY_URL}|" "${ENV_FILE}"
-  else
-    echo "PROXY_URL=${PROXY_URL}" >>"${ENV_FILE}"
-  fi
+fi
+{
+  echo "# Vanguard MX — edit and restart: systemctl restart vanguard-mx-api vanguard-mx-web"
+  echo "PORT=${API_PORT}"
+  echo "PROXY_URL=${PROXY_URL:-}"
+  echo "CHROME_BINARY=${CHROME_BINARY:-}"
+  echo "CHROME_FOR_TESTING_ROOT=${CHROME_FOR_TESTING_ROOT:-}"
+  echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
+  echo "CHROME_VERSION_MAIN=${CHROME_VERSION_MAIN:-}"
+  echo "CHROME_VERSION_FULL=${CHROME_VERSION_FULL:-}"
+} >"${ENV_FILE}.new"
+mv "${ENV_FILE}.new" "${ENV_FILE}"
+if [[ -z "${PROXY_URL:-}" ]]; then
+  echo "==> Wrote ${ENV_FILE} — PROXY_URL empty (OK for first boot). UI/API will run; Gmail checks may show VERIFY until you add proxy later."
+else
+  echo "==> Wrote ${ENV_FILE} — PROXY_URL set for Browser Check"
 fi
 
-pnpm run build 2>/dev/null || {
-  pnpm run typecheck:libs 2>/dev/null || pnpm exec tsc --build
-  pnpm --filter @workspace/api-server run build
-  PORT="${WEB_PORT}" BASE_PATH=/ API_PORT="${API_PORT}" pnpm --filter @workspace/gmail-checker run build
-}
+pnpm exec tsc --build || true
+pnpm --filter @workspace/api-server run build
+PORT="${WEB_PORT}" BASE_PATH=/ API_PORT="${API_PORT}" NODE_ENV=production \
+  pnpm --filter @workspace/gmail-checker run build
 
 # systemd — API
 cat >/etc/systemd/system/vanguard-mx-api.service <<EOF
@@ -94,11 +95,6 @@ After=network.target
 Type=simple
 WorkingDirectory=${INSTALL_DIR}/artifacts/api-server
 EnvironmentFile=${ENV_FILE}
-ExecStartPre=/bin/bash -lc 'eval "\$(bash ${INSTALL_DIR}/scripts/setup-chrome-for-testing.sh)" && export CHROME_BINARY CHROME_FOR_TESTING_ROOT LD_LIBRARY_PATH CHROME_VERSION_MAIN CHROME_VERSION_FULL'
-Environment=PORT=${API_PORT}
-Environment=CHROME_BINARY=${CHROME_BINARY:-}
-Environment=CHROME_FOR_TESTING_ROOT=${CHROME_FOR_TESTING_ROOT:-}
-Environment=LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
 ExecStart=/usr/bin/node --enable-source-maps ${INSTALL_DIR}/artifacts/api-server/dist/index.mjs
 Restart=on-failure
 RestartSec=5
