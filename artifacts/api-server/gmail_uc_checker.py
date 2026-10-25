@@ -4386,14 +4386,18 @@ def _do_login(
             )
             x, y = float(rect["x"]), float(rect["y"])
             if rect.get("w", 0) > 2 and rect.get("h", 0) > 2:
-                driver.execute_cdp_cmd(
-                    "Input.dispatchTouchEvent",
-                    {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]},
-                )
-                driver.execute_cdp_cmd(
-                    "Input.dispatchTouchEvent",
-                    {"type": "touchEnd", "touchPoints": []},
-                )
+                # Desktop layout ignores touch events, so use a real mouse click.
+                driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                    "type": "mouseMoved", "x": x, "y": y,
+                })
+                driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                    "type": "mousePressed", "x": x, "y": y,
+                    "button": "left", "clickCount": 1,
+                })
+                driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                    "type": "mouseReleased", "x": x, "y": y,
+                    "button": "left", "clickCount": 1,
+                })
                 return True
         except Exception:
             pass
@@ -4694,9 +4698,9 @@ def _do_login(
                 var href = (L.href || '').split('#')[0];
                 if (!href || seen[href]) return;
                 if (!isDetailPath(new URL(href).pathname)) return;
-                var block = L.closest('[role="listitem"], li, tr, c-wiz, [data-device-id]')
-                  || L.parentElement || L;
+                var block = L.closest('[role="listitem"], li, tr') || L.parentElement || L;
                 var label = (block.innerText || L.innerText || '').trim();
+                if (label.length > 220) label = (L.innerText || '').trim() || label.slice(0, 180);
                 if (!rowStillSignedIn(label)) return;
                 seen[href] = true;
                 out.push({
@@ -4958,7 +4962,7 @@ def _do_login(
             log(f"{email} — profile icon not found")
             return False
         log(f"{email} — opened profile menu")
-        time.sleep(0.7)
+        time.sleep(1.2)
         if _tap_sign_out_button():
             log(f"{email} — profile menu: Sign out")
             return True
@@ -5032,7 +5036,7 @@ def _do_login(
                 ) or 900
             except Exception:
                 heights = 900
-            steps = min(12, max(3, int(heights / 350) + 1)) if full_scroll else 2
+            steps = min(10 if full_scroll else 6, max(3, int(heights / 400) + 1))
             for step in range(steps):
                 y = step * 350
                 try:
@@ -5087,22 +5091,41 @@ def _do_login(
             return None
 
         def wait_auto_back_to_list() -> bool:
-            """Sign out confirm, then Google returns to the list by itself."""
-            deadline = time.time() + 6.0
+            """Confirm Sign out once, then wait. Back too early cancels the sign-out."""
+            confirmed = False
+            deadline = time.time() + 8.0
             while time.time() < deadline:
                 if _device_url_kind() == "list":
                     return True
-                _tap_sign_out_button()
+                if not confirmed:
+                    if _tap_sign_out_button():
+                        confirmed = True
+                        time.sleep(0.4)
+                        continue
                 time.sleep(0.25)
-            if _device_url_kind() == "detail":
-                try:
-                    driver.back()
-                except Exception:
-                    pass
-                time.sleep(0.3)
             return _device_url_kind() == "list"
 
+        def row_shows_signed_out(href: str) -> bool:
+            if not href or _device_url_kind() != "list":
+                return False
+            return bool(driver.execute_script(
+                """
+                var want = arguments[0];
+                var links = document.querySelectorAll('a[href*="device-activity"]');
+                for (var i = 0; i < links.length; i++) {
+                  var href = (links[i].href || '').split('#')[0];
+                  if (href !== want) continue;
+                  var block = links[i].closest('[role="listitem"], li, tr') || links[i].parentElement;
+                  var t = ((block && block.innerText) || '').toLowerCase();
+                  if (t.indexOf('signed out') !== -1) return true;
+                }
+                return false;
+                """,
+                href,
+            ))
+
         done_hrefs: set[str] = set()
+        attempts: dict[str, int] = {}
         signed_out_count = 0
         kinds_done: dict[str, int] = {}
         kinds_seen: set[str] = set()
@@ -5130,9 +5153,10 @@ def _do_login(
             for s in sessions:
                 k = s.get("kind") or "session"
                 by_kind[k] = by_kind.get(k, 0) + 1
+            names = [((s.get("kind") or "?") + ":" + (s.get("label") or "").split("\n")[0][:28]) for s in sessions]
             log(
-                f"{email} — sessions on page: {len(sessions)} active, "
-                f"{len(pending)} left, counts={by_kind}"
+                f"{email} — sessions on page: {len(sessions)} still signed in, "
+                f"{len(pending)} left, counts={by_kind}, rows={names}"
             )
             if not pending:
                 log(f"{email} — every listed device signed out — account logout")
@@ -5141,24 +5165,35 @@ def _do_login(
             target = pending[0]
             href = target.get("href") or ""
             kind = target.get("kind") or "session"
-            done_hrefs.add(href)
+            attempts[href] = attempts.get(href, 0) + 1
             device_label = open_device_session(target)
             if not device_label:
+                if attempts[href] >= 2:
+                    done_hrefs.add(href)
                 continue
             log(f"{email} — opened device: {device_label[:80]}")
             sign_out_label = click_sign_out_ready()
             if not sign_out_label:
                 log(f"{email} — Sign out not found — next device")
                 wait_auto_back_to_list()
+                if attempts[href] >= 2:
+                    done_hrefs.add(href)
                 continue
 
-            signed_out_count += 1
-            kinds_done[kind] = kinds_done.get(kind, 0) + 1
-            log(f"{email} — device sign-out #{signed_out_count} [{kind}]: {sign_out_label}")
-            time.sleep(0.35)
-            _tap_sign_out_button()
+            log(f"{email} — clicked Sign out [{kind}]")
+            time.sleep(0.4)
             if not wait_auto_back_to_list():
-                log(f"{email} — waiting to land back on the device list")
+                log(f"{email} — list par wapas nahi aaya")
+                ensure_device_activity_list("After sign out")
+            if row_shows_signed_out(href):
+                done_hrefs.add(href)
+                signed_out_count += 1
+                kinds_done[kind] = kinds_done.get(kind, 0) + 1
+                log(f"{email} — device sign-out #{signed_out_count} [{kind}] list shows Signed out")
+            else:
+                log(f"{email} — [{kind}] abhi bhi signed in, dubara try ({attempts[href]}/2)")
+                if attempts[href] >= 2:
+                    done_hrefs.add(href)
 
         kinds_seen_sorted = sorted(kinds_seen)
         log(
