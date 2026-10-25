@@ -3043,6 +3043,22 @@ def _ensure_chromedriver_patched(version_main: int | None = None) -> None:
     uc_dir = os.path.expanduser('~/.local/share/undetected_chromedriver/')
     os.makedirs(uc_dir, exist_ok=True)
     binary_path = os.path.join(uc_dir, 'undetected_chromedriver')
+    stamp_path = os.path.join(uc_dir, 'chrome_major')
+    wanted_major = str(version_main or "")
+    stamped_major = ""
+    if os.path.exists(stamp_path):
+        try:
+            stamped_major = open(stamp_path, encoding="utf8").read().strip()
+        except Exception:
+            stamped_major = ""
+    # A patched 149 driver must not be reused against Chrome 156 — Google
+    # never even opens, and ChromeDriver refuses the session.
+    if binary_path and os.path.exists(binary_path) and wanted_major and stamped_major != wanted_major:
+        log(f"[patch] chromedriver is for Chrome {stamped_major or '?'} — need {wanted_major}, re-downloading")
+        try:
+            os.remove(binary_path)
+        except OSError as _rm_err:
+            log(f"[patch] could not remove old chromedriver: {_rm_err}")
 
     if not os.path.exists(binary_path):
         log('[patch] chromedriver binary missing — downloading via UC patcher...')
@@ -3104,6 +3120,12 @@ def _ensure_chromedriver_patched(version_main: int | None = None) -> None:
                 log('[patch] Binary busy (ETXTBSY) — skipping write; already patched by prior run')
             else:
                 raise
+    if wanted_major and os.path.exists(binary_path):
+        try:
+            with open(stamp_path, "w", encoding="utf8") as _stamp:
+                _stamp.write(wanted_major)
+        except Exception as _stamp_err:
+            log(f"[patch] chrome major stamp skipped: {_stamp_err}")
 
 
 def check_gmail(
