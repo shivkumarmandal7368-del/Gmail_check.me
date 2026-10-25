@@ -411,14 +411,31 @@ else:
 # Device Check must use the same browser fingerprint engine as Browser Check;
 # changing only the UA leaves WebGL, navigator, canvas, and hardware signals
 # identifying the Replit Chromium host.
+_exit_ip = proxy_exit if proxy_info else direct_exit
+_tz, _cc, _lat, _lon = "America/New_York", "US", 39.8283, -98.5795
+try:
+    import requests as _rq
+    _g = _rq.get(
+        f"http://ip-api.com/json/{_exit_ip}?fields=status,timezone,countryCode,lat,lon",
+        timeout=8,
+    ).json()
+    if _g.get("status") == "success" and _g.get("timezone"):
+        _tz = _g["timezone"]
+        _cc = _g.get("countryCode") or _cc
+        _lat = _g.get("lat", _lat)
+        _lon = _g.get("lon", _lon)
+    log(f"Exit geo {_exit_ip} → tz={_tz} cc={_cc}")
+except Exception as _geo_err:
+    log(f"Exit geo lookup failed ({_geo_err}) — using {_tz}")
+
 device_fp = dict(profile)
 device_fp.update({
     "canvasSeed": random.randint(1, 65535),
     "audioNoise": round(random.uniform(0.00001, 0.00009), 8),
     "webglNoise": round(random.uniform(0.000001, 0.000009), 8),
-    "timezone": "America/New_York",
+    "timezone": _tz,
     "language": "en-US",
-    "countryCode": "US",
+    "countryCode": _cc,
     "batteryLevel": round(random.uniform(0.25, 0.92), 2),
     "batteryCharging": False,
     "dischargingTime": random.randint(2400, 28800),
@@ -426,8 +443,8 @@ device_fp.update({
     "connectionDownlink": round(random.uniform(25.0, 120.0), 1),
     "historyLength": random.randint(3, 14),
     "doNotTrack": None,
-    "lat": 39.8283,
-    "lon": -98.5795,
+    "lat": _lat,
+    "lon": _lon,
     "geoLocked": True,
     "ip": proxy_exit,
 })
@@ -474,7 +491,7 @@ cv_major = chrome.split(".")[0]
     # including Sec-CH-UA via userAgentMetadata, making Network.setUserAgentOverride
     # redundant. Avoid enabling any CDP domain that is not strictly necessary.
 try:
-    driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": "America/New_York"})
+    driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": _tz})
     driver.execute_cdp_cmd("Emulation.setLocaleOverride",   {"locale": "en-US"})
     # Override hardware concurrency at the CDP level so it matches JS patches
     try:
