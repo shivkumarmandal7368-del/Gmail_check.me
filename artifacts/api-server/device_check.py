@@ -543,12 +543,27 @@ try:
         # canvas. This is the same per-account canvas shift Browser Check uses.
         _minimal += f"""
 (function(){{
-  var seed={int(_canvas_seed)};
-  function _xc(d){{if(!d||!d.data||d.data.length<4)return;d.data[0]=d.data[0]^seed;d.data[3]=d.data[3]^((seed*7)&255);if(d.data.length>8)d.data[4]=d.data[4]^((seed*3)&255);}}
-  var o=HTMLCanvasElement.prototype.toDataURL;
-  HTMLCanvasElement.prototype.toDataURL=function(){{var c=this.getContext('2d');if(c){{var d=c.getImageData(0,0,this.width||1,this.height||1);_xc(d);c.putImageData(d,0,0);}}return o.apply(this,arguments);}};
+  var seed={int(_canvas_seed) & 255};
+  function _xc(d){{
+    if(!d||!d.data||d.data.length<4)return;
+    var n=Math.min(d.data.length, 512);
+    for(var i=0;i<n;i+=4){{d.data[i]=d.data[i]^seed;d.data[i+1]=d.data[i+1]^((seed*3)&255);}}
+  }}
+  function _wrap(proto){{
+    if(!proto||!proto.toDataURL)return;
+    var o=proto.toDataURL;
+    proto.toDataURL=function(){{var c=this.getContext&&this.getContext('2d');if(c){{var d=c.getImageData(0,0,this.width||1,this.height||1);_xc(d);c.putImageData(d,0,0);}}return o.apply(this,arguments);}};
+  }}
+  _wrap(HTMLCanvasElement.prototype);
+  if(window.OffscreenCanvas)_wrap(OffscreenCanvas.prototype);
   var og=CanvasRenderingContext2D.prototype.getImageData;
   CanvasRenderingContext2D.prototype.getImageData=function(){{var d=og.apply(this,arguments);_xc(d);return d;}};
+}})();
+(function(){{
+  var noise={float(_audio_noise)};
+  var orig=window.AudioBuffer&&AudioBuffer.prototype.getChannelData;
+  if(!orig)return;
+  AudioBuffer.prototype.getChannelData=function(){{var d=orig.apply(this,arguments);if(d&&d.length){{try{{d[0]=d[0]+noise;}}catch(e){{}}}}return d;}};
 }})();
 """
     if os.environ.get("FP_NO_JS") != "1":
