@@ -1663,9 +1663,7 @@ try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function
       if(p===36347)return 256;          // MAX_VERTEX_UNIFORM_VECTORS (SwiftShader:254, Mali:256)
       if(p===33901)return new Float32Array([1,511]); // ALIASED_POINT_SIZE_RANGE (desktop:[1,8191], mobile:[1,511])
       if(p===34930)return 8;            // STENCIL_BITS (SwiftShader:0, Mali:8)
-      var v=gp.call(this,p);
-      if(typeof v==='number'){{var n=(_phash(p)/65535)*_ws*4-_ws*2;return v+n*Math.sign(v||1);}}
-      return v;
+      return gp.call(this,p);
     }};
     ctx.prototype.getSupportedExtensions=function(){{return extList.slice();}};
     var _origGE=ctx.prototype.getExtension;
@@ -1687,48 +1685,70 @@ try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function
     }};
     if(window.__nr){{window.__nr(ctx.prototype.getParameter,'getParameter');window.__nr(ctx.prototype.getSupportedExtensions,'getSupportedExtensions');window.__nr(ctx.prototype.getExtension,'getExtension');window.__nr(ctx.prototype.getShaderPrecisionFormat,'getShaderPrecisionFormat');}}
   }}
-  try{{patch(WebGLRenderingContext,_e1);}}catch(e){{}}
-  try{{if(window.WebGL2RenderingContext)patch(WebGL2RenderingContext,_e2);}}catch(e){{}}
-  // Chrome binds getParameter on the context instance, so prototype patches
-  // never run. Wrap getContext and patch the instance that fingerprint reads.
-  var _origGC=HTMLCanvasElement.prototype.getContext;
-  function _wrapCtx(ctx,extList){{
-    if(!ctx||ctx.__fpw)return ctx;
-    try{{Object.defineProperty(ctx,'__fpw',{{value:1}});}}catch(e){{}}
-    var gp=ctx.getParameter.bind(ctx);
-    var _gp=function(p){{
-      if(p===37445||p===7936)return _wv;
-      if(p===37446||p===7937)return _wr;
-      if(p===7938)return '{gl_ver}';
-      if(p===35724)return 'OpenGL ES GLSL ES 3.20';
-      if(p===3379||p===34024||p===34076)return 16384;
-      if(p===36348)return 15;
-      if(p===36349)return 224;
-      if(p===36347)return 256;
-      if(p===33901)return new Float32Array([1,511]);
-      if(p===34930)return 8;
-      return gp(p);
-    }};
-    try{{delete ctx.getParameter;}}catch(e){{}}
-    try{{Object.defineProperty(ctx,'getParameter',{{value:_gp,configurable:true,writable:true}});}}catch(e){{ctx.getParameter=_gp;}}
-    ctx.getSupportedExtensions=function(){{return extList.slice();}};
-    var _ge=ctx.getExtension.bind(ctx);
-    ctx.getExtension=function(name){{
-      if(extList.indexOf(name)===-1)return null;
-      return _ge(name);
-    }};
-    if(window.__nr)window.__nr(ctx.getParameter,'getParameter');
-    return ctx;
+  function _answer(p, gp, ctx){{
+    if(p===37445||p===7936)return _wv;
+    if(p===37446||p===7937)return _wr;
+    if(p===7938)return '{gl_ver}';
+    if(p===35724)return 'OpenGL ES GLSL ES 3.20';
+    if(p===3379||p===34024||p===34076)return 16384;
+    if(p===36348)return 15;
+    if(p===36349)return 224;
+    if(p===36347)return 256;
+    if(p===33901)return new Float32Array([1,511]);
+    if(p===34930)return 8;
+    try{{return gp.call(ctx,p);}}catch(e){{return null;}}
   }}
-  HTMLCanvasElement.prototype.getContext=function(type){{
-    var ctx=_origGC.apply(this,arguments);
-    try{{
-      if(ctx&&type&&String(type).indexOf('webgl')!==-1)
-        ctx=_wrapCtx(ctx,/webgl2/i.test(String(type))?_e2:_e1);
-    }}catch(e){{}}
-    return ctx;
-  }};
-  if(window.__nr)window.__nr(HTMLCanvasElement.prototype.getContext,'getContext');
+  // Chrome reinstalls the native getParameter when the context is created, so
+  // a document-start prototype write is gone by the time fingerprint reads it.
+  // Re-apply after getContext and also return a Proxy (instance property is
+  // non-configurable, so a direct assignment never sticks).
+  function _hookGetContext(ctorProto){{
+    if(!ctorProto||ctorProto.__fpgc)return;
+    var orig=ctorProto.getContext;
+    if(typeof orig!=='function')return;
+    ctorProto.getContext=function(type){{
+      var ctx=orig.apply(this,arguments);
+      try{{
+        if(ctx&&type&&String(type).indexOf('webgl')!==-1){{
+          var Ctor=/webgl2/i.test(String(type))?WebGL2RenderingContext:WebGLRenderingContext;
+          var extList=(Ctor===WebGL2RenderingContext)?_e2:_e1;
+          var gp=Ctor.prototype.getParameter;
+          var nativeGP=gp;
+          Ctor.prototype.getParameter=function(p){{return _answer(p,nativeGP,this);}};
+          if(window.__nr)window.__nr(Ctor.prototype.getParameter,'getParameter');
+          var ge=ctx.getExtension.bind(ctx);
+          var gspf=ctx.getShaderPrecisionFormat&&ctx.getShaderPrecisionFormat.bind(ctx);
+          var wrapped=function(p){{return _answer(p,nativeGP,ctx);}};
+          if(window.__nr)window.__nr(wrapped,'getParameter');
+          return new Proxy(ctx,{{
+            get:function(t,prop){{
+              if(prop==='getParameter')return wrapped;
+              if(prop==='getSupportedExtensions')return function(){{return extList.slice();}};
+              if(prop==='getExtension')return function(name){{
+                if(extList.indexOf(name)===-1)return null;
+                return ge(name);
+              }};
+              if(prop==='getShaderPrecisionFormat')return function(st,pt){{
+                var HF=36338,MF=36337,LF=36336,HI=36341,MI=36340,LI=36339;
+                if(pt===HF)return{{rangeMin:127,rangeMax:127,precision:23}};
+                if(pt===MF||pt===LF)return{{rangeMin:15,rangeMax:15,precision:10}};
+                if(pt===HI)return{{rangeMin:31,rangeMax:30,precision:0}};
+                if(pt===MI||pt===LI)return{{rangeMin:15,rangeMax:14,precision:0}};
+                return gspf?gspf(st,pt):null;
+              }};
+              var v=t[prop];
+              return (typeof v==='function')?v.bind(t):v;
+            }}
+          }});
+        }}
+      }}catch(e){{}}
+      return ctx;
+    }};
+    try{{Object.defineProperty(ctorProto,'__fpgc',{{value:1}});}}catch(e){{}}
+    if(window.__nr)window.__nr(ctorProto.getContext,'getContext');
+  }}
+  _hookGetContext(HTMLCanvasElement.prototype);
+  if(window.OffscreenCanvas)_hookGetContext(OffscreenCanvas.prototype);
 }})();
 (function(){{
   var seed={cs};
