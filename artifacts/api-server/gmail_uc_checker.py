@@ -236,6 +236,12 @@ def log(msg: str):
 
 # Login target. Success is this page while signed in, not the Gmail inbox.
 ACCOUNT_HOME = "https://myaccount.google.com/"
+# Sign-in starts here. Google sends a logged-out browser to accounts.google.com,
+# then back to this page. The checker does not type a new password.
+LOGIN_START = (
+    "https://myaccount.google.com/signinoptions/password"
+    "?continue=https://myaccount.google.com/"
+)
 
 
 def signed_in_host(url: str) -> bool:
@@ -247,7 +253,7 @@ def signed_in_host(url: str) -> bool:
         return False
     u = url.lower()
     if host == "myaccount.google.com":
-        # signinoptions/password is post-login, not the account home yet.
+        # signinoptions/password is login start OR post-login change — not account home.
         if "signinoptions" in u or "/password" in u.split("?", 1)[0]:
             return False
         if "signin" not in u:
@@ -3691,6 +3697,18 @@ def _do_login(
 
     def classify(url: str, text: str) -> dict | None:
         host = get_hostname(url)
+        # Password-settings page means sign-in already finished. Do not fill a new password.
+        if host == "myaccount.google.com" and "signinoptions/password" in url.lower():
+            rand_sleep(400, 700)
+            shot = screenshot_b64()
+            log("Signed in — password page reached, password not changed")
+            return {
+                "status": "opened",
+                "reason": "Signed in. Stopped on the password page without changing it.",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
+
         # Signed-in Google Account home is the success page. The inbox is not required.
         if signed_in_host(url):
             rand_sleep(400, 700)
@@ -4133,15 +4151,9 @@ def _do_login(
     except Exception as _warm_err:
         log(f"{email} — warmup skipped: {_warm_err}")
 
-    # Sign-in starts on accounts.google.com. continue sends a finished login
-    # to myaccount.google.com, which classify() marks as Open.
-    log(f"{email} — Opening https://accounts.google.com")
+    log(f"{email} — Opening password-page sign-in link")
     try:
-        driver.get(
-            "https://accounts.google.com/ServiceLogin"
-            "?continue=https%3A%2F%2Fmyaccount.google.com%2F"
-            "&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
-        )
+        driver.get(LOGIN_START)
         rand_sleep(600, 1000)
     except Exception as e:
         # Navigation failure = Chrome/ChromeDriver crashed — treat as retriable
