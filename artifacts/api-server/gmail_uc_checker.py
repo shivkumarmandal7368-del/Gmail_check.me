@@ -4366,55 +4366,71 @@ def _do_login(
     }
     """
 
+    def _click_authenticator_option() -> None:
+        driver.execute_script("""
+            var byType = document.querySelector('[data-challengetype="6"]');
+            if (byType) { byType.click(); return; }
+            var allEls = Array.from(document.querySelectorAll(
+                'li, div[role="listitem"], [data-challengetype], button, a, [role="link"], [role="button"]'));
+            var found = allEls.find(function(el) {
+                return (el.innerText || '').toLowerCase().indexOf('authenticator') !== -1;
+            });
+            if (found) found.click();
+        """)
+
+    def _click_try_another_way() -> None:
+        driver.execute_script("""
+            var links = Array.from(document.querySelectorAll('a, button, [role="button"], [role="link"]'));
+            var found = links.find(function(el) {
+                var t = (el.innerText || '').toLowerCase();
+                return t.indexOf('another way') !== -1 || t.indexOf('try again') !== -1;
+            });
+            if (found) found.click();
+        """)
+
+    def _totp_ready() -> bool:
+        return is_totp_challenge_url(driver.current_url) or find_totp_input(driver) is not None
+
+    def _poll_until(pred, seconds: float) -> bool:
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            try:
+                if pred():
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.2)
+        return False
+
     def pass_signin_challenge(label: str) -> bool:
-        """challenge/dp or TOTP during device activity — finish it, stay in flow."""
+        """Finish challenge/dp or TOTP in place. Do not reload the page."""
         url = driver.current_url.lower()
         on_picker = "challenge/dp" in url or "challenge/selection" in url
-        on_totp = is_totp_challenge_url(driver.current_url)
-        if not on_picker and not on_totp:
+        if not on_picker and not _totp_ready():
             return False
         log(f"{email} — {label}: Google re-auth ({url[:70]})")
-        if on_picker:
+        if on_picker and not _totp_ready():
             try:
-                driver.execute_script("""
-                    var byType = document.querySelector('[data-challengetype="6"]');
-                    if (byType) { byType.click(); return; }
-                    var allEls = Array.from(document.querySelectorAll(
-                        'li, div[role="listitem"], [data-challengetype], button, [role="link"]'));
-                    var found = allEls.find(function(el) {
-                        return (el.innerText || '').toLowerCase().indexOf('authenticator') !== -1;
-                    });
-                    if (found) found.click();
-                """)
+                _click_authenticator_option()
             except Exception as exc:
                 log(f"{email} — authenticator click: {exc}")
-            rand_sleep(600, 900)
-            if find_totp_input(driver) is None:
+            if not _poll_until(_totp_ready, 3.5):
                 try:
-                    driver.execute_script("""
-                        var links = Array.from(document.querySelectorAll('a, button, [role="button"]'));
-                        var found = links.find(function(el) {
-                            var t = (el.innerText || '').toLowerCase();
-                            return t.indexOf('another way') !== -1 || t.indexOf('try again') !== -1;
-                        });
-                        if (found) found.click();
-                    """)
-                    rand_sleep(500, 800)
-                    driver.execute_script("""
-                        var byType = document.querySelector('[data-challengetype="6"]');
-                        if (byType) byType.click();
-                    """)
+                    _click_try_another_way()
                 except Exception:
                     pass
-                rand_sleep(500, 800)
-        if is_totp_challenge_url(driver.current_url) or find_totp_input(driver) is not None:
+                time.sleep(0.4)
+                try:
+                    _click_authenticator_option()
+                except Exception:
+                    pass
+                _poll_until(_totp_ready, 4.0)
+        if _totp_ready():
             enter_fresh_totp_once(label)
-            deadline = time.time() + 12
-            while time.time() < deadline:
-                if not is_totp_challenge_url(driver.current_url):
-                    break
-                time.sleep(0.3)
-        return True
+            _poll_until(lambda: not is_totp_challenge_url(driver.current_url), 8.0)
+            return True
+        log(f"{email} — {label}: re-auth still on {driver.current_url[:70]}")
+        return False
 
     def _device_url_kind() -> str:
         """list | detail | other — without full page reload."""
@@ -4448,23 +4464,43 @@ def _do_login(
             break
         return _device_url_kind() == "list"
 
-    def ensure_device_activity_list(label: str) -> bool:
-        """Land on the device list. Reload only when we are not already there."""
-        for attempt in range(3):
-            pass_signin_challenge(label)
-            if return_to_device_list():
+    def _wait_on_device_list(timeout: float = 12.0) -> bool:
+        """Poll for the list. Solve a challenge in place — never reload from here."""
+        deadline = time.time() + timeout
+        solved = 0
+        while time.time() < deadline:
+            if _device_url_kind() == "list":
+                log(f"{email} — device activity page loaded")
                 return True
-            log(
-                f"{email} — {label}: opening device activity "
-                f"(attempt {attempt + 1}, was {driver.current_url[:70]})"
-            )
+            url = driver.current_url.lower()
+            if "challenge" in url and solved < 2:
+                solved += 1
+                pass_signin_challenge("Device activity")
+                continue
+            time.sleep(0.25)
+        return _device_url_kind() == "list"
+
+    def ensure_device_activity_list(label: str) -> bool:
+        """Land on the device list. Reload only if we are not already on a challenge."""
+        if _device_url_kind() == "list":
+            return True
+        url = driver.current_url.lower()
+        on_challenge = "challenge" in url
+        if not on_challenge and _device_url_kind() != "detail":
+            log(f"{email} — {label}: opening device activity")
             try:
                 driver.get(DEVICE_ACTIVITY_URL)
             except Exception as exc:
                 log(f"{email} — device list navigation warning: {exc}")
-            rand_sleep(900, 1400)
-            pass_signin_challenge(label)
-            if wait_for_device_activity_loaded(16.0):
+        if _wait_on_device_list(12.0):
+            return True
+        if "challenge" not in driver.current_url.lower():
+            log(f"{email} — {label}: one reload (was {driver.current_url[:70]})")
+            try:
+                driver.get(DEVICE_ACTIVITY_URL)
+            except Exception as exc:
+                log(f"{email} — device list navigation warning: {exc}")
+            if _wait_on_device_list(8.0):
                 return True
         log(f"{email} — could not open device list (url={driver.current_url[:90]})")
         return False
@@ -4746,7 +4782,6 @@ def _do_login(
         log(f"{email} — Device activity: sign out all sessions")
         try:
             driver.get(DEVICE_ACTIVITY_URL)
-            rand_sleep(1400, 2200)
         except Exception as exc:
             shot = screenshot_b64()
             return {
@@ -4766,33 +4801,84 @@ def _do_login(
                 "newPassword": new_pw,
                 "debugScreenshot": shot,
             }
+        def list_devices_fast() -> list[dict]:
+            merged: dict[str, dict] = {}
+            for item in _gather_device_sessions_js():
+                href = item.get("href") or ""
+                if href:
+                    merged[href] = item
+            if len(merged) < 4:
+                try:
+                    driver.execute_script(
+                        "window.scrollTo(0, Math.max(document.body.scrollHeight, 800));"
+                    )
+                except Exception:
+                    pass
+                time.sleep(0.15)
+                for item in _gather_device_sessions_js():
+                    href = item.get("href") or ""
+                    if href:
+                        merged[href] = item
+                try:
+                    driver.execute_script("window.scrollTo(0, 0);")
+                except Exception:
+                    pass
+            out = list(merged.values())
+            out.sort(
+                key=lambda s: (
+                    _SESSION_KIND_ORDER.index(s.get("kind") or "session")
+                    if (s.get("kind") or "session") in _SESSION_KIND_ORDER
+                    else 99,
+                    s.get("label") or "",
+                )
+            )
+            return out
+
+        def click_sign_out_ready() -> str | None:
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                label = click_sign_out_on_device_detail()
+                if label:
+                    return label
+                time.sleep(0.2)
+            return None
+
+        def wait_auto_back_to_list() -> bool:
+            """Google returns to the list and shows Signed out under the device."""
+            deadline = time.time() + 3.5
+            while time.time() < deadline:
+                if _device_url_kind() == "list":
+                    return True
+                confirm_device_dialog()
+                time.sleep(0.15)
+            if _device_url_kind() == "detail":
+                try:
+                    driver.back()
+                except Exception:
+                    pass
+                time.sleep(0.25)
+            return _device_url_kind() == "list"
+
         done_hrefs: set[str] = set()
         signed_out_count = 0
         kinds_done: dict[str, int] = {}
         kinds_seen: set[str] = set()
 
-        # Each device once, then account logout. Google often keeps the row
-        # looking active (especially this browser), so never re-click the same href.
-        for _round in range(12):
-            if _device_url_kind() != "list" and not return_to_device_list():
-                if not ensure_device_activity_list("Device list"):
-                    break
-
-            if all_devices_signed_out_on_page():
-                log(f"{email} — all devices show signed out on list")
+        # Click device → Sign out → Google goes back and shows Signed out → next device.
+        for _round in range(8):
+            if _device_url_kind() != "list" and not wait_auto_back_to_list():
                 break
-
-            sessions = collect_active_device_sessions(thorough=(_round == 0))
+            sessions = list_devices_fast()
             for s in sessions:
                 kinds_seen.add(s.get("kind") or "session")
             pending = [s for s in sessions if (s.get("href") or "") not in done_hrefs]
             log(
                 f"{email} — sessions on page: {len(sessions)} active, "
-                f"{len(pending)} not yet signed out, "
+                f"{len(pending)} left, "
                 f"kinds={sorted({s.get('kind', 'session') for s in sessions})}"
             )
             if not pending:
-                log(f"{email} — each listed device signed out once — going to account logout")
+                log(f"{email} — every device signed out once — account logout")
                 break
 
             target = pending[0]
@@ -4801,28 +4887,20 @@ def _do_login(
             done_hrefs.add(href)
             device_label = open_device_session(target)
             if not device_label:
-                return_to_device_list()
+                wait_auto_back_to_list()
                 continue
             log(f"{email} — opened device: {device_label[:80]}")
-            rand_sleep(450, 700)
-            handle_totp_if_prompted("Device detail", max_rounds=1, quick=True)
-
-            sign_out_label = click_sign_out_on_device_detail()
+            sign_out_label = click_sign_out_ready()
             if not sign_out_label:
-                log(f"{email} — Sign out not found on detail — next device")
-                return_to_device_list()
+                log(f"{email} — Sign out not found — next device")
+                wait_auto_back_to_list()
                 continue
 
             signed_out_count += 1
             kinds_done[kind] = kinds_done.get(kind, 0) + 1
             log(f"{email} — device sign-out #{signed_out_count} [{kind}]: {sign_out_label}")
-            rand_sleep(250, 400)
             confirm_device_dialog()
-            rand_sleep(200, 350)
-            confirm_device_dialog()
-            if not return_to_device_list():
-                ensure_device_activity_list("After sign out")
-            rand_sleep(250, 400)
+            wait_auto_back_to_list()
 
         kinds_seen_sorted = sorted(kinds_seen)
         log(
@@ -4831,7 +4909,7 @@ def _do_login(
         log(f"{email} — final logout ({signed_out_count} other device(s) signed out)")
         try:
             driver.get("https://accounts.google.com/Logout?continue=https://myaccount.google.com/")
-            rand_sleep(900, 1400)
+            rand_sleep(400, 700)
         except Exception as _le:
             log(f"{email} — Logout URL warning: {_le}")
 
