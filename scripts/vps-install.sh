@@ -25,7 +25,7 @@ apt-get install -y -qq \
   libcups2 libdbus-1-3 libdrm2 libgbm1 libgtk-3-0 libnspr4 libnss3 \
   libx11-xcb1 libxcomposite1 libxdamage1 libxfixes3 libxkbcommon0 libxrandr2 \
   libxi6 libxrender1 libxtst6 libpango-1.0-0 libcairo2 libglib2.0-0 \
-  python3 python3-pip python3-venv
+  python3 python3-pip python3-venv python3-full
 # libasound package name differs on 24.04 vs 22.04
 apt-get install -y -qq libasound2t64 2>/dev/null || apt-get install -y -qq libasound2
 
@@ -85,8 +85,12 @@ systemctl enable vanguard-api vanguard-web
 if [[ -f "${REPO_DIR}/deploy/nginx/vanguard.conf" ]]; then
   install -m 644 "${REPO_DIR}/deploy/nginx/vanguard.conf" /etc/nginx/sites-available/vanguard
   ln -sf /etc/nginx/sites-available/vanguard /etc/nginx/sites-enabled/vanguard
+  # Do not remove default or other sites — Vanguard listens on 8888 only
   rm -f /etc/nginx/sites-enabled/default
   nginx -t && systemctl reload nginx
+  if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q active; then
+    ufw allow 8888/tcp || true
+  fi
 fi
 
 echo ""

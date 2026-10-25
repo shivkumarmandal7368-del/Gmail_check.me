@@ -52,7 +52,7 @@ sudo systemctl start vanguard-api vanguard-web
 sudo systemctl status vanguard-api vanguard-web
 ```
 
-Browser mein: `http://YOUR_VPS_IP/` (nginx port 80 → UI + `/api` proxy)
+Browser mein: `http://YOUR_VPS_IP:8888/` (port **8888** taaki pehle se `:80` par jo site ho woh na chhue)
 
 ## Manual setup (step-by-step)
 
