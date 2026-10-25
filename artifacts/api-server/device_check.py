@@ -477,20 +477,24 @@ try:
   }});
   try{{delete window.chrome.app;}}catch(e){{}}
   try{{delete Navigator.prototype.keyboard; delete navigator.keyboard;}}catch(e){{}}
+  function _patch(Ctor){{
+    if(!Ctor)return;
+    if(!Ctor.prototype.__fpNative) Ctor.prototype.__fpNative=Ctor.prototype.getParameter;
+    var native=Ctor.prototype.__fpNative;
+    Ctor.prototype.getParameter=function(p){{
+      if(p===37445||p===7936)return '{_wv}';
+      if(p===37446||p===7937)return '{_wr}';
+      return native.call(this,p);
+    }};
+  }}
+  _patch(window.WebGLRenderingContext);
+  _patch(window.WebGL2RenderingContext);
   var orig=HTMLCanvasElement.prototype.getContext;
   HTMLCanvasElement.prototype.getContext=function(type){{
     var ctx=orig.apply(this,arguments);
-    if(!ctx||!type||String(type).indexOf('webgl')===-1)return ctx;
-    var gp=ctx.getParameter.bind(ctx);
-    var wrapped=function(p){{
-      if(p===37445||p===7936)return '{_wv}';
-      if(p===37446||p===7937)return '{_wr}';
-      return gp(p);
-    }};
-    return new Proxy(ctx,{{get:function(t,prop){{
-      if(prop==='getParameter')return wrapped;
-      var v=t[prop]; return typeof v==='function'?v.bind(t):v;
-    }}}});
+    _patch(window.WebGLRenderingContext);
+    _patch(window.WebGL2RenderingContext);
+    return ctx;
   }};
 }})();
 """
@@ -694,7 +698,9 @@ try:
         "wd:navigator.webdriver,tz:Intl.DateTimeFormat().resolvedOptions().timeZone,"
         "gl:(function(){try{var g=document.createElement('canvas').getContext('webgl');"
         "var e=g.getExtension('WEBGL_debug_renderer_info');"
-        "return g.getParameter(e.UNMASKED_RENDERER_WEBGL);}catch(err){return String(err);}})()});"
+        "return g.getParameter(e.UNMASKED_RENDERER_WEBGL);}catch(err){return String(err);}})(),"
+        "gl2:(function(){try{var g=document.createElement('canvas').getContext('webgl');"
+        "return WebGLRenderingContext.prototype.getParameter.call(g,37446);}catch(err){return String(err);}})()});"
     )
     log(f"PAGE_DIAG {_page}")
 except Exception as _e:
