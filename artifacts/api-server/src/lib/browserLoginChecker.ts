@@ -112,11 +112,14 @@ function injectStickySession(proxyUrl: string, sessionId: string): string {
   try {
     const u = new URL(proxyUrl);
     if (u.username) {
-      u.username = `${u.username}-session-${sessionId}`;
-      return u.toString();
+      // A saved ProxyScrape URL already ends in -session-<id>. Appending a
+      // second token breaks the gateway, so replace the trailing one and keep
+      // country/state. A rotating URL with no session just gains one.
+      const base = u.username.replace(/(?:-session-[A-Za-z0-9]+)+$/, "");
+      u.username = `${base}-session-${sessionId}`;
+      return u.toString().replace(/\/$/, "");
     }
-  } catch {}
-  // Fallback: plain  host:port:user:pass  or unrecognised format — return as-is
+  } catch { /* unrecognised format — caller uses the original URL */ }
   return proxyUrl;
 }
 

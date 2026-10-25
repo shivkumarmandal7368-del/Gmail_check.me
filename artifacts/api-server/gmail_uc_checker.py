@@ -2841,15 +2841,20 @@ def main():
     # Retrying with the same IP always fails again (IP is already flagged).
     import re as _re
     def _new_session_proxy(proxy_url: str | None) -> str | None:
-        """Replace -session-XXXX in proxy username with a fresh random ID."""
-        if not proxy_url:
+        """Swap the username's sticky session, keeping country and state.
+
+        A saved URL may already end in -session-<id>, and a retry must not
+        stack a second token onto it.
+        """
+        if not proxy_url or "@" not in proxy_url:
             return proxy_url
         new_id = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=8))
-        replaced = _re.sub(r'-session-[a-z0-9]+', f'-session-{new_id}', proxy_url)
-        if replaced == proxy_url:
-            # No existing session tag — try to inject before the colon separator
-            replaced = _re.sub(r'^(https?://[^:]+)', r'\1-session-' + new_id, proxy_url)
-        return replaced
+        matched = _re.match(r'^(https?://)([^:@]+)(.*)$', proxy_url)
+        if not matched:
+            return proxy_url
+        scheme, user, rest = matched.group(1), matched.group(2), matched.group(3)
+        user = _re.sub(r'(?:-session-[A-Za-z0-9]+)+$', '', user)
+        return f"{scheme}{user}-session-{new_id}{rest}"
 
     _blocked_reason = result.get("reason", "")
 
