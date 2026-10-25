@@ -4953,11 +4953,13 @@ def _do_login(
               for (var i = 0; i < nodes.length; i++) {
                 var el = nodes[i];
                 var aria = ((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '')).toLowerCase();
+                var text = (el.innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
                 var href = (el.getAttribute('href') || '').toLowerCase();
-                if (aria.indexOf('google account') !== -1 || aria.indexOf('account menu') !== -1
-                    || href.indexOf('signoutoptions') !== -1) {
-                  var r = el.getBoundingClientRect();
-                  if (r.width > 8 && r.height > 8) return el;
+                var r = el.getBoundingClientRect();
+                if (r.width < 8 || r.height < 8 || r.top > 140) continue;
+                if (text === 'account' || aria.indexOf('google account') !== -1
+                    || aria.indexOf('account menu') !== -1 || href.indexOf('signoutoptions') !== -1) {
+                  return el;
                 }
               }
               var kids = root.querySelectorAll('*');
