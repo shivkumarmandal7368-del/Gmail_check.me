@@ -3830,8 +3830,8 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         try: shot = screenshot_b64()
         except Exception: pass
         return {
-            "status": "verification_required",
-            "reason": f"Chrome crash during navigation — auto-retrying. ({type(e).__name__}: {str(e)[:150]})",
+            "status": "unknown",
+            "reason": f"Chrome crash while opening accounts.google.com. ({type(e).__name__}: {str(e).splitlines()[0][:150]})",
             "totpCode": totp_code,
             "debugScreenshot": shot,
         }
