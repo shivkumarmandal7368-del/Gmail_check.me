@@ -57,7 +57,8 @@ sudo -u "${APP_USER}" bash -lc "
   cd '${REPO_DIR}'
   pnpm install --frozen-lockfile
   pnpm run typecheck:libs || true
-  pip3 install --user -r artifacts/api-server/requirements.txt
+  python3 -m venv .venv
+  .venv/bin/pip install -q -r artifacts/api-server/requirements.txt
   eval \"\$(bash scripts/setup-chrome-for-testing.sh)\"
   echo \"Chrome: \$(\"\${CHROME_BINARY}\" --version)\"
   pnpm --filter @workspace/api-server run build

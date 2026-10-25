@@ -16,7 +16,15 @@ export NODE_ENV="${NODE_ENV:-production}"
 
 eval "$(bash "${ROOT}/scripts/setup-chrome-for-testing.sh")"
 
-python3 -c 'import undetected_chromedriver, pyotp, selenium, requests' 2>/dev/null \
-  || pip3 install --user -r "${ROOT}/artifacts/api-server/requirements.txt"
+PYTHON="${ROOT}/.venv/bin/python3"
+if [[ ! -x "${PYTHON}" ]]; then
+  python3 -m venv "${ROOT}/.venv"
+  "${ROOT}/.venv/bin/pip" install -q -r "${ROOT}/artifacts/api-server/requirements.txt"
+  PYTHON="${ROOT}/.venv/bin/python3"
+fi
+"${PYTHON}" -c 'import undetected_chromedriver, pyotp, selenium, requests' 2>/dev/null \
+  || "${ROOT}/.venv/bin/pip" install -q -r "${ROOT}/artifacts/api-server/requirements.txt"
+
+export PATH="${ROOT}/.venv/bin:${PATH}"
 
 exec node --enable-source-maps "${ROOT}/artifacts/api-server/dist/index.mjs"
