@@ -1198,12 +1198,6 @@ _RANDOM_TIMEZONES = [
     "Australia/Sydney", "Australia/Melbourne",
 ]
 
-_IN_TIMEZONES = [
-    "Asia/Kolkata", "Asia/Kolkata", "Asia/Kolkata",
-    "Asia/Calcutta", "Asia/Kolkata",
-]
-
-
 def _normalize_timezone(tz: str | None) -> str | None:
     if not tz:
         return tz
@@ -1343,26 +1337,29 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
     # LocalToNet and similar gateways often break long ip-api JSON via proxy;
     # ipify is reliable and the IP lookup is direct so rotation cannot mismatch.
     _ipify_ip = proxy_fetch_exit_ip(proxy_url)
-    if _ipify_ip:
-        _live = geo_lookup_ip(_ipify_ip)
-        if _live:
-            log(f"{tag} [0/3] ipify+ip-api → {_ipify_ip}")
-            return _build_result(
-                ip=_live.get("ip") or _ipify_ip,
-                tz=_live.get("timezone"),
-                cc=_live.get("countryCode", "US"),
-                lat=_live.get("lat"),
-                lon=_live.get("lon"),
-                city=_live.get("city"),
-                region=_live.get("region"),
-                country=_live.get("country"),
-                isp=_live.get("isp"),
-                org=_live.get("org"),
-                asn=_live.get("as"),
-                mobile=_live.get("mobile"),
-                proxy_flag=_live.get("proxy"),
-                hosting=_live.get("hosting"),
-            )
+    _live = geo_lookup_ip(_ipify_ip) if _ipify_ip else None
+    if not _ipify_ip:
+        log(f"{tag} [0/3] ipify: no exit IP (proxy auth or network)")
+    elif not _live:
+        log(f"{tag} [0/3] ipify got {_ipify_ip} but direct ip-api lookup failed")
+    if _live:
+        log(f"{tag} [0/3] ipify+ip-api → {_ipify_ip}")
+        return _build_result(
+            ip=_live.get("ip") or _ipify_ip,
+            tz=_live.get("timezone"),
+            cc=_live.get("countryCode", "US"),
+            lat=_live.get("lat"),
+            lon=_live.get("lon"),
+            city=_live.get("city"),
+            region=_live.get("region"),
+            country=_live.get("country"),
+            isp=_live.get("isp"),
+            org=_live.get("org"),
+            asn=_live.get("as"),
+            mobile=_live.get("mobile"),
+            proxy_flag=_live.get("proxy"),
+            hosting=_live.get("hosting"),
+        )
 
     for _attempt in range(1, _retries + 1):
         # ── Service 1: ip-api.com (HTTP, most comprehensive) ─────────────────
@@ -1771,7 +1768,8 @@ def get_or_create_fingerprint(
     fp["audioNoise"]  = round(random.uniform(0.00001, 0.00009), 7)  # unique audio shift
     # Timezone + language — from proxy exit IP if available, else random
     if proxy:
-        geo = geo_lookup_proxy(proxy)
+        log("[geo] preflight v2 (ipify-first, localtonet India fallback)")
+        geo = geo_lookup_proxy(proxy, _label="new-profile", _retries=2)
     else:
         geo = None
     if geo:
@@ -3798,8 +3796,31 @@ def check_gmail(
         except Exception as _locale_save_err:
             log(f"Locale fingerprint save skipped: {_locale_save_err}")
     else:
-        fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-US")
-        log("Chrome exit IP unread — keeping the preflight locale")
+        _pre_ip = proxy_fetch_exit_ip(proxy) if proxy else None
+        if _pre_ip:
+            lock_fingerprint_to_exit_ip(fp, _pre_ip)
+            apply_keyboard_layout(fp.get("keyboard") or "us", os.environ.get("DISPLAY"))
+            try:
+                driver.execute_cdp_cmd("Emulation.setTimezoneOverride",
+                                       {"timezoneId": fp.get("timezone", "Asia/Kolkata")})
+                driver.execute_cdp_cmd("Emulation.setLocaleOverride",
+                                       {"locale": fp.get("language", "en-IN")})
+                log(f"Chrome exit IP unread — applied ipify locale → {fp.get('timezone')} / {fp.get('language')}")
+            except Exception as _ipify_cdp:
+                log(f"Chrome exit IP unread — ipify locale CDP skipped: {_ipify_cdp}")
+        elif proxy and _proxy_implies_india(proxy):
+            _merge_geo_into_fingerprint(fp, _india_geo_fallback(None))
+            fp["keyboard"] = "in"
+            apply_keyboard_layout("in", os.environ.get("DISPLAY"))
+            try:
+                driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": "Asia/Kolkata"})
+                driver.execute_cdp_cmd("Emulation.setLocaleOverride", {"locale": "en-IN"})
+            except Exception:
+                pass
+            log("Chrome exit IP unread — LocalToNet India fallback applied")
+        else:
+            fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-US")
+            log("Chrome exit IP unread — keeping the preflight locale")
     if fresh_profile:
         log(
             f"FRESH_DEVICE canvas={fp.get('canvasSeed')} profile={profile_dir} "
@@ -5906,6 +5927,7 @@ def _do_login(
                 }
             url, text = page_state()
             log(f"{email} — After nav: {url[:70]}")
+        else:
             try:
                 log(f"{email} — Warmup: google.com")
                 driver.get("https://www.google.com")
