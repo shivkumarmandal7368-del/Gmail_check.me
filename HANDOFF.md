@@ -7,12 +7,17 @@ Pixel 6 direct audit on the VPS scored **19** = VPN 3 + Tampering 8 + Developer 
 
 Diagnostic: `userAgentData` null, `deviceMemory` null, `maxTouchPoints` 0, inner viewport ~2× outer (412×892 vs 980×2121). That gap is the DevTools heuristic; the null/zero mobile fields are the Tampering heuristic.
 
-Fixes:
-- Stop combining `--force-device-scale-factor` with `setDeviceMetricsOverride` (double scale).
-- `--force-device-memory` on Device Check.
-- CDP UA metadata includes `fullVersionList` (fallback without `formFactors`).
-- Touch emulation before device metrics; CDP errors are logged.
-- Stealth JS deletes then redefines `deviceMemory` / `maxTouchPoints`, and mirrors inner/outer onto `window` + `visualViewport`.
+Fixes that landed:
+- Stop combining `--force-device-scale-factor` with `setDeviceMetricsOverride`.
+- `--force-device-memory`, CDP UA `fullVersionList`, touch emulation with `configuration: mobile`.
+- Second stealth script sets `maxTouchPoints=5`, removes `chrome.app` and `navigator.keyboard` (first script runs too early on Chrome 149).
+- Console methods no-op so CDP's console domain does not trip the Developer Tools signal.
+
+VPS Pixel 6 direct audit (no proxy, IP 147.90.10.113):
+- Before: score **19** = VPN 3 + Tampering 8 + Developer Tools 8
+- After: score **11** = VPN 3 + Tampering 8. **Developer Tools = Not Detected.**
+- Page diag: deviceMemory 8, maxTouchPoints 5, userAgentData mobile, 412×868 viewport, chrome.app absent, keyboard absent, webdriver false.
+- VPN 3 is the datacenter IP (no residential proxy). Tampering 8 remains; unmasked WebGL still reads SwiftShader because Chrome ignores the instance `getParameter` replacement.
 
 ---
 
