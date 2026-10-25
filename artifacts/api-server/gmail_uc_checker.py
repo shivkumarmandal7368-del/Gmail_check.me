@@ -3338,6 +3338,8 @@ def main():
         """
         if not proxy_url or "@" not in proxy_url:
             return proxy_url
+        if "localtonet" in proxy_url.lower():
+            return _proxy_without_unsupported_sticky(proxy_url)
         new_id = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=8))
         matched = _re.match(r'^(https?://)([^:@]+)(.*)$', proxy_url)
         if not matched:
@@ -3523,6 +3525,26 @@ def _ensure_chromedriver_patched(version_main: int | None = None) -> None:
             log(f"[patch] chrome major stamp skipped: {_stamp_err}")
 
 
+def _proxy_without_unsupported_sticky(proxy_url: str | None) -> str | None:
+    """LocalToNet returns 407 when the username gains a ProxyScrape -session- id.
+
+    Chrome and geo lookups must use the saved username exactly. Other gateways
+    keep their sticky session token.
+    """
+    if not proxy_url or "localtonet" not in proxy_url.lower():
+        return proxy_url
+    import re as _re_sticky
+    matched = _re_sticky.match(r'^(https?://)([^:@]+)(.*)$', proxy_url)
+    if not matched:
+        return proxy_url
+    scheme, user, rest = matched.group(1), matched.group(2), matched.group(3)
+    cleaned = _re_sticky.sub(r'(?:-session-[A-Za-z0-9]+)+$', '', user)
+    if cleaned == user:
+        return proxy_url
+    log("LocalToNet proxy — removed -session- suffix (that username gets HTTP 407)")
+    return f"{scheme}{cleaned}{rest}"
+
+
 def check_gmail(
     email: str,
     password: str,
@@ -3536,6 +3558,9 @@ def check_gmail(
     robot_check_only: bool = False,
 ) -> dict:
     totp_code = generate_totp(totp_secret) if totp_secret else None
+    proxy = _proxy_without_unsupported_sticky(proxy)
+    proxy_for_ip_check = _proxy_without_unsupported_sticky(proxy_for_ip_check) or proxy
+    geo_proxy = proxy_for_ip_check or proxy
 
     try:
         import undetected_chromedriver as uc
@@ -3597,13 +3622,13 @@ def check_gmail(
     # ── Load or generate unique fingerprint (fresh_profile → always new) ──────
     fp = get_or_create_fingerprint(
         profile_dir,
-        proxy=proxy,
+        proxy=geo_proxy,
         device_index=device_index,
         reuse_device_snapshot=not fresh_profile,
     )
-    if proxy and not fp.get("geoLocked"):
+    if geo_proxy and not fp.get("geoLocked"):
         fp = _sync_fingerprint_geo_from_proxy(
-            fp, proxy, os.path.join(profile_dir, "fingerprint.json")
+            fp, geo_proxy, os.path.join(profile_dir, "fingerprint.json")
         )
     if chrome_version_full:
         # Keep the emulated Android UA/client hints aligned with the actual

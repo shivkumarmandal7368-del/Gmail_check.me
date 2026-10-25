@@ -115,6 +115,11 @@ function getPython3(): string {
 function injectStickySession(proxyUrl: string, sessionId: string): string {
   try {
     const u = new URL(proxyUrl);
+    // LocalToNet rejects unknown username suffixes with HTTP 407.
+    // ProxyScrape-style -session-<id> must not be appended to that gateway.
+    if ((u.hostname || "").toLowerCase().includes("localtonet")) {
+      return proxyUrl;
+    }
     if (u.username) {
       // A saved ProxyScrape URL already ends in -session-<id>. Appending a
       // second token breaks the gateway, so replace the trailing one and keep
