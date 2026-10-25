@@ -352,11 +352,56 @@ def collect_password_fields(driver) -> list:
 
 TOTP_INPUT_SELECTORS = [
     'input[name="totpPin"]', 'input[name="Pin"]', 'input[id="totpPin"]',
+    'input[name="idvPin"]', 'input[name="idvPreregisteredPhonePin"]',
     'input[autocomplete="one-time-code"]', 'input[type="tel"]',
+    'input[type="number"]', 'input[inputmode="numeric"]',
+    'input[maxlength="6"]', 'input[maxlength="8"]',
     'input[aria-label*="code"]', 'input[aria-label*="Code"]',
     'input[placeholder*="code"]', 'input[placeholder*="Code"]',
-    'input[type="number"]',
+    'input[placeholder*="Enter"]',
 ]
+
+
+def find_totp_input(driver) -> object | None:
+    """Find Google Authenticator 'Enter code' field (including shadow DOM)."""
+    from selenium.webdriver.common.by import By
+
+    for sel in TOTP_INPUT_SELECTORS:
+        try:
+            for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                if el.is_displayed() and el.is_enabled():
+                    return el
+        except Exception:
+            pass
+    try:
+        el = driver.execute_script(
+            """
+            function walk(root) {
+              const sels = [
+                'input[autocomplete="one-time-code"]', 'input[type="tel"]',
+                'input[inputmode="numeric"]', 'input[name="totpPin"]',
+                'input[aria-label*="code" i]', 'input[placeholder*="Enter" i]',
+              ];
+              for (const sel of sels) {
+                const el = root.querySelector(sel);
+                if (el && el.offsetParent !== null && !el.disabled) return el;
+              }
+              for (const n of root.querySelectorAll('*')) {
+                if (n.shadowRoot) {
+                  const f = walk(n.shadowRoot);
+                  if (f) return f;
+                }
+              }
+              return null;
+            }
+            return walk(document);
+            """
+        )
+        if el:
+            return el
+    except Exception:
+        pass
+    return None
 
 
 def is_totp_challenge_url(url: str) -> bool:
@@ -4114,7 +4159,16 @@ def _do_login(
         log(f"{email} — {label}: fresh TOTP ({secs_remaining}s left in window)")
 
         for attempt in range(4):
-            field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=12)
+            deadline = time.time() + 14
+            field = None
+            while time.time() < deadline:
+                field = find_totp_input(driver)
+                if field:
+                    break
+                field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2)
+                if field:
+                    break
+                time.sleep(0.25)
             if not field:
                 log(f"{email} — {label}: TOTP field not found")
                 return False
@@ -4128,7 +4182,20 @@ def _do_login(
                 rand_sleep(40, 80)
                 clipboard_type(driver, field, code)
                 rand_sleep(100, 200)
-                field.send_keys(Keys.ENTER)
+                try:
+                    field.send_keys(Keys.ENTER)
+                except Exception:
+                    pass
+                driver.execute_script(
+                    """
+                    var btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+                    var next = btns.find(function(b) {
+                      var t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                      return t === 'next' || t === 'verify' || t === 'continue';
+                    });
+                    if (next && !next.disabled) next.click();
+                    """
+                )
                 totp_code = code
                 log(f"{email} — {label}: TOTP submitted")
                 return True
@@ -4368,6 +4435,60 @@ def _do_login(
     url, text = page_state()
     log(f"{email} — After nav: {url[:70]}")
 
+    # Defined early so TOTP right after LOGIN_START is handled before email step.
+    def finish_after_totp(start_label: str) -> dict | None:
+        nonlocal url, text, totp_code
+        if not totp_secret and not totp_code:
+            shot = screenshot_b64()
+            return {
+                "status": "2fa_required",
+                "reason": "2FA required — add TOTP secret as 3rd field: email:password:totp_secret",
+                "totpCode": None,
+                "debugScreenshot": shot,
+            }
+        if not enter_fresh_totp_once(start_label):
+            shot = screenshot_b64()
+            return {
+                "status": "unknown",
+                "reason": "TOTP page open but code could not be entered — check 2FA secret",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
+        clear_totp_pages(max_rounds=2, pause_label=f"{start_label} extra")
+        rand_sleep(700, 1200)
+        deadline = time.time() + 35
+        while time.time() < deadline:
+            url = driver.current_url
+            if signed_in_host(url) or is_google_password_change_url(url):
+                break
+            if is_totp_challenge_url(url):
+                enter_fresh_totp_once("TOTP while waiting")
+                rand_sleep(700, 1200)
+                continue
+            if "signin/continue" in url:
+                try:
+                    driver.execute_script("""
+                        var btn = document.querySelector('#confirm, button[type="submit"], button');
+                        if (btn) btn.click();
+                    """)
+                except Exception:
+                    pass
+            time.sleep(0.45)
+        url, text = page_state()
+        _pc = complete_password_change_if_needed(url)
+        if _pc:
+            return _pc
+        result = classify(url, text)
+        if result:
+            return result
+        return None
+
+    if is_totp_challenge_url(url):
+        log(f"{email} — TOTP page right after sign-in link")
+        _nav_totp = finish_after_totp("Post-nav TOTP")
+        if _nav_totp:
+            return _nav_totp
+
     if "signin/rejected" in url:
         shot = screenshot_b64()
         return {
@@ -4481,6 +4602,13 @@ def _do_login(
     if result:
         return result
 
+    url, text = page_state()
+    if is_totp_challenge_url(url):
+        log(f"{email} — TOTP page before email step — entering code")
+        early_totp = finish_after_totp("Early TOTP page")
+        if early_totp:
+            return early_totp
+
     EMAIL_SELECTORS = [
         "#identifierId",
         'input[type="email"]',
@@ -4495,6 +4623,11 @@ def _do_login(
 
     if not email_field:
         url, text = page_state()
+        if is_totp_challenge_url(url):
+            log(f"{email} — Email step skipped — on TOTP page")
+            totp_result = finish_after_totp("TOTP instead of email")
+            if totp_result:
+                return totp_result
         result = classify(url, text)
         if result:
             return result
