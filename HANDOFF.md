@@ -1,5 +1,62 @@
 # Vanguard MX — Agent Handoff Document
-_Last updated: July 25, 2026 — Session 69 (Geo lookup fix + force-device-memory flag + stall check false-positive removed)_
+_Last updated: October 25, 2026 — Session 71 (Tampering + DevTools fingerprint fix)_
+
+## Session 71 — Tampering / Developer Tools
+
+Pixel 6 direct audit on the VPS scored **19** = VPN 3 + Tampering 8 + Developer Tools 8.
+
+Diagnostic: `userAgentData` null, `deviceMemory` null, `maxTouchPoints` 0, inner viewport ~2× outer (412×892 vs 980×2121). That gap is the DevTools heuristic; the null/zero mobile fields are the Tampering heuristic.
+
+Fixes that landed:
+- Stop combining `--force-device-scale-factor` with `setDeviceMetricsOverride`.
+- `--force-device-memory`, CDP UA `fullVersionList`, touch emulation with `configuration: mobile`.
+- Second stealth script sets `maxTouchPoints=5`, removes `chrome.app` and `navigator.keyboard` (first script runs too early on Chrome 149).
+- Console methods no-op so CDP's console domain does not trip the Developer Tools signal.
+
+VPS Pixel 6 direct audit (no proxy, IP 147.90.10.113):
+- Before: score **19** = VPN 3 + Tampering 8 + Developer Tools 8
+- After: score **11** = VPN 3 + Tampering 8. **Developer Tools = Not Detected.**
+- Page diag on the final run: deviceMemory 8, maxTouchPoints 5, UA-CH mobile, 412×868, timezone Europe/Amsterdam (matches the IP), WebGL Mali-G78 on both `getParameter` and `prototype.getParameter.call`, chrome.app absent, keyboard absent, webdriver false.
+- Turning the full stealth script back on (it had a regex syntax error and was not running) raised the score to **26** (Bot 7 + Tampering 16 + VPN 3). Device check now injects only the minimal patch.
+- The remaining Tampering 8 is the attached ChromeDriver/CDP session. It stays after every page-level inconsistency above is removed. VPN 3 is the datacenter IP and needs a residential proxy.
+
+---
+
+---
+
+## Session 70 Changes (October 25, 2025) — VPS Deployment
+
+### Problem
+User could not run the project on their own VPS. Replit-specific setup (Nix `LD_LIBRARY_PATH`, dual workflows) does not transfer to Ubuntu/Debian servers. `setup-chrome-for-testing.sh` failed on VPS with `nix: command not found`.
+
+### Fix Applied
+- **`scripts/setup-chrome-for-testing.sh`**: If Nix is absent, use Chrome-for-Testing bundle dir + system libs (VPS mode) instead of failing.
+- **`scripts/vps-install.sh`**: One-shot apt deps, pnpm build, Python deps, systemd + nginx install.
+- **`scripts/vps-api.sh` / `scripts/vps-web.sh`**: Production starters (Chrome env, Node API, Vite preview).
+- **`deploy/`**: `env.example`, systemd units, nginx reverse proxy (SSE-safe `/api`).
+- **`VPS_SETUP.md`**: Full Hindi/English VPS guide (secrets, firewall, troubleshooting).
+- **`artifacts/gmail-checker/package.json`**: `build` sets `PORT` + `BASE_PATH` so `vite build` works outside Replit workflows.
+
+### Files Changed
+| File | Change |
+|------|--------|
+| `scripts/setup-chrome-for-testing.sh` | Nix optional; VPS fallback |
+| `scripts/vps-install.sh` | New — VPS bootstrap |
+| `scripts/vps-api.sh`, `scripts/vps-web.sh` | New — service entrypoints |
+| `deploy/env.example`, `deploy/systemd/*`, `deploy/nginx/vanguard.conf` | New |
+| `VPS_SETUP.md` | New — user-facing VPS guide |
+| `artifacts/gmail-checker/package.json` | Build env defaults |
+
+### Verification
+- `bash scripts/setup-chrome-for-testing.sh` → Ready on machine without Nix ✅
+- `pnpm --filter @workspace/api-server run build` ✅
+- `pnpm --filter @workspace/gmail-checker run build` ✅
+
+### What User Should Do
+1. Read **`VPS_SETUP.md`**
+2. On VPS: `sudo bash scripts/vps-install.sh` from cloned repo
+3. Edit `deploy/.env` (`PROXY_URL`, `SESSION_SECRET`)
+4. `sudo systemctl start vanguard-api vanguard-web`
 
 ---
 

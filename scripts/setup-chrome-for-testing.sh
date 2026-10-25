@@ -38,10 +38,10 @@ ln -sfn "${chrome_dir}/chrome-linux64" "${cache_root}/current"
 chrome_binary="${cache_root}/current/chrome"
 
 # Chrome for Testing is not wrapped by Nix, so explicitly provide the runtime
-# library closure needed by the unwrapped binary on Replit (nixpkgs). When nix
-# is unavailable (e.g. plain Linux CI / cloud agents), keep LD_LIBRARY_PATH as-is
-# — Chrome for Testing often runs with system libraries already on PATH.
-library_path=""
+# library closure needed by the unwrapped binary (Replit). On a plain Linux VPS
+# without Nix, apt packages from scripts/vps-install.sh are enough — keep any
+# existing LD_LIBRARY_PATH.
+chrome_lib_dir="${cache_root}/current"
 if command -v nix >/dev/null 2>&1; then
   library_path="$(
     nix eval --raw --impure --expr '
@@ -78,8 +78,8 @@ if command -v nix >/dev/null 2>&1; then
     '
   )"
 else
-  echo "[chrome-setup] nix not found — using existing LD_LIBRARY_PATH for Chrome libs" >&2
-  library_path="${LD_LIBRARY_PATH:-}"
+  echo "[chrome-setup] Nix not found — using system libraries (VPS mode)" >&2
+  library_path="${chrome_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
 
 chrome_major="${chrome_version%%.*}"

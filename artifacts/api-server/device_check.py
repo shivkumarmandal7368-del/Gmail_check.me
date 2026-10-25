@@ -46,6 +46,11 @@ try:
         parse_proxy,
         DEVICE_FINGERPRINT_SNAPSHOT_PATH,
         _cleanup_stale_chrome_artifacts,
+        geo_lookup_ip,
+        accept_language_for,
+        apply_keyboard_layout,
+        keyboard_layout_for_language,
+        requests_proxy_url,
     )
 except Exception as e:
     print(f"ERROR:Cannot import PHONE_PROFILES: {e}", flush=True)
@@ -118,51 +123,75 @@ except ImportError as e:
 
 # ── Proxy — PROXY_OVERRIDE env takes priority over Proxy secret ───────────────
 PROXY_URL = os.environ.get("PROXY_OVERRIDE", "").strip() or os.environ.get("PROXY_URL", "").strip() or os.environ.get("Proxy", "").strip()
-if not PROXY_URL:
-    print(
-        "ERROR:No proxy configured. Select Custom and enter the residential proxy URL, "
-        "or configure the PROXY_URL secret before running Device Check.",
-        flush=True,
-    )
-    xvfb.terminate()
-    sys.exit(1)
+DIRECT_FP_AUDIT = os.environ.get("FP_AUDIT_DIRECT", "").strip() in ("1", "true", "yes")
+direct_exit = None
+proxy_exit = None
+proxy_info = None
 
-# Validate the exact proxy before launching Chrome. Without this guard Chrome can
-# fall back to the Replit datacenter IP while the audit still appears successful.
-proxy_info = parse_proxy(PROXY_URL)
-if not proxy_info or not proxy_info.get("host"):
-    print("ERROR:Invalid proxy URL. Use http://USERNAME:PASSWORD@HOST:PORT", flush=True)
-    xvfb.terminate()
-    sys.exit(1)
+if not PROXY_URL:
+    if not DIRECT_FP_AUDIT:
+        print(
+            "ERROR:No proxy configured. Select Custom and enter the residential proxy URL, "
+            "or configure the PROXY_URL secret before running Device Check.",
+            flush=True,
+        )
+        xvfb.terminate()
+        sys.exit(1)
+    log("FP_AUDIT_DIRECT=1 — no upstream proxy (datacenter IP; score includes hosting/VPN signals)")
 
 try:
     import requests
-    # Ignore any ambient environment proxy so this is a genuine Replit-origin
-    # baseline. The browser must not report this IP.
     direct_session = requests.Session()
     direct_session.trust_env = False
     direct_exit = direct_session.get(
         "https://api.ipify.org?format=json",
         timeout=15,
     ).json().get("ip")
-    proxy_session = requests.Session()
-    proxy_session.trust_env = False
-    # Force http:// scheme for proxy connection — residential proxies only do HTTP
-    _pu = PROXY_URL
-    if _pu.startswith("https://"):
-        _pu = "http://" + _pu[8:]
-    proxy_exit = proxy_session.get(
-        "http://api.ipify.org?format=json",
-        proxies={"http": _pu, "https": _pu},
-        timeout=15,
-    ).json().get("ip")
-    if not proxy_exit:
-        raise RuntimeError("proxy response did not include an exit IP")
-    log(f"Proxy validated ✓ — proxy exit IP: {proxy_exit} (direct Replit IP: {direct_exit or 'unavailable'})")
 except Exception as e:
-    print(f"ERROR:Proxy validation failed — {str(e)[:300]}", flush=True)
-    xvfb.terminate()
-    sys.exit(1)
+    if not DIRECT_FP_AUDIT:
+        print(f"ERROR:Proxy validation failed — {str(e)[:300]}", flush=True)
+        xvfb.terminate()
+        sys.exit(1)
+    log(f"Direct IP lookup skipped: {e}")
+
+if PROXY_URL:
+    # Validate the exact proxy before launching Chrome. Without this guard Chrome can
+    # fall back to the datacenter IP while the audit still appears successful.
+    proxy_info = parse_proxy(PROXY_URL)
+    if not proxy_info or not proxy_info.get("host"):
+        print("ERROR:Invalid proxy URL. Use http://USERNAME:PASSWORD@HOST:PORT", flush=True)
+        xvfb.terminate()
+        sys.exit(1)
+    try:
+        proxy_session = requests.Session()
+        proxy_session.trust_env = False
+        _pu = requests_proxy_url(PROXY_URL)
+        proxy_exit = proxy_session.get(
+            "http://api.ipify.org?format=json",
+            proxies={"http": _pu, "https": _pu},
+            timeout=15,
+        ).json().get("ip")
+        if not proxy_exit:
+            raise RuntimeError("proxy response did not include an exit IP")
+        log(f"Proxy validated ✓ — proxy exit IP: {proxy_exit} (direct IP: {direct_exit or 'unavailable'})")
+    except Exception as e:
+        print(f"ERROR:Proxy validation failed — {str(e)[:300]}", flush=True)
+        xvfb.terminate()
+        sys.exit(1)
+else:
+    proxy_exit = direct_exit or "direct"
+
+FRESH_PROFILE = os.environ.get("FRESH_PROFILE", "").strip().lower() in ("1", "true", "yes")
+_boot_geo = geo_lookup_ip(proxy_exit) if proxy_exit else None
+_boot_lang = (_boot_geo or {}).get("language") or "en-US"
+if FRESH_PROFILE:
+    import tempfile
+    _profile_dir = tempfile.mkdtemp(prefix=f"dc_fresh_{device_index}_")
+    log(f"FRESH_DEVICE new Chrome profile {_profile_dir}")
+else:
+    _profile_dir = f"/tmp/vanguard-mx-device-profile-{device_index}"
+    os.makedirs(_profile_dir, exist_ok=True)
+    log(f"REUSED_DEVICE Chrome profile {_profile_dir}")
 
 ext_path = None
 
@@ -296,15 +325,18 @@ class _ThreadedProxyServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-upstream_user = proxy_info.get("username") or ""
-upstream_password = proxy_info.get("password") or ""
-upstream_host = proxy_info["host"]
-upstream_port = proxy_info["port"]
-proxy_server = _ThreadedProxyServer(("127.0.0.1", 0), _AuthenticatedProxyHandler)
-proxy_server.upstream = proxy_info  # type: ignore[attr-defined]
-threading.Thread(target=proxy_server.serve_forever, daemon=True).start()
-local_proxy_port = proxy_server.server_address[1]
-log(f"Local authenticated proxy ready on 127.0.0.1:{local_proxy_port}")
+proxy_server = None
+local_proxy_port = None
+if proxy_info:
+    upstream_user = proxy_info.get("username") or ""
+    upstream_password = proxy_info.get("password") or ""
+    upstream_host = proxy_info["host"]
+    upstream_port = proxy_info["port"]
+    proxy_server = _ThreadedProxyServer(("127.0.0.1", 0), _AuthenticatedProxyHandler)
+    proxy_server.upstream = proxy_info  # type: ignore[attr-defined]
+    threading.Thread(target=proxy_server.serve_forever, daemon=True).start()
+    local_proxy_port = proxy_server.server_address[1]
+    log(f"Local authenticated proxy ready on 127.0.0.1:{local_proxy_port}")
 
 # ── Chrome options ─────────────────────────────────────────────────────────────
 o = uc.ChromeOptions()
@@ -313,8 +345,11 @@ o.add_argument("--disable-dev-shm-usage")
 o.add_argument(f"--window-size={profile['screenW']},{profile['screenH']}")
 o.add_argument(f"--user-agent={UA}")
 o.add_argument("--touch-events=enabled")
-o.add_argument(f"--force-device-scale-factor={profile['dpr']}")
-o.add_argument("--lang=en-US,en;q=0.9")
+# Do NOT also pass --force-device-scale-factor. Combined with
+# Emulation.setDeviceMetricsOverride it double-scales the layout viewport
+# (inner ~2x outer) which fingerprint.com scores as Developer Tools + Tampering.
+o.add_argument(f"--lang={_boot_lang}")
+o.add_argument(f"--force-device-memory={profile['deviceMemory']}")
 o.add_argument("--use-angle=swiftshader")
 o.add_argument("--enable-webgl")
 o.add_argument("--ignore-gpu-blocklist")
@@ -332,7 +367,8 @@ o.add_argument("--no-default-browser-check")
 o.add_argument("--no-first-run")
 o.add_argument("--disable-sync")
 o.add_argument("--password-store=basic")
-o.add_argument(f"--proxy-server=http://127.0.0.1:{local_proxy_port}")
+if local_proxy_port:
+    o.add_argument(f"--proxy-server=http://127.0.0.1:{local_proxy_port}")
 
 log("Launching Chrome...")
 chromium_path = get_chromium_path()
@@ -342,6 +378,7 @@ log(f"Chrome binary: {chromium_path} (version_main={chrome_version_main})")
 try:
     driver = uc.Chrome(
         options=o,
+        user_data_dir=_profile_dir,
         browser_executable_path=chromium_path,
         version_main=chrome_version_main,
         use_subprocess=True,
@@ -354,48 +391,91 @@ except Exception as e:
 
 time.sleep(5)
 log("Chrome launched ✓")
+browser_ip = None
 
-# Confirm the browser itself is using the proxy. Rotating providers may return a
-# different residential IP for a second connection, so compare against the
-# direct Replit baseline rather than requiring preflight and Chrome to match.
-try:
-    driver.get("https://api.ipify.org?format=json")
-    browser_ip = json.loads(driver.find_element(By.TAG_NAME, "body").text).get("ip")
-    if not browser_ip:
-        raise RuntimeError("browser response did not include an exit IP")
-    log(f"Chrome proxy verified ✓ — browser exit IP: {browser_ip}")
-    if direct_exit and browser_ip == direct_exit:
-        raise RuntimeError(
-            f"browser exit IP {browser_ip} is the direct Replit IP, not the proxy"
-        )
-except Exception as e:
-    print(f"ERROR:Chrome proxy verification failed — {str(e)[:300]}", flush=True)
+if proxy_info:
+    # Confirm the browser itself is using the proxy.
     try:
-        driver.quit()
-    except Exception:
-        pass
-    if ext_path:
+        driver.get("https://api.ipify.org?format=json")
+        browser_ip = json.loads(driver.find_element(By.TAG_NAME, "body").text).get("ip")
+        if not browser_ip:
+            raise RuntimeError("browser response did not include an exit IP")
+        log(f"Chrome proxy verified ✓ — browser exit IP: {browser_ip}")
+        if direct_exit and browser_ip == direct_exit:
+            raise RuntimeError(
+                f"browser exit IP {browser_ip} is the direct IP, not the proxy"
+            )
+    except Exception as e:
+        print(f"ERROR:Chrome proxy verification failed — {str(e)[:300]}", flush=True)
         try:
-            os.unlink(ext_path)
-        except OSError:
+            driver.quit()
+        except Exception:
             pass
-    proxy_server.shutdown()
-    proxy_server.server_close()
-    xvfb.terminate()
-    sys.exit(1)
+        if ext_path:
+            try:
+                os.unlink(ext_path)
+            except OSError:
+                pass
+        if proxy_server:
+            proxy_server.shutdown()
+            proxy_server.server_close()
+        xvfb.terminate()
+        sys.exit(1)
+else:
+    log(f"Chrome direct egress (FP_AUDIT_DIRECT) — expected IP ~ {direct_exit or 'unknown'}")
 
 # ── Apply the selected real-phone profile before the first navigation ─────────
 # Device Check must use the same browser fingerprint engine as Browser Check;
 # changing only the UA leaves WebGL, navigator, canvas, and hardware signals
 # identifying the Replit Chromium host.
+# Locale is taken from the IP Chrome just used. The preflight IP can be a
+# different exit on a rotating proxy, so it is only a fallback.
+_exit_ip = browser_ip or (proxy_exit if proxy_info else direct_exit)
+_live = geo_lookup_ip(_exit_ip) if _exit_ip else None
+if _live:
+    _tz = _live["timezone"]
+    _lang = _live["language"]
+    _cc = _live["countryCode"]
+    _lat = _live["lat"]
+    _lon = _live["lon"]
+    _kb = _live["keyboard"]
+else:
+    _tz, _lang, _cc = "America/New_York", _boot_lang, "US"
+    _lat, _lon = 39.8283, -98.5795
+    _kb = keyboard_layout_for_language(_lang)
+log(f"LOCALE_LOCK ip={_exit_ip} tz={_tz} lang={_lang} keyboard={_kb} cc={_cc}")
+apply_keyboard_layout(_kb, os.environ.get("DISPLAY"))
+
+_saved_seed = None
+_saved_audio = None
+_saved_webgl = None
+if not FRESH_PROFILE:
+    try:
+        with open(DEVICE_FINGERPRINT_SNAPSHOT_PATH) as _sf:
+            _prev = json.load(_sf)
+        if _prev.get("deviceIndex") == device_index and _prev.get("canvasSeed"):
+            _saved_seed = int(_prev["canvasSeed"])
+            _saved_audio = _prev.get("audioNoise")
+            _saved_webgl = _prev.get("webglNoise")
+    except Exception:
+        _saved_seed = None
+_canvas_seed = random.randint(1, 254) if FRESH_PROFILE or not _saved_seed else _saved_seed
+_audio_noise = round(random.uniform(0.00001, 0.00009), 8) if FRESH_PROFILE or _saved_audio is None else _saved_audio
+_webgl_noise = round(random.uniform(0.000001, 0.000009), 8) if FRESH_PROFILE or _saved_webgl is None else _saved_webgl
+if FRESH_PROFILE:
+    log(f"FRESH_DEVICE new canvas seed {_canvas_seed}")
+else:
+    log(f"REUSED_DEVICE canvas seed {_canvas_seed}")
+
 device_fp = dict(profile)
 device_fp.update({
-    "canvasSeed": random.randint(1, 65535),
-    "audioNoise": round(random.uniform(0.00001, 0.00009), 8),
-    "webglNoise": round(random.uniform(0.000001, 0.000009), 8),
-    "timezone": "America/New_York",
-    "language": "en-US",
-    "countryCode": "US",
+    "canvasSeed": _canvas_seed,
+    "audioNoise": _audio_noise,
+    "webglNoise": _webgl_noise,
+    "timezone": _tz,
+    "language": _lang,
+    "keyboard": _kb,
+    "countryCode": _cc,
     "batteryLevel": round(random.uniform(0.25, 0.92), 2),
     "batteryCharging": False,
     "dischargingTime": random.randint(2400, 28800),
@@ -403,10 +483,10 @@ device_fp.update({
     "connectionDownlink": round(random.uniform(25.0, 120.0), 1),
     "historyLength": random.randint(3, 14),
     "doNotTrack": None,
-    "lat": 39.8283,
-    "lon": -98.5795,
+    "lat": _lat,
+    "lon": _lon,
     "geoLocked": True,
-    "ip": proxy_exit,
+    "ip": _exit_ip,
 })
 # Keep an exact local handoff for Browser Check. This file contains only the
 # selected device fingerprint; it never contains account credentials or proxy
@@ -424,14 +504,70 @@ log(
     f"{profile['screenW']}x{profile['screenH']} dpr={profile['dpr']}"
 )
 try:
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": make_stealth_js(device_fp),
-    })
-    # Second-pass inject: plugins/mimeTypes override runs after main stealth JS
-    # so that Chrome's C++ has already made Navigator.prototype.plugins configurable.
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": make_plugins_override_js(),
-    })
+    # Minimal patch only. The full stealth script's toString/plugins/canvas lies
+    # are themselves the Tampering signal. Keep the three things that are real
+    # inconsistencies: WebGL renderer, chrome.app, and the console-hook that
+    # fingerprint scores as Developer Tools.
+    _wv = profile["webglVendor"].replace("'", "\\'")
+    _wr = profile["webglRenderer"].replace("'", "\\'")
+    _minimal = f"""
+(function(){{
+  ['log','debug','info','warn','error','table','dir','dirxml','trace'].forEach(function(k){{
+    try{{console[k]=function(){{}};}}catch(e){{}}
+  }});
+  try{{delete window.chrome.app;}}catch(e){{}}
+  try{{delete Navigator.prototype.keyboard; delete navigator.keyboard;}}catch(e){{}}
+  function _patch(Ctor){{
+    if(!Ctor)return;
+    if(!Ctor.prototype.__fpNative) Ctor.prototype.__fpNative=Ctor.prototype.getParameter;
+    var native=Ctor.prototype.__fpNative;
+    Ctor.prototype.getParameter=function(p){{
+      if(p===37445||p===7936)return '{_wv}';
+      if(p===37446||p===7937)return '{_wr}';
+      return native.call(this,p);
+    }};
+  }}
+  _patch(window.WebGLRenderingContext);
+  _patch(window.WebGL2RenderingContext);
+  var orig=HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext=function(type){{
+    var ctx=orig.apply(this,arguments);
+    _patch(window.WebGLRenderingContext);
+    _patch(window.WebGL2RenderingContext);
+    return ctx;
+  }};
+}})();
+"""
+    if FRESH_PROFILE:
+        # A wiped cookie jar is not a new device: fingerprint.com links the same
+        # canvas. This is the same per-account canvas shift Browser Check uses.
+        _minimal += f"""
+(function(){{
+  var seed={int(_canvas_seed) & 255};
+  function _xc(d){{
+    if(!d||!d.data||d.data.length<4)return;
+    var n=Math.min(d.data.length, 512);
+    for(var i=0;i<n;i+=4){{d.data[i]=d.data[i]^seed;d.data[i+1]=d.data[i+1]^((seed*3)&255);}}
+  }}
+  function _wrap(proto){{
+    if(!proto||!proto.toDataURL)return;
+    var o=proto.toDataURL;
+    proto.toDataURL=function(){{var c=this.getContext&&this.getContext('2d');if(c){{var d=c.getImageData(0,0,this.width||1,this.height||1);_xc(d);c.putImageData(d,0,0);}}return o.apply(this,arguments);}};
+  }}
+  _wrap(HTMLCanvasElement.prototype);
+  if(window.OffscreenCanvas)_wrap(OffscreenCanvas.prototype);
+  var og=CanvasRenderingContext2D.prototype.getImageData;
+  CanvasRenderingContext2D.prototype.getImageData=function(){{var d=og.apply(this,arguments);_xc(d);return d;}};
+}})();
+(function(){{
+  var noise={float(_audio_noise)};
+  var orig=window.AudioBuffer&&AudioBuffer.prototype.getChannelData;
+  if(!orig)return;
+  AudioBuffer.prototype.getChannelData=function(){{var d=orig.apply(this,arguments);if(d&&d.length){{try{{d[0]=d[0]+noise;}}catch(e){{}}}}return d;}};
+}})();
+"""
+    if os.environ.get("FP_NO_JS") != "1":
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": _minimal})
     log("Device fingerprint patches injected ✓")
 except Exception as e:
     print(f"ERROR:Device fingerprint injection failed: {str(e)[:300]}", flush=True)
@@ -448,38 +584,37 @@ cv_major = chrome.split(".")[0]
     # including Sec-CH-UA via userAgentMetadata, making Network.setUserAgentOverride
     # redundant. Avoid enabling any CDP domain that is not strictly necessary.
 try:
-    driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": "America/New_York"})
-    driver.execute_cdp_cmd("Emulation.setLocaleOverride",   {"locale": "en-US"})
+    driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": _tz})
+    driver.execute_cdp_cmd("Emulation.setLocaleOverride",   {"locale": _lang})
     # Override hardware concurrency at the CDP level so it matches JS patches
     try:
         driver.execute_cdp_cmd("Emulation.setHardwareConcurrencyOverride",
                                {"hardwareConcurrency": profile["hwConcurrency"]})
-    except Exception:
-        pass  # available in Chrome 102+; non-fatal if missing
-    # Set device metrics so CSS media queries see the mobile screen size,
-    # not the Xvfb desktop resolution (prevents CSS-based VM signal)
+    except Exception as e:
+        log(f"CDP hwConcurrency warning: {e}")
+    # Touch BEFORE device metrics so the emulated viewport is a touch phone.
+    try:
+        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
+            "enabled":        True,
+            "maxTouchPoints": profile["maxTouchPoints"],
+            "configuration":  "mobile",
+        })
+        log(f"CDP touch emulation set → maxTouchPoints={profile['maxTouchPoints']}")
+    except Exception as e:
+        log(f"CDP touch emulation warning: {e}")
     try:
         driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
             "width":             profile["screenW"],
-            "height":            profile["screenH"],
+            "height":            profile["availH"],
             "deviceScaleFactor": profile["dpr"],
             "mobile":            True,
             "hasTouch":          True,
             "screenWidth":       profile["screenW"],
             "screenHeight":      profile["screenH"],
         })
-    except Exception:
-        pass
-    # Touch emulation: sets navigator.maxTouchPoints at the native C++ level.
-    # Without this, maxTouchPoints stays 0 even with --touch-events=enabled and
-    # the JS prototype patch — fingerprint.com reads the C++-level value.
-    try:
-        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
-            "enabled":        True,
-            "maxTouchPoints": profile["maxTouchPoints"],
-        })
-    except Exception:
-        pass
+        log(f"CDP deviceMetrics set → {profile['screenW']}x{profile['availH']}")
+    except Exception as e:
+        log(f"CDP deviceMetrics warning: {e}")
     # Emulation.setUserAgentOverride sets navigator.userAgent + navigator.platform
     # at the CDP emulation level (deeper than Network.setUserAgentOverride).
     # fingerprint.com compares CDP-level platform against JS-reported platform —
@@ -487,28 +622,43 @@ try:
     # CRITICAL: Must include userAgentMetadata — omitting it causes Chrome 151 to
     # clear navigator.userAgentData.brands to [], mobile→false, platform→'' (Tampering signal).
     try:
-        driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
-            "userAgent": UA,
-            "acceptLanguage": "en-US,en;q=0.9",
-            "platform": profile["platform"],
-            "userAgentMetadata": {
-                "brands": [
-                    {"brand": "Not(A;Brand",   "version": "8"},
-                    {"brand": "Chromium",      "version": cv_major},
-                    {"brand": "Google Chrome", "version": cv_major},
-                ],
-                "fullVersion": chrome,
-                "platform": "Android",
-                "platformVersion": android,
-                "architecture": "",
-                "model": model,
-                "mobile": True,
-                "bitness": "",
-                "wow64": False,
-            },
-        })
-    except Exception:
-        pass
+        _ua_meta = {
+            "brands": [
+                {"brand": "Not(A;Brand",   "version": "8"},
+                {"brand": "Chromium",      "version": cv_major},
+                {"brand": "Google Chrome", "version": cv_major},
+            ],
+            "fullVersionList": [
+                {"brand": "Not(A;Brand",   "version": "8.0.0.0"},
+                {"brand": "Chromium",      "version": chrome},
+                {"brand": "Google Chrome", "version": chrome},
+            ],
+            "fullVersion": chrome,
+            "platform": "Android",
+            "platformVersion": f"{android}.0.0",
+            "architecture": "",
+            "model": model,
+            "mobile": True,
+            "bitness": "",
+            "wow64": False,
+        }
+        try:
+            driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
+                "userAgent": UA,
+                "acceptLanguage": accept_language_for(_lang),
+                "platform": profile["platform"],
+                "userAgentMetadata": {**_ua_meta, "formFactors": ["Mobile"]},
+            })
+        except Exception:
+            driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
+                "userAgent": UA,
+                "acceptLanguage": accept_language_for(_lang),
+                "platform": profile["platform"],
+                "userAgentMetadata": _ua_meta,
+            })
+        log("CDP Emulation UA override set (with fullVersionList)")
+    except Exception as e:
+        log(f"CDP Emulation UA override warning: {e}")
     log("CDP overrides applied (UA, timezone, locale, hwConcurrency, deviceMetrics, emuUA)")
 except Exception as e:
     log(f"CDP override warning (non-fatal): {e}")
@@ -606,6 +756,44 @@ except Exception as e:
 log("Waiting 16s for fingerprint widget to fully render...")
 time.sleep(16)
 
+try:
+    _page = driver.execute_script(
+        "return JSON.stringify({"
+        "mem:navigator.deviceMemory,touch:navigator.maxTouchPoints,"
+        "uad:navigator.userAgentData&&navigator.userAgentData.mobile,"
+        "iw:innerWidth,ih:innerHeight,ow:outerWidth,oh:outerHeight,dpr:devicePixelRatio,"
+        "app:!!(window.chrome&&window.chrome.app),kb:('keyboard' in navigator),"
+        "wd:navigator.webdriver,tz:Intl.DateTimeFormat().resolvedOptions().timeZone,"
+        "lang:navigator.language,langs:(navigator.languages||[]).join(','),"
+        "gl:(function(){try{var g=document.createElement('canvas').getContext('webgl');"
+        "var e=g.getExtension('WEBGL_debug_renderer_info');"
+        "return g.getParameter(e.UNMASKED_RENDERER_WEBGL);}catch(err){return String(err);}})(),"
+        "gl2:(function(){try{var g=document.createElement('canvas').getContext('webgl');"
+        "return WebGLRenderingContext.prototype.getParameter.call(g,37446);}catch(err){return String(err);}})()});"
+    )
+    log(f"PAGE_DIAG {_page}")
+except Exception as _e:
+    log(f"PAGE_DIAG failed: {_e}")
+
+try:
+    driver.execute_script(
+        "var b=[...document.querySelectorAll('button')].find(x=>/accept/i.test(x.textContent||''));"
+        "if(b)b.click();"
+    )
+except Exception:
+    pass
+
+try:
+    _score = driver.execute_script(
+        "var t=document.body&&document.body.innerText||'';"
+        "var m=t.match(/Suspect Score[^\\d]*(\\d+)/i)||t.match(/(\\d+)\\s*\\/\\s*100/);"
+        "return m?m[1]:null;"
+    )
+    if _score:
+        log(f"FINGERPRINT_SUSPECT_SCORE={_score}")
+except Exception:
+    pass
+
 # Screenshot 1 — homepage with score visible
 driver.get_screenshot_as_file("/tmp/dc_1_homepage.png")
 emit_screenshot("/tmp/dc_1_homepage.png", "homepage")
@@ -698,8 +886,9 @@ driver.get_screenshot_as_file("/tmp/dc_3_scrolled.png")
 emit_screenshot("/tmp/dc_3_scrolled.png", "scrolled")
 
 driver.quit()
-proxy_server.shutdown()
-proxy_server.server_close()
+if proxy_server:
+    proxy_server.shutdown()
+    proxy_server.server_close()
 xvfb.terminate()
 log("Chrome and Xvfb closed cleanly")
 print("DONE", flush=True)

@@ -38,24 +38,31 @@ router.post("/jobs", (req: Request, res: Response) => {
   }
 
   const { credentials } = parsed.data;
-  // Match Device Check: use the configured residential proxy when the user
-  // does not provide an inline proxy for this browser job.
-  const proxy = parsed.data.proxy ?? process.env.PROXY_URL;
   if (credentials.length === 0) {
     res.status(400).json({ error: "No credentials provided" });
     return;
   }
 
-  const concurrency =
-    typeof req.body.concurrency === "number"
-      ? Math.max(1, Math.min(10, Math.floor(req.body.concurrency)))
-      : 3;
+  // One Chrome at a time. The next account starts only after this one finishes.
+  const concurrency = 1;
 
   const proxies: string[] = Array.isArray(req.body.proxies)
     ? (req.body.proxies as unknown[])
         .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
         .map(p => p.trim())
     : [];
+
+  // Saved mode omits proxy so the server secret is used. An empty string
+  // must not override that secret. Custom mode sends the pasted URL(s).
+  const inlineProxy = (parsed.data.proxy ?? "").trim();
+  const savedProxy = (process.env.PROXY_URL ?? "").trim();
+  const proxy = inlineProxy || (proxies.length > 0 ? undefined : savedProxy);
+  if (!proxy && proxies.length === 0) {
+    res.status(400).json({
+      error: "No proxy configured. Set PROXY_URL on the server or paste a custom proxy.",
+    });
+    return;
+  }
 
   const freshProfile = req.body.freshProfile === true;
   const deviceIndex =
@@ -263,10 +270,11 @@ function sanitizeJob(job: Job): object {
 function maskProxy(url: string): string {
   try {
     const u = new URL(url);
-    if (u.password) u.password = "****";
-    return u.toString();
+    const host = u.hostname;
+    if (!host) return "saved-proxy";
+    return u.port ? `${host}:${u.port}` : host;
   } catch {
-    return url;
+    return "saved-proxy";
   }
 }
 

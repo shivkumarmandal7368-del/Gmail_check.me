@@ -13,6 +13,7 @@ type ExtBrowserResult = Omit<BrowserLoginResult, "status"> & {
   totpSecret?: string;
 };
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
@@ -20,7 +21,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import {
-  Download, Terminal, XCircle, AlertTriangle,
+  Download, Terminal, CheckCircle2, XCircle, AlertTriangle,
   HelpCircle, Activity, ShieldAlert, Smartphone,
   Lock, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle, Zap
 } from "lucide-react"
@@ -55,7 +56,7 @@ export default function Home() {
 function BrowserChecker() {
   // ── localStorage keys ────────────────────────────────────────────────────
   const LS = {
-    input: "vbc_input", proxy: "vbc_proxy", concurrency: "vbc_conc",
+    input: "vbc_input", proxy: "vbc_proxy", proxyMode: "vbc_proxy_mode", concurrency: "vbc_conc",
     fresh: "vbc_fresh", device: "vbc_device", results: "vbc_results", total: "vbc_total",
     active: "vbc_active", savedAt: "vbc_saved_at", jobId: "vbc_job_id",
     creds: "vbc_creds",
@@ -66,9 +67,11 @@ function BrowserChecker() {
 
   const [inputText,    setInputText]    = useState<string>(() => lsGet(LS.input, ""));
   const [proxyText,    setProxyText]    = useState<string>(() => lsGet(LS.proxy, ""));
-  const [concurrency,  setConcurrency]  = useState<number>(() => lsGet(LS.concurrency, 3));
+  const [proxyMode,    setProxyMode]    = useState<"saved" | "custom">(() => lsGet<string>(LS.proxyMode, "saved") === "custom" ? "custom" : "saved");
+  const [savedProxy,   setSavedProxy]   = useState<{ configured: boolean; label: string } | null>(null);
   const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, false));
   const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
+
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
   const [selectedUnknown, setSelectedUnknown] = useState<Set<string>>(new Set());
   const [total,        setTotal]        = useState<number>(() => lsGet(LS.total, 0));
@@ -96,8 +99,6 @@ function BrowserChecker() {
   const [proxyCheckState, setProxyCheckState] = useState<"idle"|"checking"|"ok"|"fail">("idle");
   const [proxyExitIp,     setProxyExitIp]     = useState<string>("");
   const [proxyCheckError, setProxyCheckError] = useState<string>("");
-  const [serverProxyConfigured, setServerProxyConfigured] = useState(false);
-  const [serverProxyMasked, setServerProxyMasked] = useState<string | null>(null);
   const [jobStartError, setJobStartError] = useState<string>("");
   const [browserLogs, setBrowserLogs] = useState<Array<{ email?: string; message: string }>>([]);
 
@@ -118,7 +119,21 @@ function BrowserChecker() {
   // ── Auto-save ─────────────────────────────────────────────────────────────
   useEffect(() => { try { localStorage.setItem(LS.input,       JSON.stringify(inputText));    } catch {} }, [inputText]);
   useEffect(() => { try { localStorage.setItem(LS.proxy,       JSON.stringify(proxyText));    } catch {} }, [proxyText]);
-  useEffect(() => { try { localStorage.setItem(LS.concurrency, JSON.stringify(concurrency));  } catch {} }, [concurrency]);
+  useEffect(() => { try { localStorage.setItem(LS.proxyMode,   JSON.stringify(proxyMode));    } catch {} }, [proxyMode]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/proxy/status")
+      .then(r => r.json())
+      .then((data: { configured?: boolean; label?: string }) => {
+        if (cancelled) return;
+        setSavedProxy({
+          configured: data.configured === true,
+          label: typeof data.label === "string" && data.label ? data.label : "Saved proxy",
+        });
+      })
+      .catch(() => { if (!cancelled) setSavedProxy({ configured: false, label: "Could not read saved proxy" }); });
+    return () => { cancelled = true; };
+  }, []);
   useEffect(() => { try { localStorage.setItem(LS.fresh,       JSON.stringify(freshProfile)); } catch {} }, [freshProfile]);
   useEffect(() => { try { localStorage.setItem(LS.device,      JSON.stringify(deviceIndex));  } catch {} }, [deviceIndex]);
   useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
@@ -140,15 +155,6 @@ function BrowserChecker() {
   useEffect(() => {
     const saved = localStorage.getItem(LS.jobId);
     if (saved) restoreJobFromServer(saved);
-    fetch("/api/proxy/status")
-      .then(r => r.ok ? r.json() : null)
-      .then(d => {
-        if (d?.configured) {
-          setServerProxyConfigured(true);
-          setServerProxyMasked(typeof d.proxy === "string" ? d.proxy : null);
-        }
-      })
-      .catch(() => {});
     return () => {
       sseAbortRef.current?.abort();
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
@@ -435,56 +441,79 @@ function BrowserChecker() {
   };
 
   const buildBody = (creds: Array<{ email: string; password: string; totp?: string }>) => {
-    const proxies = parseProxies(proxyText);
+    const proxies = proxyMode === "custom" ? parseProxies(proxyText) : [];
     return JSON.stringify({
       credentials: creds,
       ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
-      concurrency, freshProfile, deviceIndex,
+      concurrency: 1, freshProfile, deviceIndex,
     });
+  };
+
+  const ensureProxy = async (): Promise<boolean> => {
+    setProxyCheckState("checking");
+    setProxyExitIp("");
+    setProxyCheckError("");
+    try {
+      if (proxyMode === "saved") {
+        const res = await fetch("/api/proxy/check", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ useSaved: true }),
+        });
+        const d = await res.json() as { ok?: boolean; ip?: string; error?: string };
+        if (!d.ok) {
+          setProxyCheckState("fail");
+          setProxyCheckError(d.error ?? "Saved proxy failed");
+          return false;
+        }
+        setProxyCheckState("ok");
+        setProxyExitIp(d.ip ?? "");
+        return true;
+      }
+      const proxies = parseProxies(proxyText);
+      if (proxies.length === 0) {
+        setProxyCheckState("fail");
+        setProxyCheckError("Custom proxy is empty. Paste http://user:pass@host:port, one per line.");
+        return false;
+      }
+      const proxyResults = await Promise.all(
+        proxies.map((p, i) =>
+          fetch("/api/proxy/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proxy: p }) })
+            .then(r => r.json() as Promise<{ ok: boolean; ip?: string; error?: string }>)
+            .then(d => d.ok
+              ? { idx: i + 1, ok: true as const, ip: d.ip }
+              : { idx: i + 1, ok: false as const, error: d.error })
+            .catch(() => ({ idx: i + 1, ok: false as const, error: "Endpoint unreachable" }))
+        )
+      );
+      const failed = proxyResults.filter((r): r is { idx: number; ok: false; error?: string } => !r.ok);
+      if (failed.length > 0) {
+        setProxyCheckState("fail");
+        setProxyCheckError(failed.map(f => `Proxy ${f.idx}: ${f.error ?? "failed"}`).join(" | "));
+        return false;
+      }
+      setProxyCheckState("ok");
+      const firstSuccessful = proxyResults.find(
+        (result): result is { idx: number; ok: true; ip?: string } => result.ok
+      );
+      setProxyExitIp(firstSuccessful?.ip ?? "");
+      return true;
+    } catch {
+      setProxyCheckState("fail");
+      setProxyCheckError("Proxy check endpoint unreachable");
+      return false;
+    }
+  };
+
+  const readJobError = async (res: Response) => {
+    const body = await res.json().catch(() => ({} as { error?: string }));
+    return body.error || `HTTP ${res.status}`;
   };
 
   const handleCheck = async () => {
     const credentials = parseCredentials(inputText);
     if (credentials.length === 0) return;
-
-    // ── Proxy pre-flight check ──────────────────────────────────────────────
-    // Run BEFORE starting the job so fake sessions are never created when
-    // the proxy is dead.  Blocks the check and shows the real error to the user.
-    const proxies = parseProxies(proxyText);
-    if (proxies.length > 0) {
-      setProxyCheckState("checking");
-      setProxyExitIp("");
-      setProxyCheckError("");
-      try {
-        // Check ALL proxies in parallel — not just the first one
-        const proxyResults = await Promise.all(
-          proxies.map((p, i) =>
-            fetch("/api/proxy/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proxy: p }) })
-              .then(r => r.json() as Promise<{ ok: boolean; ip?: string; error?: string }>)
-              .then(d => d.ok
-                ? { idx: i + 1, ok: true as const, ip: d.ip }
-                : { idx: i + 1, ok: false as const, error: d.error })
-              .catch(() => ({ idx: i + 1, ok: false as const, error: "Endpoint unreachable" }))
-          )
-        );
-        const failed = proxyResults.filter(r => !r.ok);
-        if (failed.length > 0) {
-          setProxyCheckState("fail");
-          setProxyCheckError(failed.map(f => `Proxy ${f.idx}: ${f.error ?? "failed"}`).join(" | "));
-          return; // ← BLOCK: do not start the job
-        }
-        setProxyCheckState("ok");
-        const firstSuccessful = proxyResults.find(
-          (result): result is { idx: number; ok: true; ip?: string } => result.ok
-        );
-        setProxyExitIp(firstSuccessful?.ip ?? "");
-      } catch {
-        setProxyCheckState("fail");
-        setProxyCheckError("Proxy check endpoint unreachable");
-        return; // ← BLOCK
-      }
-    }
-    // ── End proxy pre-flight ────────────────────────────────────────────────
+    if (!(await ensureProxy())) return;
 
     // Build and persist credential map so exports survive page refresh
     const newCredsMap: Record<string, { password: string; totpSecret?: string }> = {};
@@ -499,18 +528,18 @@ function BrowserChecker() {
     setJobStartError("");
     try {
       const res = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: buildBody(credentials) });
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => "");
-        throw new Error(errBody ? errBody.slice(0, 200) : `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(await readJobError(res));
       const { jobId: id } = await res.json();
       setJobId(id); activeJobIdRef.current = id; setIsRunning(true);
       connectToJobStream(id, 0);
     } catch (e) {
       console.error("[BrowserChecker] handleCheck:", e);
-      setJobStartError(e instanceof Error ? e.message : "Job start failed — API server reachable hai?");
+      const message = e instanceof Error ? e.message : "Browser check could not start";
+      setJobStartError(message);
       setJobStatus("idle");
       setIsRunning(false);
+      setProxyCheckState("fail");
+      setProxyCheckError(message);
     }
   };
 
@@ -586,26 +615,37 @@ function BrowserChecker() {
     setActiveList("opened");
     setInputText("");
     setProxyText("");
-    setConcurrency(3);
+    setProxyMode("saved");
+    setProxyCheckState("idle");
+    setProxyCheckError("");
+    setProxyExitIp("");
     setFreshProfile(false);
     setDeviceIndex(0);
   };
 
   const startRetryJob = async (creds: Array<{ email: string; password: string; totp?: string }>) => {
+    if (!(await ensureProxy())) return;
     sseAbortRef.current?.abort();
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     appendModeRef.current = true;
     setTotal(t => t + creds.length);
     try {
       const res = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: buildBody(creds) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(await readJobError(res));
       const { jobId: id } = await res.json();
       // Don't call setJobId — keep the original jobId in localStorage so a
       // page refresh restores the original job, not the retry job.
       activeJobIdRef.current = id; setJobStatus("running"); setIsRunning(true);
       setPauseRequested(false); setResumeReady(false);
       connectToJobStream(id, 0);
-    } catch (e) { console.error("[BrowserChecker] retry:", e); setTotal(t => t - creds.length); }
+    } catch (e) {
+      console.error("[BrowserChecker] retry:", e);
+      setTotal(t => t - creds.length);
+      setJobStatus("idle");
+      setIsRunning(false);
+      setProxyCheckState("fail");
+      setProxyCheckError(e instanceof Error ? e.message : "Retry could not start");
+    }
   };
 
   const handleRetry = (email: string) => {
@@ -734,74 +774,115 @@ function BrowserChecker() {
               disabled={isChecking}
             />
 
-            {/* Proxy */}
             {jobStartError && (
               <div className="rounded-lg border border-red-500/50 bg-red-500/10 p-2.5 text-[11px] font-mono text-red-300">
                 <p className="font-semibold">Job start failed</p>
                 <p className="text-red-300/80 break-all">{jobStartError}</p>
               </div>
             )}
-            {(() => {
-              const proxies = parseProxies(proxyText);
-              const count = proxies.length;
-              const creds = parseCredentials(inputText).length;
-              const hasProxy = count > 0 || serverProxyConfigured;
-              return (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-[10px] font-mono uppercase tracking-widest text-yellow-400/80 flex items-center gap-1">
+                  <Lock className="w-3 h-3" /> Residential Proxy
+                </label>
+                <div className="flex items-center gap-1 text-[11px] font-mono">
+                  <button
+                    type="button"
+                    onClick={() => { setProxyMode("saved"); setProxyCheckState("idle"); setProxyCheckError(""); setProxyExitIp(""); }}
+                    disabled={isChecking}
+                    className={cn(
+                      "px-2 py-0.5 rounded border transition-colors",
+                      proxyMode === "saved"
+                        ? "bg-yellow-500/15 border-yellow-500/40 text-yellow-300"
+                        : "border-transparent text-muted-foreground hover:text-foreground"
+                    )}>Saved</button>
+                  <button
+                    type="button"
+                    onClick={() => { setProxyMode("custom"); setProxyCheckState("idle"); setProxyCheckError(""); setProxyExitIp(""); }}
+                    disabled={isChecking}
+                    className={cn(
+                      "px-2 py-0.5 rounded border transition-colors",
+                      proxyMode === "custom"
+                        ? "bg-yellow-500/15 border-yellow-500/40 text-yellow-300"
+                        : "border-transparent text-muted-foreground hover:text-foreground"
+                    )}>Custom</button>
+                </div>
+              </div>
+              {proxyMode === "saved" ? (
                 <div className={cn(
                   "rounded-lg border p-2.5 text-[11px] font-mono space-y-1",
-                  hasProxy
+                  savedProxy?.configured
                     ? "border-green-500/40 bg-green-500/5 text-green-400/90"
                     : "border-yellow-500/40 bg-yellow-500/5 text-yellow-400/90"
                 )}>
-                  {count === 0 && serverProxyConfigured ? (
+                  {savedProxy === null ? (
+                    <p>Saved proxy padh rahe hain…</p>
+                  ) : savedProxy.configured ? (
                     <>
-                      <p className="font-semibold">✅ Server proxy (PROXY_URL secret) configured</p>
-                      <p className="text-green-300/70 break-all">
-                        Browser Check isi proxy ko use karega jab tak aap neeche alag proxy na likhein.
-                        {serverProxyMasked ? ` ${serverProxyMasked}` : ""}
-                      </p>
-                    </>
-                  ) : count === 0 ? (
-                    <><p className="font-semibold">⚠ Residential proxy required on Replit</p>
-                      <p className="text-yellow-300/70">Google blocks datacenter IPs. Without proxy all checks return <span className="text-orange-400">verification_required</span>.</p></>
-                  ) : count === 1 ? (
-                    <>
-                      <p className="font-semibold">✅ Rotating proxy detected — har account alag IP se chalega</p>
-                      <p className="text-green-300/70">Har account ko unique sticky session milega → alag exit IP (scrapegw / residential rotating proxies ke liye)</p>
+                      <p className="font-semibold">Saved proxy is already on this server</p>
+                      <p className="text-green-200/90">{savedProxy.label}</p>
+                      <p className="text-green-300/70">Password server par rehta hai. Har account ko apni sticky session milti hai, aur timezone, language, keyboard Chrome ke exit IP se match hote hain.</p>
                     </>
                   ) : (
                     <>
-                      <p className="font-semibold">🔀 {count} proxies loaded — rotation active</p>
-                      <p className="text-green-300/70">
-                        {creds > 0 ? `${creds} accounts → ${count} proxies (round-robin)` : "Har account ko alag IP milegi (round-robin)"}
-                      </p>
+                      <p className="font-semibold">No saved proxy on this server</p>
+                      <p className="text-yellow-300/70">Custom mode mein http://user:pass@host:port paste karo, ya server par PROXY_URL set karo.</p>
                     </>
                   )}
                 </div>
-              );
-            })()}
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-mono uppercase tracking-widest text-yellow-400/80 flex items-center gap-1">
-                <Lock className="w-3 h-3" /> Residential Proxies (ek per line)
-              </label>
-              <Textarea
-                placeholder={"http://user:pass@host1:port\nhttp://user:pass@host2:port\nhttp://user:pass@host3:port"}
-                className={cn(
-                  "min-h-[80px] resize-y bg-background/50 font-mono text-xs leading-relaxed",
-                  proxyCheckState === "fail" ? "border-red-500/60" :
-                  proxyCheckState === "ok"   ? "border-green-500/60" :
-                  parseProxies(proxyText).length > 0 ? "border-green-500/50" : "border-yellow-500/40"
-                )}
-                value={proxyText}
-                onChange={e => { setProxyText(e.target.value); setProxyCheckState("idle"); setProxyCheckError(""); setProxyExitIp(""); }}
-                disabled={isChecking}
-              />
+              ) : (
+                <>
+                  {(() => {
+                    const count = parseProxies(proxyText).length;
+                    const creds = parseCredentials(inputText).length;
+                    return (
+                      <div className={cn(
+                        "rounded-lg border p-2.5 text-[11px] font-mono space-y-1",
+                        count > 0
+                          ? "border-green-500/40 bg-green-500/5 text-green-400/90"
+                          : "border-yellow-500/40 bg-yellow-500/5 text-yellow-400/90"
+                      )}>
+                        {count === 0 ? (
+                          <>
+                            <p className="font-semibold">Custom proxy is empty</p>
+                            <p className="text-yellow-300/70">Ek line par ek residential proxy: http://user:pass@host:port</p>
+                          </>
+                        ) : count === 1 ? (
+                          <>
+                            <p className="font-semibold">Custom proxy — har account apni sticky session se chalega</p>
+                            <p className="text-green-300/70">Exit IP us login ke dauran same rahega. Timezone, language aur keyboard usi IP se match honge.</p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="font-semibold">{count} custom proxies — round-robin</p>
+                            <p className="text-green-300/70">
+                              {creds > 0 ? `${creds} accounts → ${count} proxies` : "Har account ko agla proxy milega"}
+                            </p>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })()}
+                  <Textarea
+                    placeholder={"http://user:pass@host1:port\nhttp://user:pass@host2:port\nhttp://user:pass@host3:port"}
+                    className={cn(
+                      "min-h-[80px] resize-y bg-background/50 font-mono text-xs leading-relaxed",
+                      proxyCheckState === "fail" ? "border-red-500/60" :
+                      proxyCheckState === "ok"   ? "border-green-500/60" :
+                      parseProxies(proxyText).length > 0 ? "border-green-500/50" : "border-yellow-500/40"
+                    )}
+                    value={proxyText}
+                    onChange={e => { setProxyText(e.target.value); setProxyCheckState("idle"); setProxyCheckError(""); setProxyExitIp(""); }}
+                    disabled={isChecking}
+                  />
+                </>
+              )}
 
               {/* Proxy pre-flight result banner */}
               {proxyCheckState === "checking" && (
                 <div className="rounded-md border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-[11px] font-mono text-blue-300 flex items-center gap-2">
                   <span className="animate-spin inline-block">⟳</span>
-                  Proxy check chal raha hai… (12s max)
+                  Proxy check chal raha hai… gateway slow ho sakta hai
                 </div>
               )}
               {proxyCheckState === "ok" && (
@@ -819,19 +900,12 @@ function BrowserChecker() {
               )}
             </div>
 
-            {/* Concurrency */}
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground flex items-center gap-1">
-                <Activity className="w-3 h-3" /> Concurrent Threads
-              </label>
-              <div className="flex items-center gap-2">
-                <button onClick={() => setConcurrency(c => Math.max(1, c - 1))} disabled={isChecking || concurrency <= 1}
-                  className="w-8 h-8 rounded border border-border bg-card text-sm font-mono font-bold hover:bg-muted/50 disabled:opacity-30 transition-colors">−</button>
-                <div className="flex-1 text-center font-mono text-lg font-bold text-primary">{concurrency}</div>
-                <button onClick={() => setConcurrency(c => Math.min(10, c + 1))} disabled={isChecking || concurrency >= 10}
-                  className="w-8 h-8 rounded border border-border bg-card text-sm font-mono font-bold hover:bg-muted/50 disabled:opacity-30 transition-colors">+</button>
-              </div>
-              <p className="text-[10px] text-muted-foreground/60 font-mono text-center">{concurrency} browser{concurrency > 1 ? "s" : ""} simultaneously (1–10)</p>
+            <div className="rounded-lg border border-border bg-card/30 p-3 text-[10px] font-mono text-muted-foreground/80 leading-relaxed space-y-1">
+              <p className="uppercase tracking-widest text-foreground/70">Ek ke baad ek</p>
+              <p>Pehla account poora khatam hota hai, uske baad dusra start hota hai.</p>
+              <p>Fresh off: sab accounts Device Check wala same fingerprint use karte hain.</p>
+              <p>Fresh on: agla account naya profile aur naya canvas leta hai. Phone model wahi rehta hai.</p>
+              <p>Saved proxy ki IP 3 minute tak same rehti hai.</p>
             </div>
 
             {/* Fresh device toggle */}
@@ -867,7 +941,7 @@ function BrowserChecker() {
                 </div>
               </div>
               <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
-                {freshProfile ? "⚠️ Naya device har run — account 2-3 din mein flag ho sakta hai" : "✓ Same device reuse — account safe, faster second check"}
+                {freshProfile ? "Pehla khatam, phir agla naya profile aur naya canvas. Phone model yahi selected device rahega. Timezone, language aur keyboard Chrome ke IP se match honge." : "Sab accounts ek hi fingerprint: Device Check ne jo device banaya, wahi. Timezone, language aur keyboard Chrome ke IP se match honge."}
               </p>
             </button>
 
@@ -888,7 +962,12 @@ function BrowserChecker() {
               </Button>
             ) : (
               <Button className="w-full font-mono font-medium tracking-wide" size="lg"
-                onClick={handleCheck} disabled={!inputText.trim()}>
+                onClick={handleCheck}
+                disabled={
+                  !inputText.trim() ||
+                  (proxyMode === "custom" && parseProxies(proxyText).length === 0) ||
+                  (proxyMode === "saved" && savedProxy !== null && !savedProxy.configured)
+                }>
                 <Globe className="w-4 h-4 mr-2" />OPEN BROWSER & CHECK
               </Button>
             )}
@@ -1027,7 +1106,7 @@ function BrowserChecker() {
             <Progress value={progress} className="h-1 bg-border" />
             {isChecking && (
               <p className="text-[11px] text-muted-foreground/60 font-mono">
-                {concurrency} browser{concurrency > 1 ? "s" : ""} running — tab band karo, kaam nahi rukega 🔒
+                Ek account chal raha hai. Agla uske khatam hone ke baad start hoga.
               </p>
             )}
           </div>
@@ -1459,6 +1538,580 @@ const DEVICE_PROFILES = [
   { index: 50, label: "Oppo Reno 12 Pro (CPH2629)", sub: "Android 14 · Immortalis-G720 MC12" },
   { index: 51, label: "vivo X100 Pro (V2324A)", sub: "Android 14 · Immortalis-G720 MC12" },
 ];
+
+function DeviceChecker() {
+  const [deviceIndex,  setDeviceIndex]  = useState(() => {
+    try {
+      const saved = localStorage.getItem("vbc_device");
+      const parsed = saved ? JSON.parse(saved) : 0;
+      return Number.isInteger(parsed) && parsed >= 0 && parsed < DEVICE_PROFILES.length ? parsed : 0;
+    } catch {
+      return 0;
+    }
+  });
+  const [proxyText,    setProxyText]    = useState("");
+  const [proxyMode,    setProxyMode]    = useState<"secret"|"custom">("secret");
+  const [savedProxy,   setSavedProxy]   = useState<{ configured: boolean; label: string } | null>(null);
+  const [status,       setStatus]       = useState<"idle"|"running"|"done"|"error">("idle");
+  const [logs,         setLogs]         = useState<string[]>([]);
+  const [shots,        setShots]        = useState<{ label: string; b64: string }[]>([]);
+  const [errMsg,       setErrMsg]       = useState("");
+  const [freshProfile, setFreshProfile] = useState<boolean>(() => {
+    try { return JSON.parse(localStorage.getItem("vbc_fresh") || "false") === true; } catch { return false; }
+  });
+  const abortRef  = useRef<AbortController | null>(null);
+  useEffect(() => {
+    try { localStorage.setItem("vbc_fresh", JSON.stringify(freshProfile)); } catch {}
+  }, [freshProfile]);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
+  useEffect(() => {
+    try { localStorage.setItem("vbc_device", JSON.stringify(deviceIndex)); } catch {}
+  }, [deviceIndex]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/proxy/status")
+      .then(r => r.json())
+      .then((data: { configured?: boolean; label?: string }) => {
+        if (cancelled) return;
+        setSavedProxy({
+          configured: data.configured === true,
+          label: typeof data.label === "string" && data.label ? data.label : "Saved proxy",
+        });
+      })
+      .catch(() => { if (!cancelled) setSavedProxy({ configured: false, label: "Could not read saved proxy" }); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const runCheck = async () => {
+    setStatus("running");
+    setLogs([]);
+    setShots([]);
+    setErrMsg("");
+
+    abortRef.current?.abort();
+    const abort = new AbortController();
+    abortRef.current = abort;
+
+    if (proxyMode === "custom" && !proxyText.trim()) {
+      setErrMsg("Custom proxy is empty.");
+      setStatus("error");
+      return;
+    }
+    if (proxyMode === "secret" && savedProxy && !savedProxy.configured) {
+      setErrMsg("No saved proxy on this server. Switch to Custom.");
+      setStatus("error");
+      return;
+    }
+
+    try {
+      const body: Record<string, unknown> = { deviceIndex, freshProfile };
+      if (proxyMode === "custom" && proxyText.trim()) body.proxy = proxyText.trim();
+
+      const resp = await fetch("/api/device-check/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: abort.signal,
+      });
+      if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+
+      const reader  = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const blocks = buf.split("\n\n"); buf = blocks.pop() ?? "";
+        for (const block of blocks) {
+          const lines     = block.split("\n");
+          const eventLine = lines.find(l => l.startsWith("event: "));
+          const dataLine  = lines.find(l => l.startsWith("data: "));
+          if (!eventLine || !dataLine) continue;
+          const event = eventLine.slice(7).trim();
+          const data  = dataLine.slice(6);
+          if (event === "log") {
+            try { setLogs(p => [...p, JSON.parse(data)]); } catch { setLogs(p => [...p, data]); }
+          } else if (event === "screenshot") {
+            const ci = data.indexOf(":");
+            if (ci !== -1) setShots(p => [...p, { label: data.slice(0, ci), b64: data.slice(ci + 1) }]);
+          } else if (event === "done") {
+            setStatus("done");
+          } else if (event === "error") {
+            let msg = data; try { msg = JSON.parse(data); } catch {}
+            setErrMsg(msg); setStatus("error");
+          }
+        }
+      }
+      setStatus(s => s === "error" ? s : "done");
+    } catch (err: any) {
+      if (err?.name === "AbortError") return;
+      setErrMsg(err?.message ?? "Unknown error");
+      setStatus("error");
+    }
+  };
+
+  const stopCheck = () => {
+    abortRef.current?.abort();
+    setStatus("idle");
+    setLogs(p => [...p, "Stopped by user."]);
+  };
+
+  const shotLabels: Record<string, string> = {
+    homepage:  "① Homepage — Suspect Score",
+    breakdown: "② Score Breakdown Panel",
+    scrolled:  "③ Breakdown (Scrolled)",
+  };
+
+  const selectedDevice = DEVICE_PROFILES[deviceIndex] ?? DEVICE_PROFILES[0];
+
+  return (
+    <div className="space-y-4">
+      {/* Config + action row */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+        {/* Device selector */}
+        <Card className="bg-card/60 border-border">
+          <CardHeader className="pb-2 pt-4 px-4">
+            <div className="flex items-center gap-2">
+              <Smartphone className="w-4 h-4 text-purple-400" />
+              <span className="text-xs font-mono font-semibold tracking-widest text-muted-foreground uppercase">Device Profile</span>
+            </div>
+          </CardHeader>
+          <CardContent className="px-4 pb-4 space-y-2">
+            <select
+              disabled={status === "running"}
+              value={deviceIndex}
+              onChange={e => setDeviceIndex(Number(e.target.value))}
+              className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50 disabled:opacity-50"
+            >
+              {DEVICE_PROFILES.map(d => (
+                <option key={d.index} value={d.index}>{d.label}</option>
+              ))}
+            </select>
+            <p className="text-[11px] font-mono text-muted-foreground/70 pl-1">
+              {selectedDevice.sub} · Chrome for Testing (latest stable)
+            </p>
+          </CardContent>
+        </Card>
+
+        {/* Proxy input */}
+        <Card className="bg-card/60 border-border">
+          <CardHeader className="pb-2 pt-4 px-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Globe className="w-4 h-4 text-purple-400" />
+                <span className="text-xs font-mono font-semibold tracking-widest text-muted-foreground uppercase">Proxy</span>
+              </div>
+              <div className="flex items-center gap-1 text-[11px] font-mono">
+                <button
+                  onClick={() => setProxyMode("secret")}
+                  disabled={status === "running"}
+                  className={cn(
+                    "px-2 py-0.5 rounded border transition-colors",
+                    proxyMode === "secret"
+                      ? "bg-purple-600/20 border-purple-500/40 text-purple-300"
+                      : "border-transparent text-muted-foreground hover:text-foreground"
+                  )}>Secret</button>
+                <button
+                  onClick={() => setProxyMode("custom")}
+                  disabled={status === "running"}
+                  className={cn(
+                    "px-2 py-0.5 rounded border transition-colors",
+                    proxyMode === "custom"
+                      ? "bg-purple-600/20 border-purple-500/40 text-purple-300"
+                      : "border-transparent text-muted-foreground hover:text-foreground"
+                  )}>Custom</button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="px-4 pb-4">
+            {proxyMode === "secret" ? (
+              <div className="flex items-center gap-2 min-h-[68px] text-xs font-mono text-muted-foreground/70 bg-muted/20 rounded-md border border-border px-3 py-2">
+                <Lock className="w-3.5 h-3.5 opacity-50 shrink-0" />
+                <span>
+                  {savedProxy === null
+                    ? "Saved proxy padh rahe hain…"
+                    : savedProxy.configured
+                      ? <>Saved proxy: <span className="text-purple-300">{savedProxy.label}</span>. Password server par rehta hai.</>
+                      : <>No saved proxy on this server. Switch to <span className="text-foreground">Custom</span>.</>}
+                </span>
+              </div>
+            ) : (
+              <div className="space-y-1">
+                <Textarea
+                  disabled={status === "running"}
+                  value={proxyText}
+                  onChange={e => setProxyText(e.target.value)}
+                  placeholder="http://user:pass@host:port"
+                  className="font-mono text-xs h-[58px] resize-none bg-background border-border placeholder:text-muted-foreground/40"
+                />
+                <p className="text-[10px] font-mono text-muted-foreground/50 pl-1">
+                  Is run ke liye saved proxy ki jagah yeh URL use hoga
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <button onClick={() => status !== "running" && setFreshProfile(f => !f)} disabled={status === "running"}
+        className={cn("w-full rounded-lg border p-3 text-left transition-colors",
+          freshProfile ? "border-blue-500/40 bg-blue-500/5" : "border-border bg-card/30")}>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[10px] font-mono uppercase tracking-widest text-blue-400/80 flex items-center gap-1">
+            <Smartphone className="w-3 h-3" /> Fresh Device Per Run
+          </span>
+          <div className={cn("w-8 h-4 rounded-full transition-colors relative", freshProfile ? "bg-blue-500" : "bg-border")}>
+            <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", freshProfile ? "left-4" : "left-0.5")} />
+          </div>
+        </div>
+        <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
+          {freshProfile
+            ? "Naya Chrome profile aur naya canvas. Browser Check ka Fresh on bhi agle account par yahi naya fingerprint use karega. Timezone, language aur keyboard us IP par rahenge jo Chrome use kare."
+            : "Yahi fingerprint Browser Check use karega jab Fresh off ho. Timezone, language aur keyboard Chrome ke exit IP se match honge."}
+        </p>
+      </button>
+
+      {/* Run button row */}
+      <div className="flex items-center gap-3">
+        {status === "running" ? (
+          <Button variant="outline" onClick={stopCheck}
+            className="font-mono text-xs border-red-500/40 text-red-400 hover:bg-red-500/10">
+            STOP
+          </Button>
+        ) : (
+          <Button onClick={runCheck}
+            className="font-mono text-xs bg-purple-600 hover:bg-purple-700 text-white px-6">
+            {status === "idle" ? "▶ RUN CHECK" : "▶ RUN AGAIN"}
+          </Button>
+        )}
+        {status === "running" && (
+          <Badge variant="outline" className="font-mono text-[10px] border-blue-500/40 text-blue-400 bg-blue-400/10 flex items-center gap-1">
+            <Loader2 className="w-3 h-3 animate-spin" /> RUNNING — ~50s
+          </Badge>
+        )}
+        {status === "done" && (
+          <Badge variant="outline" className="font-mono text-[10px] border-green-500/40 text-green-400 bg-green-400/10 flex items-center gap-1">
+            <CheckCircle2 className="w-3 h-3" /> DONE
+          </Badge>
+        )}
+        {status === "error" && (
+          <Badge variant="outline" className="font-mono text-[10px] border-red-500/40 text-red-400 bg-red-400/10 flex items-center gap-1">
+            <XCircle className="w-3 h-3" /> ERROR
+          </Badge>
+        )}
+        {status === "idle" && logs.length === 0 && (
+          <span className="text-xs text-muted-foreground/40 font-mono">
+            Chrome opens in the background with Xvfb — takes ~50s
+          </span>
+        )}
+      </div>
+
+      {/* Logs + Screenshots */}
+      {(logs.length > 0 || shots.length > 0) && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Terminal */}
+          <Card className="bg-card/40 border-border">
+            <CardHeader className="py-2 px-4 border-b border-border">
+              <span className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">
+                <Terminal className="w-3 h-3 inline mr-1 opacity-60" />Terminal Output
+              </span>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="h-[380px] overflow-y-auto bg-black/40 rounded-b-lg p-3 font-mono text-xs space-y-0.5">
+                {logs.map((line, i) => (
+                  <div key={i} className={cn("leading-relaxed",
+                    line.startsWith("WARNING") ? "text-yellow-400" :
+                    line.startsWith("[stderr]") ? "text-orange-400" :
+                    line.includes("✓") || line.includes("Done") || line.includes("cleanly") ? "text-green-400" :
+                    line.startsWith("ERROR") ? "text-red-400" :
+                    "text-slate-300"
+                  )}>
+                    <span className="text-slate-600 mr-2 select-none">{String(i+1).padStart(3,"0")}</span>
+                    {line}
+                  </div>
+                ))}
+                {status === "running" && (
+                  <div className="text-blue-400 flex items-center gap-1 pt-1">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <span className="animate-pulse">running…</span>
+                  </div>
+                )}
+                {errMsg && <div className="text-red-400 pt-1">❌ {errMsg}</div>}
+                <div ref={logEndRef} />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Screenshots */}
+          <Card className="bg-card/40 border-border">
+            <CardHeader className="py-2 px-4 border-b border-border">
+              <span className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">
+                <Activity className="w-3 h-3 inline mr-1 opacity-60" />Screenshots — {selectedDevice.label}
+              </span>
+            </CardHeader>
+            <CardContent className="p-3 space-y-3 h-[380px] overflow-y-auto">
+              {shots.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-muted-foreground/40 font-mono text-xs">
+                  {status === "running"
+                    ? <span className="flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Waiting for screenshots…</span>
+                    : "No screenshots yet"}
+                </div>
+              ) : shots.map((shot, i) => (
+                <div key={i} className="space-y-1">
+                  <p className="text-[10px] font-mono text-purple-400 uppercase tracking-wider">
+                    {shotLabels[shot.label] ?? shot.label}
+                  </p>
+                  <img
+                    src={`data:image/png;base64,${shot.b64}`}
+                    alt={shot.label}
+                    className="w-full rounded-md border border-border shadow-sm cursor-pointer hover:opacity-90 transition-opacity"
+                    onClick={() => {
+                      const w = window.open(); 
+                      if (w) w.document.write(`<img src="data:image/png;base64,${shot.b64}" style="max-width:100%">`);
+                    }}
+                  />
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Empty state */}
+      {status === "idle" && logs.length === 0 && (
+        <Card className="bg-card/20 border-border border-dashed">
+          <CardContent className="py-14 flex flex-col items-center justify-center gap-3 text-muted-foreground/40">
+            <ShieldAlert className="w-10 h-10 opacity-30" />
+            <p className="font-mono text-sm">Select a device, configure proxy, then click RUN CHECK</p>
+            <p className="font-mono text-xs opacity-70">
+              fingerprint.com opens in a headless {selectedDevice.label} browser
+            </p>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+/* ───────────────────────── MANUAL BROWSER ───────────────────────── */
+function ManualBrowser() {
+  const [deviceIndex, setDeviceIndex] = useState(() => {
+    try {
+      const saved = localStorage.getItem("vbc_device");
+      const parsed = saved ? JSON.parse(saved) : 0;
+      return Number.isInteger(parsed) && parsed >= 0 && parsed < DEVICE_PROFILES.length ? parsed : 0;
+    } catch { return 0; }
+  });
+  const [proxyText, setProxyText] = useState("");
+  const [useCustomProxy, setUseCustomProxy] = useState(false);
+  const [url, setUrl] = useState("https://accounts.google.com");
+  const [text, setText] = useState("");
+  const [status, setStatus] = useState<"idle" | "starting" | "running" | "error">("idle");
+  const [sessionId, setSessionId] = useState("");
+  const [logs, setLogs] = useState<string[]>([]);
+  const [shot, setShot] = useState<{ b64: string; screenW: number; screenH: number; title?: string; url?: string } | null>(null);
+  const [error, setError] = useState("");
+  const streamRef = useRef<EventSource | null>(null);
+  const shotRef = useRef<HTMLImageElement | null>(null);
+
+  const selectedDevice = DEVICE_PROFILES[deviceIndex] ?? DEVICE_PROFILES[0];
+
+  const closeStream = () => {
+    streamRef.current?.close();
+    streamRef.current = null;
+  };
+
+  const sendAction = async (action: Record<string, unknown>) => {
+    if (!sessionId || status !== "running") return;
+    try {
+      const response = await fetch(`/api/manual-browser/${sessionId}/action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(action),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error ?? `HTTP ${response.status}`);
+      }
+    } catch (err: any) {
+      setError(err?.message ?? "Browser action failed");
+    }
+  };
+
+  const start = async () => {
+    closeStream();
+    setStatus("starting"); setLogs([]); setShot(null); setError("");
+    try {
+      const response = await fetch("/api/manual-browser/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deviceIndex,
+          ...(useCustomProxy && proxyText.trim() ? { proxy: proxyText.trim() } : {}),
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? `HTTP ${response.status}`);
+      const id = payload.sessionId as string;
+      setSessionId(id);
+      const stream = new EventSource(`/api/manual-browser/${id}/stream`);
+      streamRef.current = stream;
+      stream.addEventListener("log", event => {
+        try { setLogs(prev => [...prev.slice(-99), JSON.parse((event as MessageEvent).data)]); }
+        catch { setLogs(prev => [...prev.slice(-99), (event as MessageEvent).data]); }
+      });
+      stream.addEventListener("ready", () => setStatus("running"));
+      stream.addEventListener("screenshot", event => {
+        try { setShot(JSON.parse((event as MessageEvent).data)); } catch {}
+      });
+      stream.addEventListener("error", event => {
+        const data = (event as MessageEvent).data;
+        if (data) {
+          try { setError(JSON.parse(data)); } catch { setError(data); }
+        }
+        setStatus("error");
+      });
+      stream.addEventListener("closed", () => {
+        setStatus(s => s === "error" ? s : "idle");
+        setLogs(prev => [...prev.slice(-99), "Browser session closed."]);
+      });
+    } catch (err: any) {
+      setError(err?.message ?? "Could not start manual browser");
+      setStatus("error");
+    }
+  };
+
+  const stop = async () => {
+    if (sessionId) {
+      try { await fetch(`/api/manual-browser/${sessionId}/stop`, { method: "POST" }); } catch {}
+    }
+    closeStream();
+    setStatus("idle");
+    setLogs(prev => [...prev, "Stopped by user."]);
+  };
+
+  const navigate = () => {
+    if (url.trim()) void sendAction({ action: "navigate", url: url.trim() });
+  };
+
+  const sendText = () => {
+    if (!text) return;
+    void sendAction({ action: "type", text });
+    setText("");
+  };
+
+  const clickScreenshot = (event: React.MouseEvent<HTMLImageElement>) => {
+    if (!shot || !shotRef.current) return;
+    const rect = shotRef.current.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * shot.screenW;
+    const y = ((event.clientY - rect.top) / rect.height) * shot.screenH;
+    void sendAction({ action: "click", x, y });
+  };
+
+  useEffect(() => () => closeStream(), []);
+
+  return (
+    <div className="space-y-4">
+      <Card className="bg-card/60 border-border">
+        <CardHeader className="py-3 px-4 border-b border-border">
+          <CardTitle className="text-xs font-mono tracking-widest uppercase flex items-center gap-2">
+            <Smartphone className="w-4 h-4 text-purple-400" /> Manual Browser
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-4 space-y-4">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <div className="space-y-1.5 lg:col-span-2">
+              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">Device profile</label>
+              <select value={deviceIndex} onChange={e => setDeviceIndex(Number(e.target.value))} disabled={status === "running"}
+                className="w-full bg-background/50 border border-purple-500/40 rounded-md px-3 py-2 text-xs font-mono text-foreground">
+                {DEVICE_PROFILES.map(d => <option key={d.index} value={d.index}>{d.label} · {d.sub}</option>)}
+              </select>
+              <p className="text-[10px] text-purple-300/60 font-mono">{selectedDevice.label} · {selectedDevice.sub}</p>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">Browser status</label>
+              <Badge variant="outline" className={cn("font-mono text-[10px] w-fit", status === "running" ? "text-green-400 border-green-500/40" : status === "error" ? "text-red-400 border-red-500/40" : "text-muted-foreground")}>
+                {status === "starting" && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
+                {status.toUpperCase()}
+              </Badge>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">URL</label>
+            <div className="flex gap-2">
+              <Input value={url} onChange={e => setUrl(e.target.value)} onKeyDown={e => e.key === "Enter" && navigate()}
+                disabled={status !== "running"} className="font-mono text-xs bg-background" placeholder="https://example.com" />
+              <Button onClick={navigate} disabled={status !== "running"} className="font-mono text-xs"><Globe className="w-3 h-3 mr-1" />OPEN</Button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">Proxy</label>
+              <button type="button" onClick={() => setUseCustomProxy(v => !v)} disabled={status !== "idle" && status !== "error"}
+                className="text-[10px] font-mono text-purple-300 hover:text-purple-200">{useCustomProxy ? "Use configured proxy secret" : "Use custom proxy for this session"}</button>
+              {useCustomProxy && <Textarea value={proxyText} onChange={e => setProxyText(e.target.value)} disabled={status !== "idle" && status !== "error"}
+                placeholder="http://user:pass@host:port" className="font-mono text-xs h-[58px] resize-none bg-background" />}
+              <p className="text-[10px] text-muted-foreground/60 font-mono">Custom proxy is used only when the session starts.</p>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground">Focused field text</label>
+              <div className="flex gap-2">
+                <Input value={text} onChange={e => setText(e.target.value)} onKeyDown={e => e.key === "Enter" && sendText()}
+                  disabled={status !== "running"} type="text" autoComplete="off" className="font-mono text-xs bg-background" placeholder="Type, then click SEND" />
+                <Button onClick={sendText} disabled={status !== "running" || !text} variant="outline" className="font-mono text-xs">SEND</Button>
+              </div>
+              <p className="text-[10px] text-yellow-400/70 font-mono">Not saved or logged. For sensitive fields, type directly in the browser when possible.</p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {status === "running" || status === "starting" ? (
+              <Button onClick={stop} variant="destructive" className="font-mono text-xs"><XCircle className="w-3 h-3 mr-1" />STOP BROWSER</Button>
+            ) : (
+              <Button onClick={start} className="font-mono text-xs bg-purple-600 hover:bg-purple-700 text-white"><Globe className="w-3 h-3 mr-1" />START MANUAL BROWSER</Button>
+            )}
+            <Button onClick={() => void sendAction({ action: "key", key: "ENTER" })} disabled={status !== "running"} variant="outline" className="font-mono text-xs">ENTER</Button>
+            <Button onClick={() => void sendAction({ action: "key", key: "TAB" })} disabled={status !== "running"} variant="outline" className="font-mono text-xs">TAB</Button>
+            <Button onClick={() => void sendAction({ action: "screenshot" })} disabled={status !== "running"} variant="outline" className="font-mono text-xs">REFRESH SCREEN</Button>
+          </div>
+          {error && <p className="text-xs text-red-400 font-mono">❌ {error}</p>}
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px] gap-4">
+        <Card className="bg-card/40 border-border">
+          <CardHeader className="py-2 px-4 border-b border-border">
+            <span className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">Live browser screen — click the screen to interact</span>
+          </CardHeader>
+          <CardContent className="p-3 flex justify-center bg-black/20 min-h-[420px]">
+            {shot ? (
+              <img ref={shotRef} src={`data:image/png;base64,${shot.b64}`} alt="Manual browser screen"
+                onClick={clickScreenshot} className="max-w-full max-h-[680px] object-contain rounded-md border border-border cursor-crosshair" />
+            ) : (
+              <div className="flex items-center justify-center text-muted-foreground/40 font-mono text-xs">
+                {status === "starting" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Starting Chrome…</> : "Start the browser to see its screen"}
+              </div>
+            )}
+          </CardContent>
+          {shot && <div className="px-4 pb-3 text-[10px] text-muted-foreground/60 font-mono truncate">{shot.title || "Untitled"} · {shot.url || "about:blank"}</div>}
+        </Card>
+        <Card className="bg-card/40 border-border">
+          <CardHeader className="py-2 px-4 border-b border-border"><span className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">Session log</span></CardHeader>
+          <CardContent className="p-3 h-[420px] overflow-y-auto bg-black/30 font-mono text-xs space-y-1">
+            {logs.length ? logs.map((line, i) => <div key={i} className="text-slate-300 leading-relaxed"><span className="text-slate-600 mr-2">{String(i + 1).padStart(3, "0")}</span>{line}</div>) : <span className="text-muted-foreground/40">Awaiting browser session…</span>}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
 
 /* ───────────────────────── SHARED HELPERS ───────────────────────── */
 function download(text: string, filename: string, mime = "text/plain") {

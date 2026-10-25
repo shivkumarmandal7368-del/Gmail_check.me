@@ -1,82 +1,82 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
 import { spawn } from "child_process";
 
 const router = Router();
 
-function maskProxyUrl(url: string): string {
+/**
+ * Public label for the server PROXY_URL. Host, country and state only —
+ * never the username or password.
+ */
+export function describeSavedProxy(raw: string | undefined): { configured: boolean; label: string } {
+  const proxy = (raw ?? "").trim();
+  if (!proxy) return { configured: false, label: "No saved proxy on this server" };
   try {
-    const u = new URL(url);
-    if (u.password) u.password = "****";
-    return u.toString();
+    const u = new URL(proxy.includes("://") ? proxy : `http://${proxy}`);
+    const host = u.hostname;
+    const port = u.port;
+    const user = decodeURIComponent(u.username || "");
+    const country = user.match(/country[-_]([a-z]{2})/i)?.[1]?.toUpperCase();
+    const stateRaw = user.match(/state[-_]([a-z0-9]+)/i)?.[1] ?? "";
+    const state = stateRaw
+      .replace(/newyork/i, "New York")
+      .replace(/newjersey/i, "New Jersey")
+      .replace(/losangeles/i, "Los Angeles")
+      .replace(/california/i, "California")
+      .replace(/^(.)/, (c) => c.toUpperCase());
+    const sticky = /-session-[a-z0-9]+$/i.test(user);
+    const where = [country, state && state !== country ? state : ""].filter(Boolean).join(" / ");
+    const endpoint = host ? (port ? `${host}:${port}` : host) : "saved proxy";
+    const bits = [endpoint, where, sticky ? "sticky session" : "rotating"].filter(Boolean);
+    return { configured: true, label: bits.join(" · ") };
   } catch {
-    return "configured";
+    return { configured: true, label: "Saved proxy is set" };
   }
 }
 
-/**
- * GET /api/proxy/status
- * Whether a default residential proxy is configured on the server (PROXY_URL secret).
- * Browser Check uses this when the UI proxy field is empty.
- */
+/** GET /api/proxy/status — whether a server proxy is configured, without secrets. */
 router.get("/proxy/status", (_req, res) => {
-  const raw =
-    process.env.PROXY_URL?.trim() ||
-    process.env.Proxy?.trim() ||
-    "";
-  res.json({
-    configured: raw.length > 0,
-    proxy: raw ? maskProxyUrl(raw) : null,
-  });
+  const raw = process.env.PROXY_URL?.trim() || process.env.Proxy?.trim() || "";
+  res.json(describeSavedProxy(raw));
 });
 
-/**
- * POST /api/proxy/check
- * Body: { proxy: string }
- *
- * Tests whether the given proxy URL actually works by fetching the exit IP
- * through it using Python requests (already installed for gmail_uc_checker).
- *
- * Returns:
- *   { ok: true,  ip: "1.2.3.4" }          — proxy works, this is the exit IP
- *   { ok: false, error: "reason..." }      — proxy failed (407, timeout, etc.)
- */
-router.post("/proxy/check", (req, res) => {
-  const { proxy } = req.body as { proxy?: unknown };
+const CHECK_SCRIPT = `
+import sys, json, re
+from urllib.parse import urlparse, quote
+import requests
 
-  if (!proxy || typeof proxy !== "string") {
-    res.status(400).json({ ok: false, error: "proxy field required" });
-    return;
-  }
+def redact(s):
+    return re.sub(r'(https?://)[^\\s/@]+:[^\\s/@]+@', r'\\1[redacted]@', str(s))
 
-  const script = `
-import sys, json, requests
 proxy_url = sys.stdin.readline().strip()
 try:
-    # Force http:// scheme — residential proxies only do plain HTTP CONNECT
-    _pu = proxy_url
-    if _pu.startswith("https://"):
-        _pu = "http://" + _pu[8:]
+    parsed = urlparse(proxy_url if "://" in proxy_url else "http://" + proxy_url)
+    host = parsed.hostname or ""
+    port = parsed.port or 80
+    user = quote(parsed.username or "", safe="")
+    password = quote(parsed.password or "", safe="")
+    _pu = f"http://{user}:{password}@{host}:{port}" if user else f"http://{host}:{port}"
     r = requests.get(
         "http://api.ipify.org?format=json",
         proxies={"http": _pu, "https": _pu},
-        timeout=12,
+        timeout=22,
     )
     r.raise_for_status()
     ip = r.json().get("ip", "unknown")
     print(json.dumps({"ok": True, "ip": ip}))
 except requests.exceptions.ProxyError as e:
-    msg = str(e)
+    msg = redact(e)
     if "407" in msg:
         print(json.dumps({"ok": False, "error": "407 — username ya password galat hai, ya plan expire ho gaya"}))
     else:
-        print(json.dumps({"ok": False, "error": f"Proxy connection failed: {msg[:200]}"}))
+        print(json.dumps({"ok": False, "error": "Proxy connection failed: " + msg[:180]}))
 except requests.exceptions.ConnectTimeout:
     print(json.dumps({"ok": False, "error": "Proxy timeout — host unreachable ya port band hai"}))
 except Exception as e:
-    print(json.dumps({"ok": False, "error": str(e)[:200]}))
+    print(json.dumps({"ok": False, "error": redact(e)[:180]}))
 `;
 
-  const proc = spawn("python3", ["-c", script], {
+function runProxyCheck(proxy: string, res: Response) {
+  const proc = spawn("python3", ["-c", CHECK_SCRIPT], {
     stdio: ["pipe", "pipe", "pipe"],
     env: process.env,
   });
@@ -84,14 +84,14 @@ except Exception as e:
   let out = "";
 
   const timer = setTimeout(() => {
-    try { proc.kill(); } catch {}
+    try { proc.kill(); } catch { /* already gone */ }
     if (!res.headersSent) {
-      res.json({ ok: false, error: "Proxy check timeout (15s) — host unreachable" });
+      res.json({ ok: false, error: "Proxy check timeout (25s) — host unreachable" });
     }
-  }, 15_000);
+  }, 28_000);
 
   proc.stdout.on("data", (d: Buffer) => { out += d.toString(); });
-  proc.stderr.on("data", () => {}); // suppress Python tracebacks from server logs
+  proc.stderr.on("data", () => { /* keep proxy URLs out of the API log */ });
 
   proc.stdin.write(proxy + "\n", "utf8");
   proc.stdin.end();
@@ -114,6 +114,31 @@ except Exception as e:
       res.json({ ok: false, error: `Failed to spawn python3: ${err.message}` });
     }
   });
+}
+
+/**
+ * POST /api/proxy/check
+ * Body: { useSaved: true }  — test process.env.PROXY_URL
+ *    or { proxy: string }   — test a custom URL
+ *
+ * Returns { ok, ip } or { ok: false, error }. Never echoes the proxy URL.
+ */
+router.post("/proxy/check", (req, res) => {
+  const body = (req.body ?? {}) as { proxy?: unknown; useSaved?: unknown };
+  let proxy = "";
+  if (body.useSaved === true) {
+    proxy = (process.env.PROXY_URL ?? "").trim();
+    if (!proxy) {
+      res.status(400).json({ ok: false, error: "Saved proxy is not configured on the server" });
+      return;
+    }
+  } else if (typeof body.proxy === "string" && body.proxy.trim()) {
+    proxy = body.proxy.trim();
+  } else {
+    res.status(400).json({ ok: false, error: "proxy field required" });
+    return;
+  }
+  runProxyCheck(proxy, res);
 });
 
 export default router;

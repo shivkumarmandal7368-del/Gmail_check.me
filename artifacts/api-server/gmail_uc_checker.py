@@ -972,7 +972,6 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
     Retries up to _retries times (2 s sleep between) across all services.
     Geo-lock MUST succeed — timezone/language mismatch flags accounts."""
     import time as _time
-    from urllib.parse import urlparse, quote
     import requests as req
 
     tag = f"[geo{(' ' + _label) if _label else ''}]"
@@ -980,17 +979,9 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
     # Parse + re-encode proxy URL once — proxy usernames can contain + and other special
     # chars that Python's urllib mis-handles. We parse manually and re-encode each part.
     try:
-        _parsed = urlparse(proxy_url)
-        _user   = quote(_parsed.username or "", safe="")
-        _pass   = quote(_parsed.password or "", safe="")
-        _host   = _parsed.hostname or ""
-        _port   = _parsed.port or 6060
-        # Force http:// scheme for the proxy connection itself.
-        # If PROXY_URL uses https:// scheme, requests tries to SSL-connect to the
-        # proxy host — causing HTTPSConnectionPool errors even for plain HTTP
-        # target URLs. The underlying proxy is always HTTP; only the target may
-        # differ. Chrome routes HTTPS traffic via its own local TCP forwarder.
-        _safe_proxy = f"http://{_user}:{_pass}@{_host}:{_port}"
+        # Force http:// and encode '+' in the username. urllib3 treats a raw
+        # '+' as a space and ProxyScrape then closes the connection.
+        _safe_proxy = requests_proxy_url(proxy_url)
         proxies = {"http": _safe_proxy, "https": _safe_proxy}
     except Exception as _parse_err:
         log(f"{tag} Failed to parse proxy URL: {_parse_err}")
@@ -1109,6 +1100,156 @@ def _proxy_country_hint(proxy_url: str) -> str:
     return ""
 
 
+# Language tag → XKB layout. This is the keyboard a phone in that locale uses.
+_KEYBOARD_BY_LANG: dict[str, str] = {
+    "en-us": "us", "en-gb": "gb", "en-ca": "ca", "en-au": "us", "en-nz": "us",
+    "en-in": "in", "en-za": "za", "en-sg": "us", "en-ph": "us", "en-ie": "ie",
+    "de-de": "de", "de-at": "de", "de-ch": "ch",
+    "fr-fr": "fr", "fr-be": "be",
+    "es-es": "es", "es-mx": "latam", "es-ar": "latam", "es-co": "latam",
+    "es-cl": "latam", "es-pe": "latam", "es-ve": "latam",
+    "pt-br": "br", "pt-pt": "pt",
+    "it-it": "it", "nl-nl": "nl", "pl-pl": "pl", "ru-ru": "ru", "tr-tr": "tr",
+    "sv-se": "se", "nb-no": "no", "da-dk": "dk", "fi-fi": "fi",
+    "cs-cz": "cz", "sk-sk": "sk", "ro-ro": "ro", "hu-hu": "hu",
+    "el-gr": "gr", "uk-ua": "ua", "hr-hr": "hr", "bg-bg": "bg",
+    "ja-jp": "jp", "ko-kr": "kr", "zh-cn": "cn", "zh-tw": "tw", "zh-hk": "cn",
+    "th-th": "th", "vi-vn": "vn", "id-id": "id",
+    "ar-sa": "ara", "ar-ae": "ara", "ar-eg": "ara", "ar-ma": "ara",
+    "ar-iq": "ara", "ar-jo": "ara", "ar-kw": "ara",
+    "he-il": "il",
+}
+_KEYBOARD_BY_PRIMARY: dict[str, str] = {
+    "en": "us", "de": "de", "fr": "fr", "es": "es", "pt": "pt", "it": "it",
+    "nl": "nl", "pl": "pl", "ru": "ru", "tr": "tr", "ja": "jp", "ko": "kr",
+    "zh": "cn", "ar": "ara", "th": "th", "vi": "vn", "id": "id",
+}
+
+
+def keyboard_layout_for_language(language: str) -> str:
+    """XKB layout that belongs with this Accept-Language tag."""
+    lang = (language or "en-US").strip().lower().replace("_", "-")
+    if lang in _KEYBOARD_BY_LANG:
+        return _KEYBOARD_BY_LANG[lang]
+    return _KEYBOARD_BY_PRIMARY.get(lang.split("-")[0], "us")
+
+
+def accept_language_for(language: str) -> str:
+    """Accept-Language header for a locale, e.g. en-US → 'en-US,en;q=0.9'."""
+    language = (language or "en-US").strip()
+    primary = language.split("-")[0]
+    if primary.lower() == language.lower():
+        return language
+    return f"{language},{primary};q=0.9"
+
+
+def geo_lookup_ip(ip: str) -> dict | None:
+    """Describe one known exit IP.
+
+    The lookup is direct, not through the proxy, so a rotating gateway cannot
+    answer with a different address than the one Chrome already used.
+    """
+    ip = (ip or "").strip()
+    if not ip or not ip[0].isdigit():
+        return None
+    import requests as req
+    try:
+        r = req.get(
+            "http://ip-api.com/json/"
+            f"{ip}?fields=status,query,country,countryCode,regionName,city,"
+            "timezone,lat,lon,isp,org,as,mobile,proxy,hosting",
+            timeout=12,
+        )
+        d = r.json()
+        if d.get("status") != "success" or not d.get("timezone"):
+            log(f"[geo ip] no timezone for {ip}: {d.get('message', d)}")
+            return None
+        cc = d.get("countryCode") or "US"
+        language = _COUNTRY_LANG.get(cc, "en-US")
+        return {
+            "timezone": d.get("timezone"),
+            "language": language,
+            "countryCode": cc,
+            "lat": float(d.get("lat") or 0),
+            "lon": float(d.get("lon") or 0),
+            "ip": d.get("query") or ip,
+            "city": d.get("city"),
+            "region": d.get("regionName"),
+            "country": d.get("country"),
+            "isp": d.get("isp"),
+            "org": d.get("org"),
+            "as": d.get("as"),
+            "mobile": d.get("mobile"),
+            "proxy": d.get("proxy"),
+            "hosting": d.get("hosting"),
+            "keyboard": keyboard_layout_for_language(language),
+        }
+    except Exception as e:
+        log(f"[geo ip] lookup failed for {ip}: {e}")
+        return None
+
+
+def apply_keyboard_layout(layout: str, display: str | None = None) -> bool:
+    """Point the virtual display's keyboard at the exit IP's locale."""
+    layout = (layout or "").strip()
+    if not layout:
+        return False
+    disp = display or os.environ.get("DISPLAY") or ""
+    cmd = ["setxkbmap", "-layout", layout]
+    if disp:
+        cmd[1:1] = ["-display", disp]
+    try:
+        proc = subprocess.run(cmd, check=False, timeout=5, capture_output=True, text=True)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            log(f"Keyboard layout {layout} not applied: {detail[:160]}")
+            return False
+        log(f"Keyboard layout set → {layout}")
+        return True
+    except FileNotFoundError:
+        log("Keyboard layout skipped — setxkbmap is not installed")
+        return False
+    except Exception as e:
+        log(f"Keyboard layout skipped ({layout}): {e}")
+        return False
+
+
+def read_browser_exit_ip(driver) -> str | None:
+    """Read the IP Chrome itself is using. A separate requests call can rotate."""
+    try:
+        driver.set_page_load_timeout(25)
+        driver.get("https://api.ipify.org?format=json")
+        body = driver.execute_script("return document.body && document.body.innerText || ''") or ""
+        ip = json.loads(body).get("ip")
+        return ip or None
+    except Exception as e:
+        log(f"Chrome exit IP read failed: {e}")
+        return None
+    finally:
+        try:
+            driver.set_page_load_timeout(180)
+        except Exception:
+            pass
+
+
+def lock_fingerprint_to_exit_ip(fp: dict, ip: str | None) -> dict:
+    """Overwrite locale fields so they describe this exact exit IP."""
+    live = geo_lookup_ip(ip or "")
+    if not live:
+        fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-US")
+        return fp
+    for key, value in live.items():
+        if value is not None:
+            fp[key] = value
+    fp["geoLocked"] = True
+    fp["keyboard"] = live.get("keyboard") or keyboard_layout_for_language(fp.get("language") or "en-US")
+    log(
+        f"LOCALE_LOCK ip={fp.get('ip')} tz={fp.get('timezone')} "
+        f"lang={fp.get('language')} keyboard={fp.get('keyboard')} cc={fp.get('countryCode')}"
+    )
+    return fp
+
+
 def get_or_create_fingerprint(
     profile_dir: str,
     proxy: str | None = None,
@@ -1220,6 +1361,8 @@ def get_or_create_fingerprint(
                                 json.dump(existing, f, indent=2)
                         except Exception:
                             pass
+                if reuse_device_snapshot:
+                    _remember_shared_fingerprint(existing, device_index)
                 return existing
         except Exception:
             pass
@@ -1286,7 +1429,28 @@ def get_or_create_fingerprint(
             json.dump(fp, f, indent=2)
     except Exception:
         pass
+    if reuse_device_snapshot:
+        _remember_shared_fingerprint(fp, device_index)
     return fp
+
+
+def _remember_shared_fingerprint(fp: dict, device_index: int | None) -> None:
+    """Publish this fingerprint so the next account, with Fresh off, matches it.
+
+    Device Check writes the same file. Browser Check reads it back, so both
+    surfaces use one device when the user did not ask for a fresh one.
+    """
+    if device_index is None:
+        return
+    try:
+        payload = dict(fp)
+        payload["deviceIndex"] = device_index
+        tmp = DEVICE_FINGERPRINT_SNAPSHOT_PATH + ".browser.tmp"
+        with open(tmp, "w") as handle:
+            json.dump(payload, handle)
+        os.replace(tmp, DEVICE_FINGERPRINT_SNAPSHOT_PATH)
+    except Exception:
+        pass
 
 
 def _webgl_extensions(vendor: str, renderer: str) -> tuple[list[str], list[str]]:
@@ -1402,6 +1566,54 @@ def make_stealth_js(fp: dict) -> str:
     _wgl1, _wgl2 = _webgl_extensions(fp["webglVendor"], fp["webglRenderer"])
     wgl1_js = _json.dumps(_wgl1)
     wgl2_js = _json.dumps(_wgl2)
+    if os.environ.get("FP_WEBGL_ONLY") == "1":
+        # Device-check experiment: only the WebGL Proxy. The rest of this
+        # script's JS lies are what raised Tampering 8 → 16 and Bot 7.
+        return f"""
+(function(){{
+  var _wv='{wv}', _wr='{wr}', _e1={wgl1_js}, _e2={wgl2_js};
+  function _answer(p, gp, ctx){{
+    if(p===37445||p===7936)return _wv;
+    if(p===37446||p===7937)return _wr;
+    if(p===7938)return '{gl_ver}';
+    if(p===35724)return 'OpenGL ES GLSL ES 3.20';
+    if(p===3379||p===34024||p===34076)return 16384;
+    if(p===36348)return 15;
+    if(p===36349)return 224;
+    if(p===36347)return 256;
+    if(p===33901)return new Float32Array([1,511]);
+    if(p===34930)return 8;
+    try{{return gp.call(ctx,p);}}catch(e){{return null;}}
+  }}
+  function _hook(proto){{
+    if(!proto||proto.__fpgc||typeof proto.getContext!=='function')return;
+    var orig=proto.getContext;
+    proto.getContext=function(type){{
+      var ctx=orig.apply(this,arguments);
+      try{{
+        if(ctx&&type&&String(type).indexOf('webgl')!==-1){{
+          var Ctor=(String(type).indexOf('2')!==-1&&window.WebGL2RenderingContext)?WebGL2RenderingContext:WebGLRenderingContext;
+          var extList=Ctor===WebGL2RenderingContext?_e2:_e1;
+          var nativeGP=Ctor.prototype.getParameter;
+          var wrapped=function(p){{return _answer(p,nativeGP,ctx);}};
+          Ctor.prototype.getParameter=function(p){{return _answer(p,nativeGP,this);}};
+          var ge=ctx.getExtension.bind(ctx);
+          return new Proxy(ctx,{{get:function(t,prop){{
+            if(prop==='getParameter')return wrapped;
+            if(prop==='getSupportedExtensions')return function(){{return extList.slice();}};
+            if(prop==='getExtension')return function(name){{if(extList.indexOf(name)===-1)return null;return ge(name);}};
+            var v=t[prop]; return typeof v==='function'?v.bind(t):v;
+          }}}});
+        }}
+      }}catch(e){{}}
+      return ctx;
+    }};
+    try{{Object.defineProperty(proto,'__fpgc',{{value:1}});}}catch(e){{}}
+  }}
+  _hook(HTMLCanvasElement.prototype);
+  if(window.OffscreenCanvas)_hook(OffscreenCanvas.prototype);
+}})();
+"""
     cv   = fp["chromeVersion"]
     cv_major = cv.split(".")[0]   # e.g. "151" — used in UA-CH brands low-entropy array
     av   = fp["androidVersion"]
@@ -1467,10 +1679,10 @@ def make_stealth_js(fp: dict) -> str:
   }}
   _pd('hardwareConcurrency',{fp['hwConcurrency']});
   _pd('deviceMemory',{fp['deviceMemory']});
-  // Also attempt instance-level override for deviceMemory — in Chrome 151 this is
-  // a [SecureContext] attribute; the prototype descriptor may be non-configurable
-  // or the instance own-property may shadow it. Belt-and-suspenders both levels.
-  try{{Object.defineProperty(navigator,'deviceMemory',{{get:function(){{return {fp['deviceMemory']};}},configurable:true,enumerable:true}});}}catch(e){{}}
+  // Do NOT delete maxTouchPoints / deviceMemory here. On Chrome 149 those
+  // accessors are still non-configurable during the first injected script, so
+  // delete succeeds and the redefine fails — leaving maxTouchPoints at 0.
+  // The second script (make_plugins_override_js) applies them after C++ unlocks.
   _pd('cookieEnabled',true);
   _pd('doNotTrack',{dnt_val});
   _pd('maxTouchPoints',{fp['maxTouchPoints']});
@@ -1539,6 +1751,21 @@ def make_stealth_js(fp: dict) -> str:
   _wd('innerHeight',{fp['availH']});
   _wd('outerWidth',{fp['screenW']});
   _wd('outerHeight',{fp['screenH']});
+  // Chrome 149 often keeps innerWidth as a non-configurable own accessor on the
+  // window proxy, so the prototype override never wins. Mirror onto window itself
+  // and visualViewport so outer/inner stay consistent (devtools heuristic).
+  ['innerWidth','outerWidth'].forEach(function(k){{
+    try{{Object.defineProperty(window,k,{{get:function(){{return {fp['screenW']};}},configurable:true}});}}catch(e){{}}
+  }});
+  try{{Object.defineProperty(window,'innerHeight',{{get:function(){{return {fp['availH']};}},configurable:true}});}}catch(e){{}}
+  try{{Object.defineProperty(window,'outerHeight',{{get:function(){{return {fp['screenH']};}},configurable:true}});}}catch(e){{}}
+  try{{
+    if(window.visualViewport){{
+      Object.defineProperty(window.visualViewport,'width',{{get:function(){{return {fp['screenW']};}},configurable:true}});
+      Object.defineProperty(window.visualViewport,'height',{{get:function(){{return {fp['availH']};}},configurable:true}});
+      Object.defineProperty(window.visualViewport,'scale',{{get:function(){{return 1;}},configurable:true}});
+    }}
+  }}catch(e){{}}
 }})();
 // maxTouchPoints, platform, vendor, appVersion now set on Navigator.prototype above
 try{{Object.defineProperty(window.history,'length',{{get:()=>{hist},configurable:true}});}}catch(e){{}}
@@ -1648,9 +1875,7 @@ try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function
       if(p===36347)return 256;          // MAX_VERTEX_UNIFORM_VECTORS (SwiftShader:254, Mali:256)
       if(p===33901)return new Float32Array([1,511]); // ALIASED_POINT_SIZE_RANGE (desktop:[1,8191], mobile:[1,511])
       if(p===34930)return 8;            // STENCIL_BITS (SwiftShader:0, Mali:8)
-      var v=gp.call(this,p);
-      if(typeof v==='number'){{var n=(_phash(p)/65535)*_ws*4-_ws*2;return v+n*Math.sign(v||1);}}
-      return v;
+      return gp.call(this,p);
     }};
     ctx.prototype.getSupportedExtensions=function(){{return extList.slice();}};
     var _origGE=ctx.prototype.getExtension;
@@ -1672,8 +1897,70 @@ try{{Object.defineProperty(Navigator.prototype,'pdfViewerEnabled',{{get:function
     }};
     if(window.__nr){{window.__nr(ctx.prototype.getParameter,'getParameter');window.__nr(ctx.prototype.getSupportedExtensions,'getSupportedExtensions');window.__nr(ctx.prototype.getExtension,'getExtension');window.__nr(ctx.prototype.getShaderPrecisionFormat,'getShaderPrecisionFormat');}}
   }}
-  patch(WebGLRenderingContext,_e1);
-  if(window.WebGL2RenderingContext)patch(WebGL2RenderingContext,_e2);
+  function _answer(p, gp, ctx){{
+    if(p===37445||p===7936)return _wv;
+    if(p===37446||p===7937)return _wr;
+    if(p===7938)return '{gl_ver}';
+    if(p===35724)return 'OpenGL ES GLSL ES 3.20';
+    if(p===3379||p===34024||p===34076)return 16384;
+    if(p===36348)return 15;
+    if(p===36349)return 224;
+    if(p===36347)return 256;
+    if(p===33901)return new Float32Array([1,511]);
+    if(p===34930)return 8;
+    try{{return gp.call(ctx,p);}}catch(e){{return null;}}
+  }}
+  // Chrome reinstalls the native getParameter when the context is created, so
+  // a document-start prototype write is gone by the time fingerprint reads it.
+  // Re-apply after getContext and also return a Proxy (instance property is
+  // non-configurable, so a direct assignment never sticks).
+  function _hookGetContext(ctorProto){{
+    if(!ctorProto||ctorProto.__fpgc)return;
+    var orig=ctorProto.getContext;
+    if(typeof orig!=='function')return;
+    ctorProto.getContext=function(type){{
+      var ctx=orig.apply(this,arguments);
+      try{{
+        if(ctx&&type&&String(type).indexOf('webgl')!==-1){{
+          var Ctor=/webgl2/i.test(String(type))?WebGL2RenderingContext:WebGLRenderingContext;
+          var extList=(Ctor===WebGL2RenderingContext)?_e2:_e1;
+          var gp=Ctor.prototype.getParameter;
+          var nativeGP=gp;
+          Ctor.prototype.getParameter=function(p){{return _answer(p,nativeGP,this);}};
+          if(window.__nr)window.__nr(Ctor.prototype.getParameter,'getParameter');
+          var ge=ctx.getExtension.bind(ctx);
+          var gspf=ctx.getShaderPrecisionFormat&&ctx.getShaderPrecisionFormat.bind(ctx);
+          var wrapped=function(p){{return _answer(p,nativeGP,ctx);}};
+          if(window.__nr)window.__nr(wrapped,'getParameter');
+          return new Proxy(ctx,{{
+            get:function(t,prop){{
+              if(prop==='getParameter')return wrapped;
+              if(prop==='getSupportedExtensions')return function(){{return extList.slice();}};
+              if(prop==='getExtension')return function(name){{
+                if(extList.indexOf(name)===-1)return null;
+                return ge(name);
+              }};
+              if(prop==='getShaderPrecisionFormat')return function(st,pt){{
+                var HF=36338,MF=36337,LF=36336,HI=36341,MI=36340,LI=36339;
+                if(pt===HF)return{{rangeMin:127,rangeMax:127,precision:23}};
+                if(pt===MF||pt===LF)return{{rangeMin:15,rangeMax:15,precision:10}};
+                if(pt===HI)return{{rangeMin:31,rangeMax:30,precision:0}};
+                if(pt===MI||pt===LI)return{{rangeMin:15,rangeMax:14,precision:0}};
+                return gspf?gspf(st,pt):null;
+              }};
+              var v=t[prop];
+              return (typeof v==='function')?v.bind(t):v;
+            }}
+          }});
+        }}
+      }}catch(e){{}}
+      return ctx;
+    }};
+    try{{Object.defineProperty(ctorProto,'__fpgc',{{value:1}});}}catch(e){{}}
+    if(window.__nr)window.__nr(ctorProto.getContext,'getContext');
+  }}
+  _hookGetContext(HTMLCanvasElement.prototype);
+  if(window.OffscreenCanvas)_hookGetContext(OffscreenCanvas.prototype);
 }})();
 (function(){{
   var seed={cs};
@@ -2094,7 +2381,7 @@ try{{
     var _origErr=Error;
     function _PatchedError(){{
       var e=new _origErr(...arguments);
-      if(e.stack)e.stack=e.stack.replace(/\s+at\s+__puppeteer[^\n]*/g,'').replace(/\s+at\s+__selenium[^\n]*/g,'').replace(/\s+at\s+__cdc[^\n]*/g,'');
+      if(e.stack)e.stack=e.stack.replace(/\\s+at\\s+__puppeteer[^\\n]*/g,'').replace(/\\s+at\\s+__selenium[^\\n]*/g,'').replace(/\\s+at\\s+__cdc[^\\n]*/g,'');
       return e;
     }}
     _PatchedError.prototype=_origErr.prototype;
@@ -2262,6 +2549,43 @@ def make_plugins_override_js() -> str:
     });
   } catch(e) {}
 
+  // CDP's console domain invokes property getters on logged objects, which
+  // fingerprint.com treats as "developer tools open". Replace console methods
+  // with no-ops that do not touch their arguments, and label them native.
+  ['log','debug','info','warn','error','table','dir','dirxml','trace'].forEach(function(k){
+    try {
+      var fn = function(){};
+      _reg(fn, k, false);
+      console[k] = fn;
+    } catch(e) {}
+  });
+
+  // Second-pass: these are non-configurable during the first stealth script.
+  // All phone profiles use 5 touch points. chrome.app and Keyboard API are
+  // absent on real Android Chrome; leaving the desktop copies is tampering.
+  try {
+    delete Navigator.prototype.maxTouchPoints;
+    var _tpGet = function(){ return 5; };
+    _reg(_tpGet, 'maxTouchPoints', true);
+    Object.defineProperty(Navigator.prototype, 'maxTouchPoints', {
+      get: _tpGet, configurable: true, enumerable: true
+    });
+  } catch(e) {}
+  try {
+    delete Navigator.prototype.keyboard;
+    delete navigator.keyboard;
+  } catch(e) {}
+  try {
+    if (window.chrome) {
+      delete window.chrome.app;
+      Object.defineProperty(window.chrome, 'app', {
+        get: function(){ return undefined; },
+        configurable: true,
+        enumerable: false
+      });
+    }
+  } catch(e) {}
+
   // ── Clean up __nr ───────────────────────────────────────────────────────────
   // make_stealth_js left window.__nr alive so this script could use it above.
   // Now that registration is complete, delete it so fingerprint.com cannot find
@@ -2298,6 +2622,23 @@ def get_chrome_version(chrome_path: str | None) -> str | None:
         return match.group(1) if match else None
     except Exception:
         return None
+
+
+def requests_proxy_url(proxy_url: str) -> str:
+    """Proxy URL safe for requests/urllib3.
+
+    A raw '+' in the username is a space to urllib3, so ProxyScrape session
+    names that contain '+' get rejected. Percent-encode user and password.
+    """
+    from urllib.parse import urlparse, quote
+    parsed = urlparse(proxy_url)
+    host = parsed.hostname or ""
+    port = parsed.port or 80
+    user = quote(parsed.username or "", safe="")
+    password = quote(parsed.password or "", safe="")
+    if user:
+        return f"http://{user}:{password}@{host}:{port}"
+    return f"http://{host}:{port}"
 
 
 def parse_proxy(proxy_url: str) -> dict | None:
@@ -2523,32 +2864,32 @@ def main():
     # Retrying with the same IP always fails again (IP is already flagged).
     import re as _re
     def _new_session_proxy(proxy_url: str | None) -> str | None:
-        """Replace -session-XXXX in proxy username with a fresh random ID."""
-        if not proxy_url:
+        """Swap the username's sticky session, keeping country and state.
+
+        A saved URL may already end in -session-<id>, and a retry must not
+        stack a second token onto it.
+        """
+        if not proxy_url or "@" not in proxy_url:
             return proxy_url
         new_id = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=8))
-        replaced = _re.sub(r'-session-[a-z0-9]+', f'-session-{new_id}', proxy_url)
-        if replaced == proxy_url:
-            # No existing session tag — try to inject before the colon separator
-            replaced = _re.sub(r'^(https?://[^:]+)', r'\1-session-' + new_id, proxy_url)
-        return replaced
+        matched = _re.match(r'^(https?://)([^:@]+)(.*)$', proxy_url)
+        if not matched:
+            return proxy_url
+        scheme, user, rest = matched.group(1), matched.group(2), matched.group(3)
+        user = _re.sub(r'(?:-session-[A-Za-z0-9]+)+$', '', user)
+        return f"{scheme}{user}-session-{new_id}{rest}"
 
     _blocked_reason = result.get("reason", "")
 
     def _is_retriable(res: dict) -> bool:
-        """Return True if the result is something we should auto-retry with a fresh proxy IP."""
+        """Retry only a crashed Chrome. Google's 'browser may not be secure'
+        page does not change on a second launch, so repeating it only delays
+        the result."""
         st  = res.get("status", "")
         rsn = res.get("reason", "").lower()
-        # Automation blocks
-        if st == "verification_required" and any(x in rsn for x in [
-            "automation detected", "couldn't sign you in", "blocked this browser",
-            "not be secure", "blocked", "rejected",
-        ]):
-            return True
-        # Chrome crash / OOM / spawn failure — retry may succeed with fresh launch slot
         if st == "unknown" and any(x in rsn for x in [
             "chrome launch failed", "oom", "signal", "killed",
-            "failed to spawn", "exit code", "timed out",
+            "failed to spawn", "exit code", "timed out", "chrome crash",
         ]):
             return True
         return False
@@ -2820,8 +3161,9 @@ def check_gmail(
     options.add_argument("--disable-prompt-on-repost")
     options.add_argument(f"--user-agent={MOBILE_UA}")
     options.add_argument("--touch-events=enabled")
-    # Match the fingerprint DPR so window.devicePixelRatio equals screen.dpr
-    options.add_argument(f"--force-device-scale-factor={fp['dpr']}")
+    # DPR comes from Emulation.setDeviceMetricsOverride only. Combining it with
+    # --force-device-scale-factor double-scales innerWidth vs outerWidth, which
+    # fingerprint.com scores as Developer Tools + Tampering.
     # Chrome 151 removed Emulation.setDeviceMemoryOverride CDP command.
     # Use the Chrome flag instead so navigator.deviceMemory reports the correct
     # spoofed value (instead of undefined which is a strong automation signal).
@@ -2937,6 +3279,26 @@ def check_gmail(
 
     log("Chrome launched")
 
+    # Locale follows the IP Chrome is actually using, not the preflight request.
+    # A rotating gateway can hand those two calls different exits.
+    exit_ip = read_browser_exit_ip(driver)
+    if exit_ip:
+        lock_fingerprint_to_exit_ip(fp, exit_ip)
+        apply_keyboard_layout(fp.get("keyboard") or "us", os.environ.get("DISPLAY"))
+        try:
+            with open(os.path.join(profile_dir, "fingerprint.json"), "w") as _locale_fp:
+                json.dump(fp, _locale_fp, indent=2)
+        except Exception as _locale_save_err:
+            log(f"Locale fingerprint save skipped: {_locale_save_err}")
+    else:
+        fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-US")
+        log("Chrome exit IP unread — keeping the preflight locale")
+    if fresh_profile:
+        log(
+            f"FRESH_DEVICE canvas={fp.get('canvasSeed')} profile={profile_dir} "
+            f"tz={fp.get('timezone')} lang={fp.get('language')} keyboard={fp.get('keyboard')}"
+        )
+
     # Inject stealth patches on every new page (fingerprint-specific values)
     try:
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
@@ -3016,7 +3378,7 @@ def check_gmail(
                                {"memory": fp["deviceMemory"]})
         log(f"CDP deviceMemory set → {fp['deviceMemory']} GiB")
     except Exception as e:
-        log(f"CDP deviceMemory warning (non-fatal): {e}")
+        log(f"CDP deviceMemory skipped: {str(e).splitlines()[0][:160]}")
 
     # VM detection fix: Emulation.setUserAgentOverride sets navigator.userAgent and
     # navigator.platform at the CDP emulation layer — deeper than Network.setUserAgentOverride.
@@ -3037,22 +3399,25 @@ def check_gmail(
                     {"brand": "Chromium",      "version": fp["chromeVersion"].split(".")[0]},
                     {"brand": "Google Chrome", "version": fp["chromeVersion"].split(".")[0]},
                 ],
+                "fullVersionList": [
+                    {"brand": "Not(A;Brand",   "version": "8.0.0.0"},
+                    {"brand": "Chromium",      "version": fp["chromeVersion"]},
+                    {"brand": "Google Chrome", "version": fp["chromeVersion"]},
+                ],
                 "fullVersion": fp["chromeVersion"],
                 "platform": "Android",
-                "platformVersion": fp["androidVersion"],
+                "platformVersion": str(fp["androidVersion"]) + ".0.0",
                 "architecture": "",
                 "model": fp["model"],
                 "mobile": True,
                 "bitness": "",
                 "wow64": False,
+                "formFactors": ["Mobile"],
             },
         })
         log(f"CDP Emulation UA override set → platform={fp['platform']} (with userAgentMetadata)")
     except Exception as e:
         log(f"CDP Emulation UA override warning (non-fatal): {e}")
-
-    # Exit IP fetch skipped — each account uses a unique sticky session ID for IP isolation
-    exit_ip = None
 
     _login_result: dict = {}
     try:
@@ -3449,70 +3814,9 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
             time.sleep(0.15)
         return None
 
-    # ── Step 0: Warmup — visit Google homepage first ─────────────────────────
-    # CRITICAL: Without this, Google detects automation at the password step
-    # and silently bounces back to challenge/pwd (no error message).
-    # Root cause: fingerprint needs a real page load to "warm up" before
-    # Google's login flow trusts the session. The warmup MUST:
-    #   1. Wait for the page to be truly interactive (not just nav start)
-    #   2. Do minimal human-like interaction (scroll)
-    #   3. Sleep long enough for JS fingerprinting to execute over proxy
-    # 800–1200ms was too short over proxy — page incomplete → Google detects
-    # automation → bounces back to challenge/pwd → wrongly tagged wrong_password.
-    try:
-        log(f"{email} — Step 0: warmup — building Google session cookies")
-        driver.get("https://www.google.com")
-        # Wait for page fully interactive — proxy latency can take 2-5s
-        _w_deadline = time.time() + 8
-        while time.time() < _w_deadline:
-            try:
-                if driver.execute_script("return document.readyState") == "complete":
-                    break
-            except Exception:
-                pass
-            time.sleep(0.35)
-        rand_sleep(800, 1300)
-        # Accept cookie/privacy consent if Google shows it (common outside US)
-        try:
-            for _btn_sel in [
-                "#L2AGLb", "button.tHlp8d", "[jsname='b3VHJd']",
-                "button[aria-label*='Accept all']", "button[aria-label*='accept']",
-            ]:
-                _btns = driver.find_elements(By.CSS_SELECTOR, _btn_sel)
-                if _btns and _btns[0].is_displayed():
-                    _btns[0].click()
-                    rand_sleep(600, 900)
-                    break
-        except Exception:
-            pass
-        # Real Google search — builds NID, 1P_JAR, SOCS, AEC cookies that
-        # make the subsequent login session look organic, not bot-fresh.
-        try:
-            _search_terms = ["gmail login", "google account", "inbox email", "google news", "youtube"]
-            _term = random.choice(_search_terms)
-            _sbox = driver.find_elements(By.NAME, "q")
-            if _sbox and _sbox[0].is_displayed():
-                for _c in _term:
-                    _sbox[0].send_keys(_c)
-                    time.sleep(random.uniform(0.07, 0.19))
-                rand_sleep(450, 750)
-                _sbox[0].send_keys(Keys.RETURN)
-                rand_sleep(1800, 2800)
-                # Scroll through results like a real user
-                driver.execute_script("window.scrollTo({top: 350, behavior: 'smooth'});")
-                rand_sleep(600, 1000)
-                driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
-                rand_sleep(400, 700)
-                log(f"{email} — Step 0: searched '{_term}', session cookies built")
-        except Exception:
-            pass
-        rand_sleep(700, 1100)
-        log(f"{email} — Step 0: warmup complete")
-    except Exception:
-        pass  # warmup failure is non-fatal — continue anyway
-
-    # ── Step 1: Navigate to Gmail sign-in ────────────────────────────────────
-    log(f"{email} — Step 1: navigating to sign-in page")
+    # Sign-in starts at accounts.google.com. A google.com search before this
+    # added about 20s and did not change Google's answer.
+    log(f"{email} — Opening https://accounts.google.com")
     try:
         driver.get(
             "https://accounts.google.com/v3/signin/identifier"
@@ -3526,8 +3830,8 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         try: shot = screenshot_b64()
         except Exception: pass
         return {
-            "status": "verification_required",
-            "reason": f"Chrome crash during navigation — auto-retrying. ({type(e).__name__}: {str(e)[:150]})",
+            "status": "unknown",
+            "reason": f"Chrome crash while opening accounts.google.com. ({type(e).__name__}: {str(e).splitlines()[0][:150]})",
             "totpCode": totp_code,
             "debugScreenshot": shot,
         }
@@ -3539,7 +3843,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         shot = screenshot_b64()
         return {
             "status": "verification_required",
-            "reason": "Google rejected sign-in (automation detected). Use a residential proxy.",
+            "reason": "Google stopped on accounts.google.com: Couldn't sign you in. This browser or app may not be secure. Password and 2FA did not start.",
             "totpCode": totp_code,
             "debugScreenshot": shot,
         }
@@ -3722,7 +4026,7 @@ def _do_login(driver, email: str, password: str, totp_code: str | None, totp_sec
         shot = screenshot_b64()
         return {
             "status": "verification_required",
-            "reason": "Google rejected sign-in (automation detected). Use a residential proxy.",
+            "reason": "Google stopped on accounts.google.com: Couldn't sign you in. This browser or app may not be secure. Password and 2FA did not start.",
             "totpCode": totp_code,
             "debugScreenshot": shot,
         }
