@@ -274,9 +274,80 @@ def is_google_password_change_url(url: str) -> bool:
     return "signinoptions" in u or u.rstrip("/").endswith("/password")
 
 
-def generate_random_password(length: int = 14) -> str:
-    alphabet = string.ascii_letters + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(length))
+def generate_random_password(min_length: int = 10, max_length: int = 15) -> str:
+    """Random demo password like Dkb78Jz8b5nk — letters + digits, 10–15 chars."""
+    length = secrets.randbelow(max_length - min_length + 1) + min_length
+    lowers = string.ascii_lowercase
+    uppers = string.ascii_uppercase
+    digits = string.digits
+    pool = lowers + uppers + digits
+    chars = [secrets.choice(lowers), secrets.choice(uppers), secrets.choice(digits)]
+    while len(chars) < length:
+        chars.append(secrets.choice(pool))
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
+
+
+def collect_password_fields(driver) -> list:
+    """Visible password inputs, including inside shadow roots (Google Account UI)."""
+    from selenium.webdriver.common.by import By
+
+    found: list = []
+    seen: set[str] = set()
+
+    def add(el) -> None:
+        try:
+            key = el.id or el.get_attribute("name") or str(id(el))
+            if key in seen:
+                return
+            name = (el.get_attribute("name") or "").lower()
+            if name == "hiddenpassword":
+                return
+            if el.is_displayed() and el.is_enabled():
+                seen.add(key)
+                found.append(el)
+        except Exception:
+            pass
+
+    for sel in (
+        'input[type="password"]:not([name="hiddenPassword"])',
+        'input[name="Passwd"]',
+        'input[name="PasswdAgain"]',
+        'input[autocomplete="new-password"]',
+    ):
+        for el in driver.find_elements(By.CSS_SELECTOR, sel):
+            add(el)
+
+    try:
+        for el in driver.execute_script(
+            """
+            const out = [];
+            const seen = new Set();
+            function walk(root) {
+              root.querySelectorAll('input').forEach(el => {
+                const t = (el.getAttribute('type') || '').toLowerCase();
+                if (t !== 'password') return;
+                const name = (el.getAttribute('name') || '').toLowerCase();
+                if (name === 'hiddenpassword') return;
+                const r = el.getBoundingClientRect();
+                if (r.width < 2 || r.height < 2) return;
+                if (seen.has(el)) return;
+                seen.add(el);
+                out.push(el);
+              });
+              root.querySelectorAll('*').forEach(n => {
+                if (n.shadowRoot) walk(n.shadowRoot);
+              });
+            }
+            walk(document);
+            return out;
+            """
+        ) or []:
+            add(el)
+    except Exception:
+        pass
+
+    return found
 
 
 def browser_result_category(result: dict) -> str:
@@ -4006,32 +4077,71 @@ def _do_login(
             return None
 
         new_pw = generate_random_password()
-        log(f"{email} — Password-change page: setting random new password (demo mode)")
+        log(
+            f"{email} — Password-change page: demo mode, random password "
+            f"({len(new_pw)} chars, a-z A-Z 0-9)"
+        )
 
-        def visible_password_fields() -> list:
-            found = []
-            for el in driver.find_elements(By.CSS_SELECTOR, 'input[type="password"]'):
+        def fill_field(el, value: str) -> None:
+            try:
+                touch_click(driver, el)
+                rand_sleep(80, 160)
                 try:
-                    name = (el.get_attribute("name") or "").lower()
-                    if name == "hiddenpassword":
-                        continue
-                    if el.is_displayed() and el.is_enabled():
-                        found.append(el)
+                    el.clear()
                 except Exception:
                     pass
-            return found
+                clipboard_type(driver, el, value)
+            except Exception:
+                driver.execute_script(
+                    """
+                    const el = arguments[0], val = arguments[1];
+                    el.focus();
+                    el.value = val;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    """,
+                    el,
+                    value,
+                )
+
+        def click_submit() -> None:
+            driver.execute_script(
+                """
+                var labels = ['change password', 'save password', 'save', 'next', 'continue', 'done'];
+                var btns = Array.from(document.querySelectorAll('button, [role="button"], div[role="button"]'));
+                for (var label of labels) {
+                    var hit = btns.find(function(b) {
+                        var t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                        return t.indexOf(label) !== -1;
+                    });
+                    if (hit && !hit.disabled) { hit.click(); return true; }
+                }
+                var submit = document.querySelector('button[type="submit"]');
+                if (submit && !submit.disabled) { submit.click(); return true; }
+                return false;
+                """
+            )
+
+        def wait_fields(timeout: float = 18.0) -> list:
+            deadline = time.time() + timeout
+            fields: list = []
+            while time.time() < deadline:
+                fields = collect_password_fields(driver)
+                if fields:
+                    return fields
+                time.sleep(0.35)
+            return fields
 
         try:
-            fields = visible_password_fields()
-            if not fields:
-                rand_sleep(800, 1200)
-                fields = visible_password_fields()
+            rand_sleep(800, 1400)
+            fields = wait_fields()
+            log(f"{email} — password change: found {len(fields)} input(s) on page")
 
             if not fields:
                 shot = screenshot_b64()
                 return {
                     "status": "unknown",
-                    "reason": "Password change page open but no password fields found",
+                    "reason": "Password change page open but no password fields found (try again)",
                     "totpCode": totp_code,
                     "newPassword": new_pw,
                     "debugScreenshot": shot,
@@ -4039,50 +4149,44 @@ def _do_login(
 
             # Google may show current + new + confirm, or only new + confirm.
             if len(fields) >= 3:
-                clipboard_type(driver, fields[0], password)
+                fill_field(fields[0], password)
                 rand_sleep(120, 220)
-                clipboard_type(driver, fields[1], new_pw)
+                fill_field(fields[1], new_pw)
                 rand_sleep(120, 220)
-                clipboard_type(driver, fields[2], new_pw)
+                fill_field(fields[2], new_pw)
             elif len(fields) >= 2:
-                clipboard_type(driver, fields[0], new_pw)
+                fill_field(fields[0], new_pw)
                 rand_sleep(120, 220)
-                clipboard_type(driver, fields[1], new_pw)
+                fill_field(fields[1], new_pw)
             else:
-                clipboard_type(driver, fields[0], new_pw)
+                fill_field(fields[0], new_pw)
 
             rand_sleep(200, 400)
-            driver.execute_script("""
-                var labels = ['change password', 'save password', 'save', 'next', 'continue', 'done'];
-                var btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-                for (var label of labels) {
-                    var hit = btns.find(function(b) {
-                        return b.innerText && b.innerText.trim().toLowerCase().indexOf(label) !== -1;
-                    });
-                    if (hit && !hit.disabled) { hit.click(); return; }
-                }
-                var submit = document.querySelector('button[type="submit"]');
-                if (submit && !submit.disabled) submit.click();
-            """)
-            rand_sleep(2500, 4000)
+            try:
+                fields[-1].send_keys(Keys.ENTER)
+            except Exception:
+                pass
+            rand_sleep(400, 700)
+            click_submit()
+            rand_sleep(3000, 4500)
 
             url_after, text_after = page_state()
             if is_google_password_change_url(url_after):
-                # Sometimes Google asks for current password in a second step.
-                fields2 = visible_password_fields()
+                fields2 = wait_fields(10.0)
+                log(f"{email} — password change retry: {len(fields2)} input(s)")
                 if fields2:
-                    clipboard_type(driver, fields2[0], password)
                     if len(fields2) >= 3:
-                        clipboard_type(driver, fields2[1], new_pw)
-                        clipboard_type(driver, fields2[2], new_pw)
+                        fill_field(fields2[0], password)
+                        fill_field(fields2[1], new_pw)
+                        fill_field(fields2[2], new_pw)
                     elif len(fields2) >= 2:
-                        clipboard_type(driver, fields2[1], new_pw)
+                        fill_field(fields2[0], password)
+                        fill_field(fields2[1], new_pw)
+                    else:
+                        fill_field(fields2[0], new_pw)
                     rand_sleep(200, 400)
-                    driver.execute_script("""
-                        var submit = document.querySelector('button[type="submit"], button');
-                        if (submit && !submit.disabled) submit.click();
-                    """)
-                    rand_sleep(2500, 4000)
+                    click_submit()
+                    rand_sleep(3000, 4500)
                     url_after, text_after = page_state()
 
             if not is_google_password_change_url(url_after):
@@ -4106,13 +4210,19 @@ def _do_login(
             opened = classify(url_after, text_after)
             if opened:
                 opened["newPassword"] = new_pw
-                opened["reason"] = "Login OK — demo password change complete ✅ (export for new password)"
+                opened["reason"] = (
+                    f"Demo password change OK ✅ — naya password table/export mein "
+                    f"({len(new_pw)} chars)"
+                )
                 return opened
 
             shot = screenshot_b64()
             return {
                 "status": "opened",
-                "reason": "Demo password change complete ✅ (export for new password)",
+                "reason": (
+                    f"Demo password change OK ✅ — naya password table/export mein "
+                    f"({len(new_pw)} chars)"
+                ),
                 "totpCode": totp_code,
                 "newPassword": new_pw,
                 "debugScreenshot": shot,
