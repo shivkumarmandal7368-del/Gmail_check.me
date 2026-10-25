@@ -1361,6 +1361,8 @@ def get_or_create_fingerprint(
                                 json.dump(existing, f, indent=2)
                         except Exception:
                             pass
+                if reuse_device_snapshot:
+                    _remember_shared_fingerprint(existing, device_index)
                 return existing
         except Exception:
             pass
@@ -1427,7 +1429,28 @@ def get_or_create_fingerprint(
             json.dump(fp, f, indent=2)
     except Exception:
         pass
+    if reuse_device_snapshot:
+        _remember_shared_fingerprint(fp, device_index)
     return fp
+
+
+def _remember_shared_fingerprint(fp: dict, device_index: int | None) -> None:
+    """Publish this fingerprint so the next account, with Fresh off, matches it.
+
+    Device Check writes the same file. Browser Check reads it back, so both
+    surfaces use one device when the user did not ask for a fresh one.
+    """
+    if device_index is None:
+        return
+    try:
+        payload = dict(fp)
+        payload["deviceIndex"] = device_index
+        tmp = DEVICE_FINGERPRINT_SNAPSHOT_PATH + ".browser.tmp"
+        with open(tmp, "w") as handle:
+            json.dump(payload, handle)
+        os.replace(tmp, DEVICE_FINGERPRINT_SNAPSHOT_PATH)
+    except Exception:
+        pass
 
 
 def _webgl_extensions(vendor: str, renderer: str) -> tuple[list[str], list[str]]:

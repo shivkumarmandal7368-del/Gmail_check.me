@@ -468,9 +468,9 @@ function BrowserChecker() {
   const [proxyText,    setProxyText]    = useState<string>(() => lsGet(LS.proxy, ""));
   const [proxyMode,    setProxyMode]    = useState<"saved" | "custom">(() => lsGet<string>(LS.proxyMode, "saved") === "custom" ? "custom" : "saved");
   const [savedProxy,   setSavedProxy]   = useState<{ configured: boolean; label: string } | null>(null);
-  const [concurrency,  setConcurrency]  = useState<number>(() => lsGet(LS.concurrency, 3));
   const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, false));
   const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
+
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
   const [selectedUnknown, setSelectedUnknown] = useState<Set<string>>(new Set());
   const [total,        setTotal]        = useState<number>(() => lsGet(LS.total, 0));
@@ -518,7 +518,6 @@ function BrowserChecker() {
   useEffect(() => { try { localStorage.setItem(LS.input,       JSON.stringify(inputText));    } catch {} }, [inputText]);
   useEffect(() => { try { localStorage.setItem(LS.proxy,       JSON.stringify(proxyText));    } catch {} }, [proxyText]);
   useEffect(() => { try { localStorage.setItem(LS.proxyMode,   JSON.stringify(proxyMode));    } catch {} }, [proxyMode]);
-  useEffect(() => { try { localStorage.setItem(LS.concurrency, JSON.stringify(concurrency));  } catch {} }, [concurrency]);
   useEffect(() => {
     let cancelled = false;
     fetch("/api/proxy/status")
@@ -844,7 +843,7 @@ function BrowserChecker() {
     return JSON.stringify({
       credentials: creds,
       ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
-      concurrency, freshProfile, deviceIndex,
+      concurrency: 1, freshProfile, deviceIndex,
     });
   };
 
@@ -1015,7 +1014,6 @@ function BrowserChecker() {
     setProxyCheckState("idle");
     setProxyCheckError("");
     setProxyExitIp("");
-    setConcurrency(3);
     setFreshProfile(false);
     setDeviceIndex(0);
   };
@@ -1291,19 +1289,12 @@ function BrowserChecker() {
               )}
             </div>
 
-            {/* Concurrency */}
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground flex items-center gap-1">
-                <Activity className="w-3 h-3" /> Concurrent Threads
-              </label>
-              <div className="flex items-center gap-2">
-                <button onClick={() => setConcurrency(c => Math.max(1, c - 1))} disabled={isChecking || concurrency <= 1}
-                  className="w-8 h-8 rounded border border-border bg-card text-sm font-mono font-bold hover:bg-muted/50 disabled:opacity-30 transition-colors">−</button>
-                <div className="flex-1 text-center font-mono text-lg font-bold text-primary">{concurrency}</div>
-                <button onClick={() => setConcurrency(c => Math.min(10, c + 1))} disabled={isChecking || concurrency >= 10}
-                  className="w-8 h-8 rounded border border-border bg-card text-sm font-mono font-bold hover:bg-muted/50 disabled:opacity-30 transition-colors">+</button>
-              </div>
-              <p className="text-[10px] text-muted-foreground/60 font-mono text-center">{concurrency} browser{concurrency > 1 ? "s" : ""} simultaneously (1–10)</p>
+            <div className="rounded-lg border border-border bg-card/30 p-3 text-[10px] font-mono text-muted-foreground/80 leading-relaxed space-y-1">
+              <p className="uppercase tracking-widest text-foreground/70">Ek ke baad ek</p>
+              <p>Pehla account poora khatam hota hai, uske baad dusra start hota hai.</p>
+              <p>Fresh off: sab accounts Device Check wala same fingerprint use karte hain.</p>
+              <p>Fresh on: agla account naya profile aur naya canvas leta hai. Phone model wahi rehta hai.</p>
+              <p>Saved proxy ki IP 3 minute tak same rehti hai.</p>
             </div>
 
             {/* Fresh device toggle */}
@@ -1339,7 +1330,7 @@ function BrowserChecker() {
                 </div>
               </div>
               <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
-                {freshProfile ? "Naya profile aur naya canvas har run. Timezone, language aur keyboard Chrome ke IP se match honge." : "Same device reuse. Timezone, language aur keyboard Chrome ke IP se match honge."}
+                {freshProfile ? "Pehla khatam, phir agla naya profile aur naya canvas. Phone model yahi selected device rahega. Timezone, language aur keyboard Chrome ke IP se match honge." : "Sab accounts ek hi fingerprint: Device Check ne jo device banaya, wahi. Timezone, language aur keyboard Chrome ke IP se match honge."}
               </p>
             </button>
 
@@ -1504,7 +1495,7 @@ function BrowserChecker() {
             <Progress value={progress} className="h-1 bg-border" />
             {isChecking && (
               <p className="text-[11px] text-muted-foreground/60 font-mono">
-                {concurrency} browser{concurrency > 1 ? "s" : ""} running — tab band karo, kaam nahi rukega 🔒
+                Ek account chal raha hai. Agla uske khatam hone ke baad start hoga.
               </p>
             )}
           </div>
@@ -2170,8 +2161,8 @@ function DeviceChecker() {
         </div>
         <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
           {freshProfile
-            ? "Naya Chrome profile aur naya canvas — purana visitor reuse nahi hoga. Timezone, language aur keyboard us IP par rahenge jo Chrome use kare."
-            : "Same device reuse. Timezone, language aur keyboard phir bhi Chrome ke exit IP se match honge."}
+            ? "Naya Chrome profile aur naya canvas. Browser Check ka Fresh on bhi agle account par yahi naya fingerprint use karega. Timezone, language aur keyboard us IP par rahenge jo Chrome use kare."
+            : "Yahi fingerprint Browser Check use karega jab Fresh off ho. Timezone, language aur keyboard Chrome ke exit IP se match honge."}
         </p>
       </button>
 

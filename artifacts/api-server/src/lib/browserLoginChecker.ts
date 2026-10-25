@@ -127,6 +127,21 @@ function randomSessionId(): string {
   return Math.random().toString(36).slice(2, 10); // e.g. "a3f9k2xb"
 }
 
+/**
+ * Keep a provider sticky session when the URL already has one.
+ * ProxyScrape's static session holds the same exit IP for its window
+ * (3 minutes on the saved proxy). A rotating URL with no session gets
+ * one id for the whole job, so every account in that job shares the IP.
+ */
+function assignJobProxy(proxyUrl: string, jobSessionId: string): { url: string; sessionId: string } {
+  try {
+    const u = new URL(proxyUrl);
+    const existing = u.username.match(/-session-([A-Za-z0-9]+)$/);
+    if (existing) return { url: proxyUrl, sessionId: existing[1] };
+  } catch { /* fall through and pin a new session */ }
+  return { url: injectStickySession(proxyUrl, jobSessionId), sessionId: jobSessionId };
+}
+
 function redactBrowserLog(line: string): string {
   return line
     .replace(
@@ -324,6 +339,10 @@ export async function browserLoginCheck(
   };
   signal?.addEventListener("abort", onAbort, { once: true });
 
+  // One session for the whole queue. Accounts run one after another and keep
+  // the saved proxy's exit IP until that sticky window ends.
+  const jobSessionId = randomSessionId();
+
   const tasks = credentials.map(
     (cred, idx) => async () => {
       // Check abort signal before starting a new account.
@@ -340,12 +359,12 @@ export async function browserLoginCheck(
       }
 
       const baseProxy = getProxy(idx);
-      // Inject a unique sticky-session ID so the entire Chrome login for this
-      // account uses ONE fixed exit IP. Without this, a rotating proxy changes
-      // IP mid-session (between page loads) which Google flags as suspicious.
-      const sessionId = randomSessionId();
-      const assignedProxy = baseProxy ? injectStickySession(baseProxy, sessionId) : undefined;
-      console.log(`[BROWSER] ${cred.email} → proxy slot ${proxies && proxies.length > 0 ? (idx % proxies.length) + 1 : "single"} | session=${sessionId} | fresh=${freshProfile}`);
+      // A saved static session is kept, so the exit IP stays for its 3-minute
+      // window. A rotating URL is pinned once for this whole job.
+      const pinned = baseProxy ? assignJobProxy(baseProxy, jobSessionId) : undefined;
+      const assignedProxy = pinned?.url;
+      const sessionId = pinned?.sessionId;
+      console.log(`[BROWSER] ${cred.email} → proxy slot ${proxies && proxies.length > 0 ? (idx % proxies.length) + 1 : "single"} | session=${sessionId ?? "none"} | fresh=${freshProfile}`);
       // Notify frontend that this account is now actively being checked
       onAccountStart?.(cred.email);
       const result = await checkOneAccount(
@@ -371,7 +390,7 @@ export async function browserLoginCheck(
   );
 
   try {
-    return await runWithConcurrency(tasks, concurrency);
+    return await runWithConcurrency(tasks, 1);
   } finally {
     // Always clean up the abort listener to avoid memory leaks
     signal?.removeEventListener("abort", onAbort);

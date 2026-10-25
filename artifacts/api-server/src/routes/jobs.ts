@@ -43,10 +43,8 @@ router.post("/jobs", (req: Request, res: Response) => {
     return;
   }
 
-  const concurrency =
-    typeof req.body.concurrency === "number"
-      ? Math.max(1, Math.min(10, Math.floor(req.body.concurrency)))
-      : 3;
+  // One Chrome at a time. The next account starts only after this one finishes.
+  const concurrency = 1;
 
   const proxies: string[] = Array.isArray(req.body.proxies)
     ? (req.body.proxies as unknown[])
