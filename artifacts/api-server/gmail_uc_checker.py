@@ -3402,17 +3402,34 @@ def check_gmail(
 
     # Profile directory — wiped on fresh_profile=True so Google sees a brand-new device
     safe_email = email.replace("@", "_at_").replace(".", "_")
-    profile_dir = os.path.join(tempfile.gettempdir(), "gmail_checker_profiles", safe_email)
+    profile_base = os.path.join(tempfile.gettempdir(), "gmail_checker_profiles", safe_email)
 
-    if fresh_profile and os.path.exists(profile_dir):
+    def _profile_dir_writable(path: str) -> bool:
+        try:
+            os.makedirs(path, exist_ok=True)
+            probe = os.path.join(path, ".write_probe")
+            with open(probe, "w", encoding="utf-8") as fh:
+                fh.write("1")
+            os.remove(probe)
+            return True
+        except OSError:
+            return False
+
+    profile_dir = profile_base
+    if fresh_profile and os.path.exists(profile_base):
         import shutil
         try:
-            shutil.rmtree(profile_dir)
-            log(f"Fresh profile mode — wiped {profile_dir}")
+            shutil.rmtree(profile_base)
+            log(f"Fresh profile mode — wiped {profile_base}")
         except Exception as e:
             log(f"Warning: could not wipe profile dir: {e}")
 
-    os.makedirs(profile_dir, exist_ok=True)
+    if not _profile_dir_writable(profile_dir):
+        profile_dir = f"{profile_base}_run_{secrets.token_hex(4)}"
+        os.makedirs(profile_dir, exist_ok=True)
+        log(f"Profile not writable at {profile_base} — using {profile_dir}")
+    else:
+        os.makedirs(profile_dir, exist_ok=True)
 
     log(f"Chrome profile: {profile_dir} (fresh={fresh_profile})")
 
