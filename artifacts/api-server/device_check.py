@@ -606,6 +606,17 @@ except Exception as e:
 log("Waiting 16s for fingerprint widget to fully render...")
 time.sleep(16)
 
+try:
+    _score = driver.execute_script(
+        "var t=document.body&&document.body.innerText||'';"
+        "var m=t.match(/Suspect Score[^\\d]*(\\d+)/i)||t.match(/(\\d+)\\s*\\/\\s*100/);"
+        "return m?m[1]:null;"
+    )
+    if _score:
+        log(f"FINGERPRINT_SUSPECT_SCORE={_score}")
+except Exception:
+    pass
+
 # Screenshot 1 — homepage with score visible
 driver.get_screenshot_as_file("/tmp/dc_1_homepage.png")
 emit_screenshot("/tmp/dc_1_homepage.png", "homepage")
