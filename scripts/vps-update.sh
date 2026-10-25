@@ -50,6 +50,8 @@ _run_as_app "
   eval \"\$(bash scripts/setup-chrome-for-testing.sh)\"
   pnpm --filter @workspace/api-server run build
   PORT=5173 BASE_PATH=/ pnpm --filter @workspace/gmail-checker run build
+  git rev-parse HEAD > .deploy-version
+  git log -1 --oneline | tee -a .deploy-version.log
 "
 
 if [[ "${EUID:-$(id -u)}" -eq 0 ]] || command -v systemctl >/dev/null; then
