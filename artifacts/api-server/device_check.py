@@ -670,7 +670,10 @@ try:
         "uad:navigator.userAgentData&&navigator.userAgentData.mobile,"
         "iw:innerWidth,ih:innerHeight,ow:outerWidth,oh:outerHeight,dpr:devicePixelRatio,"
         "app:!!(window.chrome&&window.chrome.app),kb:('keyboard' in navigator),"
-        "wd:navigator.webdriver});"
+        "wd:navigator.webdriver,tz:Intl.DateTimeFormat().resolvedOptions().timeZone,"
+        "gl:(function(){try{var g=document.createElement('canvas').getContext('webgl');"
+        "var e=g.getExtension('WEBGL_debug_renderer_info');"
+        "return g.getParameter(e.UNMASKED_RENDERER_WEBGL);}catch(err){return String(err);}})()});"
     )
     log(f"PAGE_DIAG {_page}")
 except Exception as _e:
