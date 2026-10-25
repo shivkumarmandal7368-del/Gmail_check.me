@@ -3149,6 +3149,7 @@ def main():
     proxy_for_ip_check = data.get("proxyForIpCheck") or proxy  # original URL without sticky suffix
     fresh_profile     = bool(data.get("freshProfile", False))
     change_password   = bool(data.get("changePasswordAfterLogin", False))
+    sign_out_sessions = bool(data.get("signOutSessions", False))
     raw_device_index  = data.get("deviceIndex")
     device_index      = (
         int(raw_device_index)
@@ -3160,6 +3161,7 @@ def main():
     result = check_gmail(
         email, password, totp_secret, proxy, fresh_profile,
         proxy_for_ip_check, device_index, change_password,
+        sign_out_sessions,
     )
 
     # Auto-retry up to 3 times if Google blocked automation detection.
@@ -3368,6 +3370,7 @@ def check_gmail(
     proxy_for_ip_check: str | None = None,
     device_index: int | None = None,
     change_password_after_login: bool = False,
+    sign_out_sessions: bool = False,
 ) -> dict:
     totp_code = generate_totp(totp_secret) if totp_secret else None
 
@@ -3739,6 +3742,7 @@ def check_gmail(
         _login_result = _do_login(
             driver, email, password, totp_code, totp_secret, fresh_profile,
             change_password_after_login,
+            sign_out_sessions,
         )
 
         # ── Post-login geo fallback (driver still open here!) ──────────────────
@@ -3852,6 +3856,7 @@ def _do_login(
     totp_secret: str | None = None,
     fresh_profile: bool = False,
     change_password_after_login: bool = False,
+    sign_out_sessions: bool = False,
 ) -> dict:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
@@ -4867,9 +4872,10 @@ def _do_login(
               return (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
             }
             function ok(t) {
-              if (!t || t.length > 24) return false;
+              if (!t || t.length > 48) return false;
               if (t.indexOf('find device') !== -1 || t.indexOf('signed out') !== -1) return false;
-              return t === 'sign out' || t === 'sign out device';
+              if (t.indexOf('sign out of other') !== -1) return false;
+              return t === 'sign out' || t === 'sign out device' || t.indexOf('sign out') === 0;
             }
             function walk(root) {
               var best = null;
@@ -4944,73 +4950,168 @@ def _do_login(
         except Exception as exc:
             log(f"{email} — desktop layout warning: {exc}")
 
+    def _still_signed_in() -> bool:
+        try:
+            url = (driver.current_url or "").lower()
+        except Exception:
+            return True
+        if any(part in url for part in ("servicelogin", "/signin", "logout", "signout")):
+            return False
+        return "myaccount.google.com" in url or "mail.google.com" in url
+
+    def _tap_profile_sign_out() -> bool:
+        """Click Sign out / Sign out of all accounts, including the account iframe."""
+        def hunt() -> bool:
+            hit = driver.execute_script(
+                """
+                function norm(raw) {
+                  return (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                }
+                function walk(root) {
+                  var best = null;
+                  var nodes = root.querySelectorAll(
+                    'a, button, [role="button"], [role="menuitem"], [role="link"]');
+                  for (var i = 0; i < nodes.length; i++) {
+                    var el = nodes[i];
+                    var href = ((el.getAttribute('href') || '') + ' ' + (el.href || '')).toLowerCase();
+                    var t = norm(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+                    var logout = href.indexOf('/logout') !== -1;
+                    var label = t === 'sign out' || t === 'sign out device'
+                      || t.indexOf('sign out of all') === 0;
+                    if (!logout && !label) continue;
+                    if (t.indexOf('signed out') !== -1) continue;
+                    var r = el.getBoundingClientRect();
+                    if (r.width < 2 || r.height < 2) continue;
+                    var score = (label ? 10 : 0) + (logout ? 5 : 0);
+                    if (!best || score > best.score) {
+                      best = {el: el, href: el.href || '', t: t.slice(0, 60), score: score};
+                    }
+                  }
+                  var kids = root.querySelectorAll('*');
+                  for (var k = 0; k < kids.length; k++) {
+                    if (!kids[k].shadowRoot) continue;
+                    var sub = walk(kids[k].shadowRoot);
+                    if (sub && (!best || sub.score > best.score)) best = sub;
+                  }
+                  return best;
+                }
+                var hit = walk(document);
+                if (hit) { try { hit.el.scrollIntoView({block:'center'}); } catch (e) {} }
+                return hit;
+                """
+            )
+            if not isinstance(hit, dict) or hit.get("el") is None:
+                return False
+            href = str(hit.get("href") or "")
+            if not _trusted_tap(hit["el"]):
+                if "logout" not in href.lower():
+                    return False
+            time.sleep(0.8)
+            if href and "logout" in href.lower() and _still_signed_in():
+                try:
+                    driver.get(href)
+                except Exception:
+                    return False
+            return True
+
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        if hunt():
+            return True
+        frames = driver.find_elements(
+            By.CSS_SELECTOR,
+            "iframe[name='account'], iframe[src*='SignOutOptions'], iframe[src*='accounts.google.com'], iframe",
+        )
+        for frame in frames:
+            try:
+                driver.switch_to.default_content()
+                driver.switch_to.frame(frame)
+                if hunt():
+                    driver.switch_to.default_content()
+                    return True
+            except Exception:
+                pass
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+        return False
+
     def sign_out_via_profile_icon() -> bool:
-        """Header profile photo → Sign out. This is the current browser session."""
+        """Top-right profile photo → Sign out. This ends the current browser session."""
         avatar = driver.execute_script(
             """
-            function walk(root) {
-              var nodes = root.querySelectorAll('a, button, [role="button"]');
+            function walk(root, acc) {
+              var nodes = root.querySelectorAll('a, button, [role="button"], img');
               for (var i = 0; i < nodes.length; i++) {
                 var el = nodes[i];
-                var aria = ((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '')).toLowerCase();
-                var text = (el.innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                var href = (el.getAttribute('href') || '').toLowerCase();
-                var r = el.getBoundingClientRect();
-                if (r.width < 8 || r.height < 8 || r.top > 140) continue;
-                if (text === 'account' || aria.indexOf('google account') !== -1
-                    || aria.indexOf('account menu') !== -1 || href.indexOf('signoutoptions') !== -1) {
-                  return el;
-                }
+                var clickable = el.closest('a, button, [role="button"]') || el;
+                var aria = ((clickable.getAttribute('aria-label') || '') + ' '
+                  + (clickable.getAttribute('title') || '') + ' '
+                  + (el.getAttribute('alt') || '')).toLowerCase();
+                var text = (clickable.innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                var href = ((clickable.getAttribute('href') || '') + ' ' + (clickable.href || '')).toLowerCase();
+                var r = clickable.getBoundingClientRect();
+                if (r.width < 8 || r.height < 8 || r.top > 160) continue;
+                var onRight = r.left > (window.innerWidth * 0.55);
+                var signout = href.indexOf('signoutoptions') !== -1;
+                var accountBtn = aria.indexOf('google account') !== -1
+                  || aria.indexOf('account menu') !== -1
+                  || (onRight && (text === 'account' || aria.indexOf('account') !== -1));
+                if (!signout && !accountBtn) continue;
+                if (!onRight && !signout) continue;
+                var score = (signout ? 200 : 0) + (aria.indexOf('google account') !== -1 ? 80 : 0)
+                  + (onRight ? 40 : 0) + r.right;
+                acc.push({el: clickable, score: score});
               }
               var kids = root.querySelectorAll('*');
               for (var k = 0; k < kids.length; k++) {
                 if (!kids[k].shadowRoot) continue;
-                var sub = walk(kids[k].shadowRoot);
-                if (sub) return sub;
+                walk(kids[k].shadowRoot, acc);
               }
-              return null;
+              return acc;
             }
-            return walk(document);
+            var found = walk(document, []);
+            if (!found.length) return null;
+            found.sort(function(a, b) { return b.score - a.score; });
+            try { found[0].el.scrollIntoView({block:'center'}); } catch (e) {}
+            return found[0].el;
             """
         )
-        if avatar is None or not _trusted_tap(avatar):
-            log(f"{email} — profile icon not found")
+        opened_menu = avatar is not None and _trusted_tap(avatar)
+        if opened_menu:
+            log(f"{email} — opened profile menu")
+        else:
+            log(f"{email} — profile icon not found, opening Sign out page")
+        deadline = time.time() + (6.0 if opened_menu else 0.2)
+        while time.time() < deadline:
+            if _tap_profile_sign_out():
+                time.sleep(1.0)
+                if not _still_signed_in():
+                    log(f"{email} — profile menu: Sign out")
+                    return True
+                log(f"{email} — Sign out tapped, confirming")
+                if _tap_profile_sign_out() and not _still_signed_in():
+                    log(f"{email} — profile menu: Sign out")
+                    return True
+            time.sleep(0.4)
+        try:
+            driver.switch_to.default_content()
+            driver.get("https://accounts.google.com/SignOutOptions?hl=en&continue=https://myaccount.google.com/device-activity")
+            time.sleep(1.2)
+        except Exception as exc:
+            log(f"{email} — SignOutOptions warning: {exc}")
             return False
-        log(f"{email} — opened profile menu")
-        for _try in range(5):
-            time.sleep(0.45)
-            if _tap_sign_out_button():
-                log(f"{email} — profile menu: Sign out")
+        if _tap_profile_sign_out():
+            time.sleep(1.0)
+            if _still_signed_in():
+                _tap_profile_sign_out()
+                time.sleep(0.8)
+            if not _still_signed_in():
+                log(f"{email} — Sign out page: current session signed out")
                 return True
-            frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
-            for frame in frames:
-                try:
-                    driver.switch_to.frame(frame)
-                    if _tap_sign_out_button():
-                        log(f"{email} — profile menu: Sign out")
-                        driver.switch_to.default_content()
-                        return True
-                    logout = driver.execute_script(
-                        """
-                        var nodes = document.querySelectorAll('a, button, [role="button"], [role="menuitem"]');
-                        for (var i = 0; i < nodes.length; i++) {
-                          var href = (nodes[i].getAttribute('href') || '').toLowerCase();
-                          var t = (nodes[i].innerText || '').toLowerCase();
-                          if (href.indexOf('logout') !== -1 || t === 'sign out') return nodes[i];
-                        }
-                        return null;
-                        """
-                    )
-                    if logout is not None and _trusted_tap(logout):
-                        log(f"{email} — profile menu: Sign out")
-                        driver.switch_to.default_content()
-                        return True
-                except Exception:
-                    pass
-                try:
-                    driver.switch_to.default_content()
-                except Exception:
-                    pass
         log(f"{email} — Sign out not in profile menu")
         return False
 
@@ -5303,26 +5404,43 @@ def _do_login(
         if not signed_self:
             log(f"{email} — profile menu missed, using logout URL")
             try:
-                driver.get("https://accounts.google.com/Logout?continue=https://myaccount.google.com/")
-                rand_sleep(400, 700)
+                driver.get("https://accounts.google.com/Logout?continue=https://accounts.google.com/ServiceLogin")
+                rand_sleep(700, 1100)
+                _tap_profile_sign_out()
+                time.sleep(0.6)
             except Exception as _le:
                 log(f"{email} — Logout URL warning: {_le}")
+        try:
+            log(f"{email} — after self sign-out url: {(driver.current_url or '')[:90]}")
+        except Exception:
+            pass
 
         handle_totp_if_prompted("Self sign-out TOTP", max_rounds=2, quick=True)
         shot = screenshot_b64()
-        return {
-            "status": "opened",
-            "reason": (
+        same_password = sign_out_sessions and not change_password_after_login
+        if same_password:
+            reason = (
+                f"Current session signed out ✅ "
+                f"({signed_out_count} other device sign-outs; types seen: "
+                f"{', '.join(kinds_seen_sorted) or 'none'})"
+            )
+        else:
+            reason = (
                 f"Demo password + saare devices signed out ✅ "
                 f"({signed_out_count} sign-outs; types seen: "
                 f"{', '.join(kinds_seen_sorted) or 'none'}; "
                 f"signed out: {', '.join(f'{k}×{v}' for k, v in sorted(kinds_done.items())) or 'none'}; "
                 f"naya password export — {len(new_pw)} chars)"
-            ),
+            )
+        result_payload = {
+            "status": "opened",
+            "reason": reason,
             "totpCode": totp_code,
-            "newPassword": new_pw,
             "debugScreenshot": shot,
         }
+        if not same_password:
+            result_payload["newPassword"] = new_pw
+        return result_payload
 
     def complete_password_change_if_needed(current_url: str) -> dict | None:
         """College demo: fill random new password on myaccount signinoptions/password."""
@@ -6711,6 +6829,10 @@ def _do_login(
     _password_change_result = complete_password_change_if_needed(url)
     if _password_change_result:
         return _password_change_result
+
+    if sign_out_sessions and (signed_in_host(url) or "myaccount.google.com" in url):
+        log(f"{email} — sign out remaining sessions, password stays the same")
+        return run_device_activity_signouts(password)
 
     result = classify(url, text)
     if result:
