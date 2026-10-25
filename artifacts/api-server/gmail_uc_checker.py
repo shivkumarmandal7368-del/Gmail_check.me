@@ -5249,13 +5249,6 @@ def _do_login(
                 pass
             sign_out_label = click_sign_out_ready()
             if not sign_out_label:
-                log(f"{email} — Sign out not found — next device")
-                wait_auto_back_to_list()
-                if attempts[key] >= 2:
-                    done_hrefs.add(key)
-                continue
-
-            if not sign_out_label:
                 try:
                     driver.execute_script("window.scrollTo(0, 700);")
                 except Exception:
