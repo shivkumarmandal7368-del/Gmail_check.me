@@ -103,11 +103,18 @@ journalctl -u vanguard-api -f
 journalctl -u vanguard-web -f
 ```
 
-Restart after code update:
+Restart after code update (sirf Vanguard — nginx / doosre projects touch nahi):
 
 ```bash
 cd /home/vanguard/vanguard-mx
-git pull
+sudo bash scripts/vps-update.sh
+```
+
+Manual equivalent:
+
+```bash
+cd /home/vanguard/vanguard-mx
+git pull origin main
 pnpm install --frozen-lockfile
 pnpm --filter @workspace/api-server run build
 pnpm --filter @workspace/gmail-checker run build
