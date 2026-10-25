@@ -4858,10 +4858,11 @@ def _do_login(
         return_to_device_list()
         return True
 
-    def _tap_sign_out_button() -> str:
-        """Trusted tap on Sign out. Skips Find device and already-signed-out rows."""
+    def _tap_sign_out_button(dialog_only: bool = False) -> str:
+        """Trusted tap on Sign out. Dialog confirm is separate from the page button."""
         hit = driver.execute_script(
             """
+            var dialogOnly = arguments[0] === true;
             function norm(raw) {
               return (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
             }
@@ -4872,12 +4873,14 @@ def _do_login(
             }
             function walk(root) {
               var best = null;
-              var nodes = root.querySelectorAll('button, a, [role="button"], [role="link"], [role="menuitem"], span');
+              var nodes = root.querySelectorAll(
+                'button, a, [role="button"], [role="link"], [role="menuitem"], [jsaction], span, div');
               for (var i = 0; i < nodes.length; i++) {
                 var node = nodes[i];
                 var t = norm(node.innerText || node.textContent || '');
                 if (!ok(t)) continue;
-                var clickable = node.closest('button, a, [role="button"], [role="link"], [role="menuitem"]') || node;
+                var clickable = node.closest(
+                  'button, a, [role="button"], [role="link"], [role="menuitem"], [jsaction]') || node;
                 var r = clickable.getBoundingClientRect();
                 if (r.width < 2 || r.height < 2) continue;
                 if (!best || t.length < best.len) best = {el: clickable, len: t.length, t: t};
@@ -4890,10 +4893,23 @@ def _do_login(
               }
               return best;
             }
-            var hit = walk(document);
+            var roots = [];
+            if (dialogOnly) {
+              roots = Array.from(document.querySelectorAll(
+                '[role="dialog"], [role="alertdialog"], [aria-modal="true"]'));
+              if (!roots.length) return null;
+            } else {
+              roots = [document];
+            }
+            var hit = null;
+            for (var i = 0; i < roots.length; i++) {
+              hit = walk(roots[i]);
+              if (hit) break;
+            }
             if (hit) { try { hit.el.scrollIntoView({block:'center'}); } catch (e) {} }
             return hit;
-            """
+            """,
+            dialog_only,
         )
         if not isinstance(hit, dict) or hit.get("el") is None:
             return ""
@@ -5096,18 +5112,21 @@ def _do_login(
             return path[idx:].rstrip("/")
 
         def wait_auto_back_to_list() -> bool:
-            """Confirm the dialog once, then wait for Google to return to the list."""
+            """Confirm the Sign out dialog, then wait. Back() cancels an open dialog."""
             confirmed = False
-            deadline = time.time() + 5.0
+            deadline = time.time() + 7.0
             while time.time() < deadline:
                 if _device_url_kind() == "list":
                     return True
-                if not confirmed and _tap_sign_out_button():
-                    confirmed = True
-                    time.sleep(0.35)
-                    continue
-                time.sleep(0.2)
-            if _device_url_kind() == "detail":
+                if not confirmed:
+                    label = _tap_sign_out_button(dialog_only=True)
+                    if label:
+                        confirmed = True
+                        log(f"{email} — confirmed sign-out dialog")
+                        time.sleep(0.5)
+                        continue
+                time.sleep(0.25)
+            if _device_url_kind() == "detail" and not confirmed:
                 try:
                     driver.back()
                 except Exception:
@@ -5183,6 +5202,31 @@ def _do_login(
                     done_hrefs.add(key)
                 continue
             log(f"{email} — opened device: {device_label[:80]}")
+            try:
+                labels = driver.execute_script(
+                    """
+                    var out = [];
+                    function walk(root) {
+                      var nodes = root.querySelectorAll('button, a, [role="button"]');
+                      for (var i = 0; i < nodes.length; i++) {
+                        var t = (nodes[i].innerText || '').replace(/\\s+/g, ' ').trim();
+                        if (!t || t.length > 32) continue;
+                        var r = nodes[i].getBoundingClientRect();
+                        if (r.width < 2 || r.height < 2) continue;
+                        if (out.indexOf(t) === -1) out.push(t);
+                      }
+                      var kids = root.querySelectorAll('*');
+                      for (var k = 0; k < kids.length; k++) {
+                        if (kids[k].shadowRoot) walk(kids[k].shadowRoot);
+                      }
+                    }
+                    walk(document);
+                    return out.slice(0, 10);
+                    """
+                )
+                log(f"{email} — detail buttons: {labels}")
+            except Exception:
+                pass
             sign_out_label = click_sign_out_ready()
             if not sign_out_label:
                 log(f"{email} — Sign out not found — next device")
