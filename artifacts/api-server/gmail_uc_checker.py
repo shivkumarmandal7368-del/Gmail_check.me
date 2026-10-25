@@ -4766,85 +4766,63 @@ def _do_login(
                 "newPassword": new_pw,
                 "debugScreenshot": shot,
             }
-        collect_active_device_sessions(thorough=True)
-
+        done_hrefs: set[str] = set()
         signed_out_count = 0
-        idle_passes = 0
         kinds_done: dict[str, int] = {}
         kinds_seen: set[str] = set()
 
-        # One device-activity URL load → click device → sign out → back → next (no re-get loop)
-        for _round in range(40):
-            if _device_url_kind() != "list":
+        # Each device once, then account logout. Google often keeps the row
+        # looking active (especially this browser), so never re-click the same href.
+        for _round in range(12):
+            if _device_url_kind() != "list" and not return_to_device_list():
                 if not ensure_device_activity_list("Device list"):
-                    idle_passes += 1
-                    if idle_passes >= 3:
-                        break
-                    continue
+                    break
 
             if all_devices_signed_out_on_page():
                 log(f"{email} — all devices show signed out on list")
                 break
 
-            sessions = collect_active_device_sessions()
+            sessions = collect_active_device_sessions(thorough=(_round == 0))
             for s in sessions:
                 kinds_seen.add(s.get("kind") or "session")
-            kinds_on_page = sorted({s.get("kind", "session") for s in sessions})
+            pending = [s for s in sessions if (s.get("href") or "") not in done_hrefs]
             log(
                 f"{email} — sessions on page: {len(sessions)} active, "
-                f"kinds={kinds_on_page}"
+                f"{len(pending)} not yet signed out, "
+                f"kinds={sorted({s.get('kind', 'session') for s in sessions})}"
             )
+            if not pending:
+                log(f"{email} — each listed device signed out once — going to account logout")
+                break
 
-            if not sessions:
-                idle_passes += 1
-                log(f"{email} — no active device row (idle {idle_passes}/3)")
-                if idle_passes >= 3:
-                    break
-                ensure_device_activity_list("Device list refresh")
-                rand_sleep(400, 600)
-                continue
-
-            idle_passes = 0
-            target = sessions[0]
+            target = pending[0]
+            href = target.get("href") or ""
             kind = target.get("kind") or "session"
+            done_hrefs.add(href)
             device_label = open_device_session(target)
             if not device_label:
                 return_to_device_list()
                 continue
             log(f"{email} — opened device: {device_label[:80]}")
-            rand_sleep(650, 950)
-            handle_totp_if_prompted("Device detail", max_rounds=2, quick=True)
+            rand_sleep(450, 700)
+            handle_totp_if_prompted("Device detail", max_rounds=1, quick=True)
 
             sign_out_label = click_sign_out_on_device_detail()
             if not sign_out_label:
-                log(f"{email} — Sign out not found on detail — back to list")
+                log(f"{email} — Sign out not found on detail — next device")
                 return_to_device_list()
                 continue
 
             signed_out_count += 1
             kinds_done[kind] = kinds_done.get(kind, 0) + 1
             log(f"{email} — device sign-out #{signed_out_count} [{kind}]: {sign_out_label}")
-            rand_sleep(300, 500)
-            confirm_device_dialog()
             rand_sleep(250, 400)
             confirm_device_dialog()
-            handle_totp_if_prompted("After sign out", max_rounds=2, quick=True)
+            rand_sleep(200, 350)
+            confirm_device_dialog()
             if not return_to_device_list():
-                log(f"{email} — back missed list — opening device activity again")
                 ensure_device_activity_list("After sign out")
-            rand_sleep(400, 650)
-
-        ensure_device_activity_list("Before self sign-out")
-
-        if not all_devices_signed_out_on_page():
-            log(f"{email} — signing out remaining device(s) via detail page")
-            for _ in range(5):
-                if all_devices_signed_out_on_page():
-                    break
-                if not sign_out_current_device_from_list():
-                    break
-        else:
-            log(f"{email} — list already all signed out — logging out browser session")
+            rand_sleep(250, 400)
 
         kinds_seen_sorted = sorted(kinds_seen)
         log(
