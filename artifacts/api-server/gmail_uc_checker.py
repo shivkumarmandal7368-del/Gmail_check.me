@@ -1366,6 +1366,33 @@ def _phone_proxy_fast(proxy_url: str | None) -> bool:
     return "localtonet" in low or _proxy_implies_india(proxy_url)
 
 
+def _login_fast_mode(proxy_url: str | None) -> bool:
+    """Shorter human-like delays on phone proxy (CHECK_FAST_LOGIN=1 default)."""
+    if not _phone_proxy_fast(proxy_url):
+        return False
+    mode = os.environ.get("CHECK_FAST_LOGIN", "1").strip().lower()
+    return mode not in ("0", "false", "no", "off")
+
+
+def _login_pace(proxy_url: str | None) -> dict:
+    fast = _login_fast_mode(proxy_url)
+    return {
+        "fast": fast,
+        "post_nav": (120, 280) if fast else (600, 1000),
+        "medium": (200, 400) if fast else (700, 1200),
+        "totp_after": (200, 350) if fast else (700, 1200),
+        "totp_clear": (250, 450) if fast else (900, 1400),
+        "signed_in": (80, 160) if fast else (400, 700),
+        "totp_wait_s": 16 if fast else 30,
+        "totp_poll_s": 0.2 if fast else 0.5,
+        "2fa_totp_wait": 8 if fast else 18,
+        "skip_logout": fast,
+        "rc_pre_click": (250, 500) if fast else (1200, 2200),
+        "rc_poll_s": 0.2 if fast else 0.4,
+        "rc_wait_s": 6 if fast else 10,
+    }
+
+
 def _geo_cache_ttl() -> int:
     try:
         return max(30, min(600, int(os.environ.get("GEO_CACHE_SECONDS", "180"))))
@@ -3503,6 +3530,11 @@ def main():
     result["category"] = browser_result_category(result)
     result["durationMs"] = int((time.time() - _t0) * 1000)
     log(f"{email} — Total duration: {result['durationMs']}ms ({result['durationMs']//1000}s)")
+    if result["durationMs"] >= 45000:
+        log(
+            f"{email} — Slow check tip: sign-in nav + LocalToNet proxy dominate; "
+            "phone mode skips warmup/ipify; PHONE_WARMUP=1 only if captcha badho"
+        )
     print(json.dumps(result), flush=True)
 
 
@@ -3945,6 +3977,8 @@ def check_gmail(
     # Phone/LocalToNet: preflight already locked geo + IP — skip 3–8s ipify tab loads.
     if _phone_fast and fp.get("geoLocked") and fp.get("ip"):
         exit_ip = str(fp["ip"])
+        if not fp.get("keyboard"):
+            fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-IN")
         apply_keyboard_layout(fp.get("keyboard") or "in", os.environ.get("DISPLAY"))
         log(
             f"LOCALE_LOCK ip={exit_ip} tz={fp.get('timezone')} lang={fp.get('language')} "
@@ -4243,8 +4277,19 @@ def _do_login(
         _timing_marks.append((label, ms))
         log(f"[timing +{ms}ms] {label}")
 
-    _phone_fast = _phone_proxy_fast(proxy_url)
-    _post_nav_sleep = (150, 350) if _phone_fast else (600, 1000)
+    def _log_login_timing_summary() -> None:
+        if len(_timing_marks) < 2:
+            return
+        parts = []
+        prev = 0
+        for label, ms in _timing_marks:
+            parts.append(f"{label}={ms - prev}ms")
+            prev = ms
+        log(f"[timing summary login] " + " | ".join(parts))
+
+    _pace = _login_pace(proxy_url)
+    _phone_fast = _pace["fast"]
+    _post_nav_sleep = _pace["post_nav"]
     _use_warmup = not robot_check_only and (
         not _phone_fast
         or os.environ.get("PHONE_WARMUP", "").strip().lower() in ("1", "true", "yes")
@@ -4301,16 +4346,18 @@ def _do_login(
 
         # Signed-in Google Account home is the success page. The inbox is not required.
         if signed_in_host(url):
-            rand_sleep(400, 700)
+            rand_sleep(*_pace["signed_in"])
             shot = screenshot_b64()
             log("Google account home loaded — login successful")
-            if fresh_profile:
+            if fresh_profile and not _pace["skip_logout"]:
                 try:
                     log("Logging out (fresh profile mode)")
                     driver.get("https://accounts.google.com/Logout?continue=https://myaccount.google.com/")
-                    rand_sleep(700, 1200)
+                    rand_sleep(*_pace["medium"])
                 except Exception as _le:
                     log(f"Logout warning (non-fatal): {_le}")
+            elif fresh_profile:
+                log("Fast login: skip logout (~10s saved; profile wiped on next fresh check anyway)")
             else:
                 log("Account home open — keeping session (same-device mode, no logout)")
             return {
@@ -4346,14 +4393,16 @@ def _do_login(
             # When fresh_profile=False we keep the session alive so Google sees a
             # returning known device on the next check — immediate login+logout on a
             # "new" device every run is what triggers account flags after 2-3 days.
-            if fresh_profile:
+            if fresh_profile and not _pace["skip_logout"]:
                 try:
                     log("Mailbox opened — logging out (fresh profile mode)")
                     driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
-                    rand_sleep(700, 1200)
+                    rand_sleep(*_pace["medium"])
                     log("Logout complete")
                 except Exception as _le:
                     log(f"Logout warning (non-fatal): {_le}")
+            elif fresh_profile:
+                log("Fast login: skip mailbox logout")
             else:
                 log("Mailbox opened — keeping session (same-device mode, no logout)")
             return {
@@ -4658,7 +4707,7 @@ def _do_login(
             log(f"{email} — {pause_label} page round {round_i + 1}/{max_rounds}")
             if not enter_fresh_totp_once(f"{pause_label} round {round_i + 1}"):
                 return
-            rand_sleep(900, 1400)
+            rand_sleep(*_pace["totp_clear"])
 
     def handle_totp_if_prompted(
         label: str, max_rounds: int = 4, *, quick: bool = False
@@ -6195,16 +6244,18 @@ def _do_login(
                 "totpCode": totp_code,
                 "debugScreenshot": shot,
             }
-        clear_totp_pages(max_rounds=2, pause_label=f"{start_label} extra")
-        rand_sleep(700, 1200)
-        deadline = time.time() + 35
+        clear_totp_pages(max_rounds=1 if _pace["fast"] else 2, pause_label=f"{start_label} extra")
+        rand_sleep(*_pace["totp_after"])
+        deadline = time.time() + _pace["totp_wait_s"]
         while time.time() < deadline:
             url = driver.current_url
             if signed_in_host(url) or is_google_password_change_url(url):
                 break
+            if "gds.google.com" in url:
+                break
             if is_totp_challenge_url(url):
                 enter_fresh_totp_once("TOTP while waiting")
-                rand_sleep(700, 1200)
+                rand_sleep(*_pace["totp_after"])
                 continue
             if "signin/continue" in url:
                 try:
@@ -6214,7 +6265,7 @@ def _do_login(
                     """)
                 except Exception:
                     pass
-            time.sleep(0.45)
+            time.sleep(_pace["totp_poll_s"])
         url, text = page_state()
         _pc = complete_password_change_if_needed(url)
         if _pc:
@@ -6496,7 +6547,7 @@ def _do_login(
                 _box = wait_for_any(["#recaptcha-anchor", ".recaptcha-checkbox-border"], timeout=6)
                 if _box:
                     # Look at the box the way a phone user does, then click once.
-                    rand_sleep(1200, 2200)
+                    rand_sleep(*_pace["rc_pre_click"])
                     try:
                         natural_mouse_move(driver, _box)
                     except Exception:
@@ -6524,13 +6575,13 @@ def _do_login(
 
             # The puzzle iframe is often already in the DOM. Success is the
             # checkbox ticking, same as on a phone — not the iframe existing.
-            _rc_deadline = time.time() + 10
+            _rc_deadline = time.time() + _pace["rc_wait_s"]
             while time.time() < _rc_deadline:
                 driver.switch_to.default_content()
                 if "challenge/recaptcha" not in driver.current_url or _checkbox_ticked():
                     _rc_result = "passed"
                     break
-                time.sleep(0.4)
+                time.sleep(_pace["rc_poll_s"])
             else:
                 _image = False
                 driver.switch_to.default_content()
@@ -6738,6 +6789,7 @@ def _do_login(
     url, text = page_state()
     log(f"{email} — After password submit: {url[:70]}")
     tmark("password step done")
+    _log_login_timing_summary()
 
     # ── Quick wrong-password check (before anything else) ─────────────────────
     if any(x in text for x in [
@@ -6891,10 +6943,10 @@ def _do_login(
                     log(f"Authenticator click error: {e}")
 
             _click_authenticator()
-            rand_sleep(700, 1100)
+            rand_sleep(*_pace["medium"])
 
             # Wait for the TOTP input to appear (longer timeout — SPA navigation on dp page)
-            totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=18)
+            totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=_pace["2fa_totp_wait"])
 
             # Fallback: try "Try another way" → then click authenticator again
             if totp_field is None:
@@ -6910,10 +6962,10 @@ def _do_login(
                         });
                         if (found) found.click();
                     """)
-                    rand_sleep(700, 1200)
+                    rand_sleep(*_pace["medium"])
                     _click_authenticator()
-                    rand_sleep(700, 1200)
-                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=15)
+                    rand_sleep(*_pace["medium"])
+                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=max(6, _pace["2fa_totp_wait"] - 2))
                 except Exception as e:
                     log(f"Try another way error: {e}")
 
@@ -6934,21 +6986,24 @@ def _do_login(
 
         # Fresh code each time — Google may show TOTP once or twice (or again after password change).
         enter_fresh_totp_once("Step 4 — TOTP")
-        clear_totp_pages(max_rounds=2, pause_label="Step 4 — extra TOTP")
+        clear_totp_pages(max_rounds=1 if _pace["fast"] else 2, pause_label="Step 4 — extra TOTP")
 
-        rand_sleep(700, 1200)
+        rand_sleep(*_pace["totp_after"])
 
         log(f"{email} — Waiting for Google Account after TOTP…")
         _totp_redirect_early = None
-        deadline = time.time() + 30
+        deadline = time.time() + _pace["totp_wait_s"]
         while time.time() < deadline:
             url = driver.current_url
             if signed_in_host(url) or is_google_password_change_url(url):
                 break
+            if "gds.google.com" in url:
+                log(f"{email} — gds interstitial after TOTP — continuing (fast path)")
+                break
 
             if is_totp_challenge_url(url):
                 enter_fresh_totp_once("TOTP while waiting for redirect")
-                rand_sleep(700, 1200)
+                rand_sleep(*_pace["totp_after"])
                 continue
 
             # ── Early exit: detect "Verify your info to continue" immediately ──
@@ -6981,13 +7036,20 @@ def _do_login(
                     """)
                 except Exception:
                     pass
-            time.sleep(0.5)
+            time.sleep(_pace["totp_poll_s"])
         if _totp_redirect_early:
             return _totp_redirect_early
 
-        rand_sleep(700, 1200)
+        rand_sleep(*_pace["totp_after"])
         url, text = page_state()
         log(f"{email} — After TOTP submit (final): {url[:70]}")
+        if "gds.google.com" in url and _pace["fast"]:
+            try:
+                driver.get(ACCOUNT_HOME)
+                rand_sleep(*_pace["post_nav"])
+                url, text = page_state()
+            except Exception:
+                pass
 
         # Wrong TOTP — auto-retry once with the next fresh 30s window
         _wrong_totp_phrases = [
@@ -7141,31 +7203,36 @@ def _do_login(
         # Click "Not now" / "Skip" / "Later" properly so the auth session finalises
         elif "gds.google.com" in host:
             page_name = url[url.find('/web/'):url.find('?')] if '/web/' in url else url[:50]
-            log(f"{email} — gds interstitial ({page_name}), clicking dismiss")
-            try:
-                clicked = driver.execute_script("""
-                    var skip_texts = ['not now','skip','later','no thanks','dismiss',
-                                      'cancel','maybe later','remind me later'];
-                    var btns = Array.from(document.querySelectorAll('button, a[role="button"]'));
-                    for (var t of skip_texts) {
-                        var found = btns.find(function(b) {
-                            return b.innerText && b.innerText.trim().toLowerCase() === t;
-                        });
-                        if (found) { found.click(); return true; }
-                    }
-                    // Fallback: last button (usually the secondary/skip action)
-                    if (btns.length > 1) { btns[btns.length - 1].click(); return true; }
-                    return false;
-                """)
-                if not clicked:
-                    # Nothing to click — just navigate away
-                    driver.get("https://myaccount.google.com/")
-            except Exception as e:
-                log(f"gds dismiss error: {e}")
+            if _pace["fast"]:
+                log(f"{email} — gds interstitial ({page_name}) — fast path → account home")
                 try:
-                    driver.get("https://myaccount.google.com/")
+                    driver.get(ACCOUNT_HOME)
                 except Exception:
                     pass
+            else:
+                log(f"{email} — gds interstitial ({page_name}), clicking dismiss")
+                try:
+                    clicked = driver.execute_script("""
+                        var skip_texts = ['not now','skip','later','no thanks','dismiss',
+                                          'cancel','maybe later','remind me later'];
+                        var btns = Array.from(document.querySelectorAll('button, a[role="button"]'));
+                        for (var t of skip_texts) {
+                            var found = btns.find(function(b) {
+                                return b.innerText && b.innerText.trim().toLowerCase() === t;
+                            });
+                            if (found) { found.click(); return true; }
+                        }
+                        if (btns.length > 1) { btns[btns.length - 1].click(); return true; }
+                        return false;
+                    """)
+                    if not clicked:
+                        driver.get(ACCOUNT_HOME)
+                except Exception as e:
+                    log(f"gds dismiss error: {e}")
+                    try:
+                        driver.get(ACCOUNT_HOME)
+                    except Exception:
+                        pass
             dismissed = True
 
         # uplevelingstep — Google account security upgrade prompt
