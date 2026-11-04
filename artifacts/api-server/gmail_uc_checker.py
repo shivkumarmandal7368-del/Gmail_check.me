@@ -1437,6 +1437,8 @@ def handle_recaptcha_checkbox(
     finally:
         try:
             driver.switch_to.default_content()
+            if "challenge/recaptcha" not in (driver.current_url or ""):
+                _rc_result = "passed"
         except Exception:
             pass
 
@@ -7222,6 +7224,9 @@ def _do_login(
         )
         url, text = page_state()
         log(f"{email} — After I'm not a robot ({_rc_result}): {url[:70]}")
+        if _rc_result != "passed" and "challenge/recaptcha" not in url:
+            log(f"{email} — left the robot page, continuing")
+            _rc_result = "passed"
         if _rc_result != "passed":
             shot = screenshot_b64()
             _why = (
