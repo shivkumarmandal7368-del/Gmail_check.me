@@ -955,7 +955,7 @@ def handle_recaptcha_checkbox(
         while time.time() < deadline and _find_recaptcha_anchor_iframe(driver) is None:
             time.sleep(0.25)
 
-        for attempt in range(1, 4):
+        for attempt in range(1, 3):
             if _recaptcha_checkbox_ticked(driver):
                 _rc_result = "passed"
                 log(f"{email} — reCAPTCHA already ticked (attempt {attempt})")
@@ -964,13 +964,15 @@ def handle_recaptcha_checkbox(
                 _rc_result = "passed"
                 log(f"{email} — I'm not a robot checkbox clicked (attempt {attempt})")
                 break
-            if attempt < 3:
+            if attempt < 2:
                 log(f"{email} — reCAPTCHA click attempt {attempt} did not tick — retry")
-                rand_sleep(300, 600)
+                rand_sleep(200, 400)
             else:
                 log(f"{email} — reCAPTCHA click attempts exhausted")
 
-        wait_deadline = time.time() + max(pace.get("rc_wait_s", 10), 12)
+        # Failed clicks: do not sit 12s. Solver starts almost immediately.
+        _extra_wait = 1.5 if _rc_result != "passed" else max(pace.get("rc_wait_s", 6), 4)
+        wait_deadline = time.time() + _extra_wait
         while time.time() < wait_deadline and _rc_result != "passed":
             driver.switch_to.default_content()
             if "challenge/recaptcha" not in (driver.current_url or ""):
@@ -983,7 +985,7 @@ def handle_recaptcha_checkbox(
 
         if _rc_result == "passed":
             # Wait for password page / leave recaptcha URL
-            nav_deadline = time.time() + 14
+            nav_deadline = time.time() + (6 if pace.get("fast") else 14)
             while time.time() < nav_deadline:
                 driver.switch_to.default_content()
                 cur = driver.current_url or ""
@@ -1668,7 +1670,7 @@ def _login_pace(proxy_url: str | None) -> dict:
         "signed_in": (80, 160) if fast else (400, 700),
         "totp_wait_s": 16 if fast else 30,
         "totp_poll_s": 0.2 if fast else 0.5,
-        "2fa_totp_wait": 8 if fast else 18,
+        "2fa_totp_wait": 3 if fast else 18,
         "skip_logout": fast,
         "rc_pre_click": (250, 500) if fast else (1200, 2200),
         "rc_poll_s": 0.2 if fast else 0.4,
@@ -7138,7 +7140,7 @@ def _do_login(
                     rand_sleep(*_pace["medium"])
                     _click_authenticator()
                     rand_sleep(*_pace["medium"])
-                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=max(6, _pace["2fa_totp_wait"] - 2))
+                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=4 if _pace["fast"] else 8)
                 except Exception as e:
                     log(f"Try another way error: {e}")
 
@@ -7157,9 +7159,11 @@ def _do_login(
                 return {"status": "opened", "reason": "Mailbox opened successfully ✅", "totpCode": None, "debugScreenshot": shot}
             return {"status": "2fa_required", "reason": "2FA required — provide TOTP secret", "totpCode": None, "debugScreenshot": shot}
 
-        # Fresh code each time — Google may show TOTP once or twice (or again after password change).
+        # One submit. Re-entering the same page immediately costs ~10s and Google ignores it.
         enter_fresh_totp_once("Step 4 — TOTP")
-        clear_totp_pages(max_rounds=1 if _pace["fast"] else 2, pause_label="Step 4 — extra TOTP")
+        if not _pace["fast"]:
+            clear_totp_pages(max_rounds=2, pause_label="Step 4 — extra TOTP")
+        _last_totp_submit = time.time()
 
         rand_sleep(*_pace["totp_after"])
 
@@ -7170,12 +7174,13 @@ def _do_login(
             url = driver.current_url
             if signed_in_host(url) or is_google_password_change_url(url):
                 break
-            if "gds.google.com" in url:
-                log(f"{email} — gds interstitial after TOTP — continuing (fast path)")
+            if "gds.google.com" in url or "myaccount.google.com" in url:
+                log(f"{email} — left TOTP page → {url[:70]}")
                 break
 
-            if is_totp_challenge_url(url):
+            if is_totp_challenge_url(url) and (time.time() - _last_totp_submit) >= 6:
                 enter_fresh_totp_once("TOTP while waiting for redirect")
+                _last_totp_submit = time.time()
                 rand_sleep(*_pace["totp_after"])
                 continue
 
