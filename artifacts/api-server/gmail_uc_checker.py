@@ -1060,6 +1060,34 @@ def _cdp_find_recaptcha(driver) -> dict:
     return {"anchor": anchor, "checkbox": checkbox, "bframe": bframe}
 
 
+def _cdp_log_frame_srcs(driver) -> None:
+    try:
+        doc = driver.execute_cdp_cmd("DOM.getDocument", {"depth": -1, "pierce": True})
+    except Exception as exc:
+        log(f"reCAPTCHA frame list failed: {exc}")
+        return
+    notes: list[str] = []
+
+    def walk(node):
+        if not isinstance(node, dict) or len(notes) >= 8:
+            return
+        attr = _cdp_node_attrs(node)
+        name = (node.get("nodeName") or "").lower()
+        if name == "iframe":
+            src = (attr.get("src") or attr.get("title") or attr.get("id") or "")[:90]
+            notes.append(src or "(blank iframe)")
+        for child in node.get("children") or []:
+            walk(child)
+        for shadow in node.get("shadowRoots") or []:
+            walk(shadow)
+        content = node.get("contentDocument")
+        if content:
+            walk(content)
+
+    walk(doc.get("root") or {})
+    log("reCAPTCHA pierced iframes: " + (" | ".join(notes) if notes else "none"))
+
+
 def _cdp_content_quad(driver, backend_id):
     if not backend_id:
         return None
@@ -1298,11 +1326,32 @@ def handle_recaptcha_checkbox(
     _rc_result = "missed"
 
     try:
-        # CDP pierce finds the anchor immediately. Do not sit here waiting for Selenium.
-        if not _cdp_find_recaptcha(driver).get("anchor"):
-            time.sleep(0.4)
-            if not _cdp_find_recaptcha(driver).get("anchor"):
-                _find_recaptcha_anchor_iframe(driver, log_miss=True)
+        # The recaptcha URL loads before the checkbox iframe exists.
+        # Poll the pierced DOM (not Selenium) until the anchor is actually there.
+        ready_deadline = time.time() + 8
+        anchor_since = None
+        found = {}
+        while time.time() < ready_deadline:
+            found = _cdp_find_recaptcha(driver)
+            if found.get("checkbox"):
+                break
+            if found.get("anchor"):
+                if anchor_since is None:
+                    anchor_since = time.time()
+                elif time.time() - anchor_since >= 1.0:
+                    break
+            else:
+                anchor_since = None
+            time.sleep(0.25)
+        if found.get("anchor") or found.get("checkbox"):
+            log(
+                f"{email} — reCAPTCHA widget in DOM "
+                f"aria={(found.get('checkbox') or {}).get('aria')}"
+            )
+        else:
+            log(f"{email} — reCAPTCHA widget not in DOM")
+            _cdp_log_frame_srcs(driver)
+            _find_recaptcha_anchor_iframe(driver, log_miss=True)
 
         for attempt in range(1, 3):
             if _recaptcha_checkbox_ticked(driver):
