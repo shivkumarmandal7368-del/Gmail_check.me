@@ -844,20 +844,15 @@ def _find_recaptcha_anchor_iframe(driver, log_miss: bool = False):
             title = (meta.get("title") or "").lower()
             w = float(meta.get("w") or 0)
             h = float(meta.get("h") or 0)
-            notes.append(f"{int(w)}x{int(h)} {src[:70] or title[:40]}")
-            if "bframe" in src:
+            notes.append(f"{int(w)}x{int(h)} {src[:90] or title[:40]}")
+            if "bframe" in src or w < 20 or h < 20:
                 continue
-            if w < 20 or h < 20:
+            # Only the real checkbox widget, not a page URL that merely contains the word recaptcha.
+            is_anchor = "/recaptcha/" in src and "anchor" in src
+            is_robot_title = "not a robot" in title or "i'm not a robot" in title
+            if not is_anchor and not is_robot_title:
                 continue
-            score = 0
-            if "recaptcha" in src or "recaptcha" in title:
-                score += 3
-            if "anchor" in src:
-                score += 5
-            if "i'm not a robot" in title or "not a robot" in title:
-                score += 4
-            if score <= 0:
-                continue
+            score = (5 if is_anchor else 0) + (4 if is_robot_title else 0) + min(int(w), 300) / 100
             if score > best_score:
                 best_score = score
                 best = fr
@@ -942,18 +937,28 @@ def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
     try:
         driver.switch_to.frame(fr)
         box = None
-        for sel in (
-            "#recaptcha-anchor",
-            ".recaptcha-checkbox-border",
-            ".recaptcha-checkbox",
-            "span.recaptcha-checkbox",
-        ):
-            els = driver.find_elements(By.CSS_SELECTOR, sel)
-            if els:
-                box = els[0]
-                break
+        deadline = time.time() + 5
+        while time.time() < deadline and box is None:
+            for sel in (
+                "#recaptcha-anchor",
+                ".recaptcha-checkbox-border",
+                ".recaptcha-checkbox",
+                "span.recaptcha-checkbox",
+            ):
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                if els:
+                    box = els[0]
+                    break
+            if box is None:
+                time.sleep(0.25)
         if box is None:
-            log("reCAPTCHA anchor iframe has no #recaptcha-anchor")
+            src = ""
+            try:
+                driver.switch_to.default_content()
+                src = (fr.get_attribute("src") or "")[:120]
+            except Exception:
+                pass
+            log(f"reCAPTCHA anchor iframe has no #recaptcha-anchor src={src}")
             driver.switch_to.default_content()
             return False
         checked_before = box.get_attribute("aria-checked")
