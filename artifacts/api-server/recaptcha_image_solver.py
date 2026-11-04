@@ -73,10 +73,14 @@ def _load_yolo():
 
 def _tile_has_target(png: bytes, targets: tuple[str, ...], conf_min: float) -> bool:
     model = _load_yolo()
-    if not model or not targets:
+    if not model or not targets or not png or len(png) < 80:
         return False
     try:
-        results = model.predict(source=png, verbose=False, conf=conf_min, imgsz=320)
+        import numpy as np
+        from PIL import Image
+
+        image = np.asarray(Image.open(io.BytesIO(png)).convert("RGB"))
+        results = model.predict(source=image, verbose=False, conf=conf_min, imgsz=320)
     except Exception as exc:
         _log(f"YOLO predict failed: {exc}")
         return False

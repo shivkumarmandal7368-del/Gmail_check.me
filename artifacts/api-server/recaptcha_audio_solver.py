@@ -411,9 +411,15 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             except Exception:
                 audio_btn = None
         if not audio_btn:
-            _log("audio button not shown (Google may block audio for this session)")
+            _log("audio button not in selenium frame — trying CDP")
             driver.switch_to.default_content()
-            return False
+            return _try_audio_via_cdp(driver)
+        try:
+            shown = audio_btn.is_displayed()
+        except Exception:
+            shown = False
+        if not shown:
+            _log("audio button present but not displayed — clicking it anyway")
 
         try:
             audio_btn.click()
