@@ -766,6 +766,254 @@ def touch_click(driver, element):
             pass
 
 
+def _find_recaptcha_anchor_iframe(driver):
+    """Visible reCAPTCHA checkbox iframe (not the image bframe)."""
+    from selenium.webdriver.common.by import By
+
+    driver.switch_to.default_content()
+    frames = driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha'], iframe[title*='reCAPTCHA']")
+    scored: list[tuple[int, object]] = []
+    for fr in frames:
+        try:
+            src = (fr.get_attribute("src") or "").lower()
+            title = (fr.get_attribute("title") or "").lower()
+            if "bframe" in src:
+                continue
+            if not fr.is_displayed():
+                continue
+            w = fr.size.get("width", 0) or 0
+            h = fr.size.get("height", 0) or 0
+            if w < 8 or h < 8:
+                continue
+            score = 0
+            if "anchor" in src:
+                score += 4
+            if "api2" in src:
+                score += 2
+            if "recaptcha" in title:
+                score += 3
+            if score == 0:
+                score = 1
+            scored.append((score, fr))
+        except Exception:
+            continue
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[0][1]
+
+
+def _recaptcha_checkbox_ticked(driver) -> bool:
+    from selenium.webdriver.common.by import By
+
+    driver.switch_to.default_content()
+    fr = _find_recaptcha_anchor_iframe(driver)
+    if fr is None:
+        return False
+    try:
+        driver.switch_to.frame(fr)
+        for sel in ("#recaptcha-anchor", ".recaptcha-checkbox"):
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            if els and els[0].get_attribute("aria-checked") == "true":
+                driver.switch_to.default_content()
+                return True
+        checked = driver.execute_script("""
+            var a = document.getElementById('recaptcha-anchor');
+            return a && a.getAttribute('aria-checked') === 'true';
+        """)
+        driver.switch_to.default_content()
+        return bool(checked)
+    except Exception:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        return False
+
+
+def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = True) -> bool:
+    """One attempt inside the anchor iframe. Returns True if ticked after click."""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    driver.switch_to.default_content()
+    fr = _find_recaptcha_anchor_iframe(driver)
+    if fr is None:
+        return False
+    try:
+        driver.switch_to.frame(fr)
+        box = None
+        for sel in (
+            "#recaptcha-anchor",
+            ".recaptcha-checkbox-border",
+            ".recaptcha-checkbox",
+            "span.recaptcha-checkbox",
+        ):
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                if els:
+                    box = els[0]
+                    break
+            except Exception:
+                continue
+        if box is None:
+            driver.switch_to.default_content()
+            return False
+        try:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center', inline:'center'});", box
+            )
+        except Exception:
+            pass
+        rand_sleep(80, 180)
+        clicked = False
+        if use_touch:
+            try:
+                touch_click(driver, box)
+                clicked = True
+            except Exception:
+                pass
+        if not clicked:
+            try:
+                ActionChains(driver).move_to_element(box).pause(0.05).click().perform()
+                clicked = True
+            except Exception:
+                pass
+        if not clicked:
+            try:
+                driver.execute_script("arguments[0].click();", box)
+            except Exception:
+                pass
+        rand_sleep(200, 450)
+        ticked = _recaptcha_checkbox_ticked(driver)
+        driver.switch_to.default_content()
+        return ticked
+    except Exception:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        return False
+
+
+def handle_recaptcha_checkbox(
+    driver,
+    email: str,
+    *,
+    pace: dict,
+    proxy_url: str | None,
+    page_state,
+) -> str:
+    """
+    Click I'm-not-a-robot like a phone user. Returns:
+      passed | image | timeout | missed
+    """
+    url, _ = page_state()
+    if "challenge/recaptcha" not in url:
+        return "passed"
+
+    log(f"{email} — I'm not a robot checkbox — clicking it")
+    _rc_result = "missed"
+
+    try:
+        deadline = time.time() + 12
+        while time.time() < deadline and _find_recaptcha_anchor_iframe(driver) is None:
+            time.sleep(0.25)
+
+        for attempt in range(1, 4):
+            if _recaptcha_checkbox_ticked(driver):
+                _rc_result = "passed"
+                log(f"{email} — reCAPTCHA already ticked (attempt {attempt})")
+                break
+            if _click_recaptcha_checkbox_once(driver, use_touch=True):
+                _rc_result = "passed"
+                log(f"{email} — I'm not a robot checkbox clicked (attempt {attempt})")
+                break
+            if attempt < 3:
+                log(f"{email} — reCAPTCHA click attempt {attempt} did not tick — retry")
+                rand_sleep(300, 600)
+            else:
+                log(f"{email} — reCAPTCHA click attempts exhausted")
+
+        wait_deadline = time.time() + max(_pace.get("rc_wait_s", 10), 12)
+        while time.time() < wait_deadline and _rc_result != "passed":
+            driver.switch_to.default_content()
+            if "challenge/recaptcha" not in (driver.current_url or ""):
+                _rc_result = "passed"
+                break
+            if _recaptcha_checkbox_ticked(driver):
+                _rc_result = "passed"
+                break
+            time.sleep(_pace.get("rc_poll_s", 0.25))
+
+        if _rc_result == "passed":
+            # Wait for password page / leave recaptcha URL
+            nav_deadline = time.time() + 14
+            while time.time() < nav_deadline:
+                driver.switch_to.default_content()
+                cur = driver.current_url or ""
+                if "challenge/recaptcha" not in cur:
+                    break
+                if "challenge/pwd" in cur or "identifier" not in cur:
+                    break
+                if _recaptcha_checkbox_ticked(driver):
+                    time.sleep(0.3)
+                    if "challenge/recaptcha" not in driver.current_url:
+                        break
+                time.sleep(_pace.get("rc_poll_s", 0.25))
+        else:
+            driver.switch_to.default_content()
+            from selenium.webdriver.common.by import By as _By
+
+            _image = False
+            for _bf in driver.find_elements(_By.CSS_SELECTOR, "iframe[src*='bframe']"):
+                try:
+                    if _bf.is_displayed() and (_bf.size.get("height", 0) or 0) > 80:
+                        _image = True
+                        break
+                except Exception:
+                    pass
+            _rc_result = "image" if _image else "timeout"
+
+        if _rc_result != "passed":
+            try:
+                from recaptcha_free_solver import run_free_captcha_pipeline
+                from recaptcha_solver import captcha_solver_configured, try_solve_recaptcha_on_page
+
+                if _rc_result in ("image", "timeout", "missed"):
+                    log(f"{email} — free captcha pipeline (Whisper audio + YOLO vision)…")
+                    if run_free_captcha_pipeline(driver, _recaptcha_checkbox_ticked, max_cycles=3):
+                        _rc_result = "passed"
+                        log(f"{email} — free captcha pipeline OK")
+
+                if _rc_result != "passed" and captcha_solver_configured():
+                    log(f"{email} — image/timeout captcha — sending to solver API…")
+                    if try_solve_recaptcha_on_page(driver, proxy_url):
+                        _solve_deadline = time.time() + 35
+                        while time.time() < _solve_deadline:
+                            driver.switch_to.default_content()
+                            if "challenge/recaptcha" not in driver.current_url:
+                                _rc_result = "passed"
+                                break
+                            if _recaptcha_checkbox_ticked(driver):
+                                _rc_result = "passed"
+                                break
+                            time.sleep(0.35)
+            except Exception as _solver_err:
+                log(f"{email} — captcha solver error: {_solver_err}")
+
+    except Exception as _rc_err:
+        log(f"{email} — recaptcha checkbox error: {_rc_err}")
+        _rc_result = "missed"
+    finally:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+
+    return _rc_result
+
+
 # ── Phone device profiles — each account gets one assigned randomly ───────────
 # Modelled on real flagship Android phones; covers different GPU, screen, memory.
 PHONE_PROFILES = [
@@ -6526,119 +6774,9 @@ def _do_login(
     # one checkbox click, then the password page. An image puzzle is a
     # different page — we do not try to solve that.
     if "challenge/recaptcha" in url:
-        log(f"{email} — I'm not a robot checkbox — clicking it")
-        _rc_result = "missed"
-        try:
-            _iframe_deadline = time.time() + 8
-            _anchor_frame = None
-            while time.time() < _iframe_deadline and _anchor_frame is None:
-                driver.switch_to.default_content()
-                for _fr in driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha']"):
-                    _src = _fr.get_attribute("src") or ""
-                    if "anchor" in _src or "bframe" not in _src:
-                        if "bframe" in _src:
-                            continue
-                        _anchor_frame = _fr
-                        break
-                if _anchor_frame is None:
-                    time.sleep(0.3)
-            if _anchor_frame is not None:
-                driver.switch_to.frame(_anchor_frame)
-                _box = wait_for_any(["#recaptcha-anchor", ".recaptcha-checkbox-border"], timeout=6)
-                if _box:
-                    # Look at the box the way a phone user does, then click once.
-                    rand_sleep(*_pace["rc_pre_click"])
-                    try:
-                        natural_mouse_move(driver, _box)
-                    except Exception:
-                        pass
-                    _box.click()
-                    log(f"{email} — I'm not a robot checkbox clicked")
-                driver.switch_to.default_content()
-
-            def _checkbox_ticked() -> bool:
-                driver.switch_to.default_content()
-                for _fr in driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha']"):
-                    _src = _fr.get_attribute("src") or ""
-                    if "bframe" in _src:
-                        continue
-                    try:
-                        driver.switch_to.frame(_fr)
-                        _anchor = driver.find_elements(By.CSS_SELECTOR, "#recaptcha-anchor")
-                        if _anchor and _anchor[0].get_attribute("aria-checked") == "true":
-                            driver.switch_to.default_content()
-                            return True
-                    except Exception:
-                        pass
-                    driver.switch_to.default_content()
-                return False
-
-            # The puzzle iframe is often already in the DOM. Success is the
-            # checkbox ticking, same as on a phone — not the iframe existing.
-            _rc_deadline = time.time() + _pace["rc_wait_s"]
-            while time.time() < _rc_deadline:
-                driver.switch_to.default_content()
-                if "challenge/recaptcha" not in driver.current_url or _checkbox_ticked():
-                    _rc_result = "passed"
-                    break
-                time.sleep(_pace["rc_poll_s"])
-            else:
-                _image = False
-                driver.switch_to.default_content()
-                for _bf in driver.find_elements(By.CSS_SELECTOR, "iframe[src*='bframe']"):
-                    try:
-                        if _bf.is_displayed() and _bf.size.get("height", 0) > 80:
-                            _image = True
-                            break
-                    except Exception:
-                        pass
-                _rc_result = "image" if _image else "timeout"
-
-            if _rc_result != "passed":
-                try:
-                    from recaptcha_free_solver import run_free_captcha_pipeline
-                    from recaptcha_solver import captcha_solver_configured, try_solve_recaptcha_on_page
-
-                    if _rc_result in ("image", "timeout", "missed"):
-                        log(f"{email} — free captcha pipeline (Whisper audio + YOLO vision)…")
-                        if run_free_captcha_pipeline(driver, _checkbox_ticked, max_cycles=3):
-                            _rc_result = "passed"
-                            log(f"{email} — free captcha pipeline OK")
-
-                    if _rc_result != "passed" and captcha_solver_configured():
-                        log(f"{email} — image/timeout captcha — sending to solver API…")
-                        if try_solve_recaptcha_on_page(driver, proxy_url):
-                            _solve_deadline = time.time() + 35
-                            while time.time() < _solve_deadline:
-                                driver.switch_to.default_content()
-                                if "challenge/recaptcha" not in driver.current_url:
-                                    _rc_result = "passed"
-                                    log(f"{email} — captcha solver OK (left recaptcha page)")
-                                    break
-                                if _checkbox_ticked():
-                                    _rc_result = "passed"
-                                    log(f"{email} — captcha solver OK (checkbox ticked)")
-                                    break
-                                time.sleep(0.5)
-                            if _rc_result != "passed":
-                                log(f"{email} — captcha token injected but page did not advance")
-                        else:
-                            log(f"{email} — captcha solver could not obtain token")
-                    elif _rc_result != "passed":
-                        log(
-                            f"{email} — puzzle unsolved: enable free audio "
-                            f"(pip install faster-whisper) or CAPTCHA_API_KEY for 2Captcha"
-                        )
-                except Exception as _solver_err:
-                    log(f"{email} — captcha solver error: {_solver_err}")
-        except Exception as _rc_err:
-            log(f"{email} — recaptcha checkbox error: {_rc_err}")
-            _rc_result = "missed"
-        finally:
-            try:
-                driver.switch_to.default_content()
-            except Exception:
-                pass
+        _rc_result = handle_recaptcha_checkbox(
+            driver, email, pace=_pace, proxy_url=proxy_url, page_state=page_state,
+        )
         url, text = page_state()
         log(f"{email} — After I'm not a robot ({_rc_result}): {url[:70]}")
         if _rc_result != "passed":
