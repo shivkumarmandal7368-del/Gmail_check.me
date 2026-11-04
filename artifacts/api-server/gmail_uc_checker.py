@@ -3976,6 +3976,7 @@ def check_gmail(
             change_password_after_login,
             sign_out_sessions,
             robot_check_only,
+            proxy_url=proxy_for_ip_check or proxy,
         )
 
         # ── Post-login geo fallback (driver still open here!) ──────────────────
@@ -4091,6 +4092,7 @@ def _do_login(
     change_password_after_login: bool = False,
     sign_out_sessions: bool = False,
     robot_check_only: bool = False,
+    proxy_url: str | None = None,
 ) -> dict:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
@@ -6367,6 +6369,34 @@ def _do_login(
                     except Exception:
                         pass
                 _rc_result = "image" if _image else "timeout"
+
+            if _rc_result != "passed":
+                try:
+                    from recaptcha_solver import captcha_solver_configured, try_solve_recaptcha_on_page
+
+                    if captcha_solver_configured():
+                        log(f"{email} — image/timeout captcha — sending to solver API…")
+                        if try_solve_recaptcha_on_page(driver, proxy_url):
+                            _solve_deadline = time.time() + 35
+                            while time.time() < _solve_deadline:
+                                driver.switch_to.default_content()
+                                if "challenge/recaptcha" not in driver.current_url:
+                                    _rc_result = "passed"
+                                    log(f"{email} — captcha solver OK (left recaptcha page)")
+                                    break
+                                if _checkbox_ticked():
+                                    _rc_result = "passed"
+                                    log(f"{email} — captcha solver OK (checkbox ticked)")
+                                    break
+                                time.sleep(0.5)
+                            if _rc_result != "passed":
+                                log(f"{email} — captcha token injected but page did not advance")
+                        else:
+                            log(f"{email} — captcha solver could not obtain token")
+                    else:
+                        log(f"{email} — set CAPTCHA_API_KEY in deploy/.env to auto-solve puzzles")
+                except Exception as _solver_err:
+                    log(f"{email} — captcha solver error: {_solver_err}")
         except Exception as _rc_err:
             log(f"{email} — recaptcha checkbox error: {_rc_err}")
             _rc_result = "missed"
@@ -6384,6 +6414,12 @@ def _do_login(
                 if _rc_result == "image"
                 else "Google showed I'm not a robot and the checkbox did not open the password page."
             )
+            try:
+                from recaptcha_solver import captcha_solver_configured as _csc
+                if not _csc():
+                    _why += " Set CAPTCHA_API_KEY in deploy/.env (2Captcha or CapSolver) for auto-solve."
+            except Exception:
+                pass
             _fail = {
                 "status": "verification_required",
                 "reason": _why,
