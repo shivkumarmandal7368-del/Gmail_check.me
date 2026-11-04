@@ -102,6 +102,12 @@ def try_solve_recaptcha_image_page(driver: "WebDriver", rounds: int = 2) -> bool
     from selenium.webdriver.common.by import By
 
     for rnd in range(1, rounds + 1):
+        try:
+            if "challenge/recaptcha" not in (driver.current_url or ""):
+                _log("left recaptcha page")
+                return True
+        except Exception:
+            pass
         if not _switch_challenge_frame(driver):
             return False
 
