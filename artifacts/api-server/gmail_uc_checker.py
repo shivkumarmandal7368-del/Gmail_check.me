@@ -940,12 +940,150 @@ def _cdp_click_xy(driver, x: float, y: float) -> None:
         })
 
 
+def _trusted_button_click(driver, element) -> bool:
+    """Real pointer click. Google ignores the synthetic touch events on Next."""
+    from selenium.webdriver.common.action_chains import ActionChains
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+    except Exception:
+        pass
+    try:
+        ActionChains(driver).move_to_element(element).pause(0.04).click().perform()
+        return True
+    except Exception:
+        try:
+            element.click()
+            return True
+        except Exception:
+            return False
+
+
+def _click_button_text(driver, labels: tuple[str, ...]) -> bool:
+    from selenium.webdriver.common.by import By
+    for label in labels:
+        xpath = (
+            f"//button[normalize-space()='{label}']"
+            f"|//div[@role='button'][normalize-space()='{label}']"
+            f"|//*[@id='identifierNext' or @id='passwordNext']//*[normalize-space()='{label}']"
+        )
+        try:
+            els = driver.find_elements(By.XPATH, xpath)
+        except Exception:
+            continue
+        for el in els:
+            try:
+                if el.is_displayed() and _trusted_button_click(driver, el):
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _cdp_recaptcha_nodes(driver) -> list[dict]:
+    """Find reCAPTCHA iframes even inside closed shadow roots."""
+    try:
+        doc = driver.execute_cdp_cmd("DOM.getDocument", {"depth": -1, "pierce": True})
+    except Exception as exc:
+        log(f"reCAPTCHA DOM pierce failed: {exc}")
+        return []
+    hits: list[dict] = []
+
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        attrs = node.get("attributes") or []
+        attr = {attrs[i]: attrs[i + 1] for i in range(0, len(attrs) - 1, 2)}
+        src = attr.get("src") or ""
+        title = attr.get("title") or ""
+        node_id = attr.get("id") or ""
+        blob = f"{src} {title} {node_id}".lower()
+        if "recaptcha" in blob or "not a robot" in blob:
+            hits.append({
+                "backendNodeId": node.get("backendNodeId"),
+                "src": src[:140],
+                "title": title[:60],
+                "id": node_id,
+            })
+        for child in node.get("children") or []:
+            walk(child)
+        for shadow in node.get("shadowRoots") or []:
+            walk(shadow)
+        content = node.get("contentDocument")
+        if content:
+            walk(content)
+
+    walk(doc.get("root") or {})
+    return hits
+
+
+def _cdp_click_recaptcha_checkbox(driver) -> bool:
+    nodes = _cdp_recaptcha_nodes(driver)
+    if not nodes:
+        return False
+    log("reCAPTCHA DOM nodes: " + " | ".join(
+        f"{n.get('id') or '-'} {(n.get('src') or n.get('title') or '')[:70]}" for n in nodes[:5]
+    ))
+    ordered = sorted(nodes, key=lambda n: (
+        0 if "anchor" in (n.get("src") or "") and "bframe" not in (n.get("src") or "") else
+        1 if n.get("id") == "recaptcha-anchor" else 2
+    ))
+    for node in ordered:
+        src = (node.get("src") or "").lower()
+        if "bframe" in src:
+            continue
+        backend = node.get("backendNodeId")
+        if not backend:
+            continue
+        try:
+            model = driver.execute_cdp_cmd("DOM.getBoxModel", {"backendNodeId": backend})
+            content = model["model"]["content"]
+            xs, ys = content[0::2], content[1::2]
+            left, right = min(xs), max(xs)
+            top, bottom = min(ys), max(ys)
+            if right - left < 8 or bottom - top < 8:
+                continue
+            # Checkbox is the left side of the anchor widget.
+            x = left + (22 if node.get("id") != "recaptcha-anchor" else (right - left) / 2)
+            y = (top + bottom) / 2
+            _cdp_click_xy(driver, x, y)
+            log(f"reCAPTCHA CDP click at {int(x)},{int(y)}")
+            rand_sleep(500, 800)
+            if _recaptcha_checkbox_ticked(driver):
+                return True
+        except Exception as exc:
+            log(f"reCAPTCHA box model click skipped: {exc}")
+    return _recaptcha_checkbox_ticked(driver)
+    """Trusted click. Mobile reCAPTCHA listens to touch, desktop to mouse."""
+    try:
+        driver.execute_cdp_cmd("Input.dispatchTouchEvent", {
+            "type": "touchStart",
+            "touchPoints": [{"x": float(x), "y": float(y), "radiusX": 8, "radiusY": 8, "force": 0.8, "id": 1}],
+        })
+        driver.execute_cdp_cmd("Input.dispatchTouchEvent", {
+            "type": "touchEnd",
+            "touchPoints": [],
+        })
+    except Exception:
+        pass
+    for typ, buttons in (("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": typ,
+            "x": float(x),
+            "y": float(y),
+            "button": "left",
+            "buttons": buttons,
+            "clickCount": 1,
+        })
+
+
 def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
     """Click the checkbox from inside its iframe. Parent-page coordinates miss on a phone viewport."""
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.action_chains import ActionChains
 
     driver.switch_to.default_content()
+    if _cdp_click_recaptcha_checkbox(driver):
+        return True
     fr = _find_recaptcha_anchor_iframe(driver)
     if fr is None:
         return False
@@ -6847,13 +6985,13 @@ def _do_login(
         '#identifierNext button', '#identifierNext', '[jsname="LgbsSe"]',
         'button[type="button"]', 'div[role="button"]',
     ], timeout=4)
-    if _email_next:
-        try:
-            touch_click(driver, _email_next)   # TouchEvent tap on Next
-        except Exception:
-            email_field.send_keys(Keys.ENTER)
-    else:
+    if _email_next and _trusted_button_click(driver, _email_next):
+        log(f"{email} — Next clicked")
+    elif not _click_button_text(driver, ("Next",)):
         email_field.send_keys(Keys.ENTER)
+        log(f"{email} — Next via Enter")
+    else:
+        log(f"{email} — Next clicked by label")
 
     # Wait for any URL change that signals automation rejection or a challenge page.
     # Google's sign-in is an SPA: after typing email + clicking Next, the URL
@@ -7041,13 +7179,12 @@ def _do_login(
         '#passwordNext button', '#passwordNext', '[jsname="LgbsSe"]',
         'button[type="button"]', 'div[role="button"]',
     ], timeout=4)
-    if _pw_next:
-        try:
-            touch_click(driver, _pw_next)    # TouchEvent tap on Next
-        except Exception:
-            pw_field.send_keys(Keys.ENTER)
-    else:
+    if _pw_next and _trusted_button_click(driver, _pw_next):
+        log(f"{email} — password Next clicked")
+    elif not _click_button_text(driver, ("Next",)):
         pw_field.send_keys(Keys.ENTER)
+    else:
+        log(f"{email} — password Next clicked by label")
 
     # Wait for URL to advance past the password page (proxy latency can be 2-4s).
     # Polling is more reliable than a fixed sleep — catches fast AND slow responses.
