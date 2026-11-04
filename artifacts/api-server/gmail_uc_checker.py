@@ -612,6 +612,54 @@ def _get_chrome_win_id() -> str | None:
     return None
 
 
+def fast_paste(driver, element, text: str) -> None:
+    """One-shot paste (CDP insertText). Target: under 1 second for email or password."""
+    t0 = time.time()
+    try:
+        driver.execute_script(
+            "arguments[0].focus(); arguments[0].click();",
+            element,
+        )
+    except Exception:
+        try:
+            element.click()
+        except Exception:
+            pass
+    try:
+        for key, code, vk in (("a", "KeyA", 65), ("Backspace", "Backspace", 8)):
+            mods = 2 if key == "a" else 0
+            driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                "type": "keyDown",
+                "modifiers": mods,
+                "key": key,
+                "code": code,
+                "windowsVirtualKeyCode": vk,
+            })
+            driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                "type": "keyUp",
+                "modifiers": mods,
+                "key": key,
+                "code": code,
+                "windowsVirtualKeyCode": vk,
+            })
+        driver.execute_cdp_cmd("Input.insertText", {"text": text})
+    except Exception as exc:
+        log(f"fast paste CDP failed ({exc}) — send_keys whole string")
+        try:
+            element.send_keys(text)
+        except Exception:
+            clipboard_type(driver, element, text)
+    try:
+        field_type = (element.get_attribute("type") or "").lower()
+        if field_type != "password":
+            val = driver.execute_script("return arguments[0].value || ''", element) or ""
+            if text and len(val) < max(1, len(text) - 1):
+                element.send_keys(text)
+    except Exception:
+        pass
+    log(f"fast paste {len(text)} chars in {int((time.time() - t0) * 1000)}ms")
+
+
 def clipboard_type(driver, element, text: str):
     """Simulate clipboard paste — instant text entry like a human Ctrl+V'ing.
     Uses xdotool with explicit Chrome window targeting for authentic key events.
@@ -6734,15 +6782,21 @@ def _do_login(
     # click with stale-element retry (proxy extension can cause brief page reload)
     for _attempt in range(3):
         try:
-            touch_click(driver, email_field)   # TouchEvent — real phone fires touch not mouse
+            if _phone_fast:
+                driver.execute_script("arguments[0].focus(); arguments[0].click();", email_field)
+            else:
+                touch_click(driver, email_field)
             break
         except Exception:
-            rand_sleep(200, 400)
+            rand_sleep(80, 150) if _phone_fast else rand_sleep(200, 400)
             email_field = wait_for_any(EMAIL_SELECTORS, timeout=6) or email_field
 
-    rand_sleep(80, 160)
-    clipboard_type(driver, email_field, email)   # instant paste — xdotool clipboard
-    rand_sleep(100, 200)
+    if _phone_fast:
+        fast_paste(driver, email_field, email)
+    else:
+        rand_sleep(80, 160)
+        clipboard_type(driver, email_field, email)
+        rand_sleep(100, 200)
     # Click the "Next" button via touch — more human than Keys.ENTER (detectable as Selenium)
     _email_next = wait_for_any([
         '#identifierNext button', '#identifierNext', '[jsname="LgbsSe"]',
@@ -6770,8 +6824,11 @@ def _do_login(
                 break
         except Exception:
             pass
-        time.sleep(0.25)
-    rand_sleep(300, 600)  # brief settle
+        time.sleep(0.15 if _phone_fast else 0.25)
+    if _phone_fast:
+        rand_sleep(40, 80)
+    else:
+        rand_sleep(300, 600)
 
     url, text = page_state()
     log(f"{email} — After email submit: {url[:70]}")
@@ -6923,10 +6980,17 @@ def _do_login(
             "debugScreenshot": shot,
         }
 
-    touch_click(driver, pw_field)    # TouchEvent — real phone fires touch not mouse
-    rand_sleep(80, 160)
-    clipboard_type(driver, pw_field, password)   # instant paste — xdotool clipboard
-    rand_sleep(100, 180)
+    if _phone_fast:
+        try:
+            driver.execute_script("arguments[0].focus(); arguments[0].click();", pw_field)
+        except Exception:
+            pass
+        fast_paste(driver, pw_field, password)
+    else:
+        touch_click(driver, pw_field)
+        rand_sleep(80, 160)
+        clipboard_type(driver, pw_field, password)
+        rand_sleep(100, 180)
     # Click the "Next" button via touch — more human than Keys.ENTER (detectable as Selenium)
     _pw_next = wait_for_any([
         '#passwordNext button', '#passwordNext', '[jsname="LgbsSe"]',
