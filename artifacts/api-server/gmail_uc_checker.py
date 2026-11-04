@@ -6386,9 +6386,29 @@ def _do_login(
 
             if _rc_result != "passed":
                 try:
+                    from recaptcha_audio_solver import (
+                        free_audio_enabled,
+                        try_solve_recaptcha_audio_page,
+                    )
                     from recaptcha_solver import captcha_solver_configured, try_solve_recaptcha_on_page
 
-                    if captcha_solver_configured():
+                    if free_audio_enabled() and _rc_result in ("image", "timeout", "missed"):
+                        log(f"{email} — trying free audio captcha (local Whisper)…")
+                        if try_solve_recaptcha_audio_page(driver):
+                            _audio_deadline = time.time() + 25
+                            while time.time() < _audio_deadline:
+                                driver.switch_to.default_content()
+                                if "challenge/recaptcha" not in driver.current_url:
+                                    _rc_result = "passed"
+                                    log(f"{email} — free audio captcha OK")
+                                    break
+                                if _checkbox_ticked():
+                                    _rc_result = "passed"
+                                    log(f"{email} — free audio captcha OK (checkbox ticked)")
+                                    break
+                                time.sleep(0.5)
+
+                    if _rc_result != "passed" and captcha_solver_configured():
                         log(f"{email} — image/timeout captcha — sending to solver API…")
                         if try_solve_recaptcha_on_page(driver, proxy_url):
                             _solve_deadline = time.time() + 35
@@ -6407,8 +6427,11 @@ def _do_login(
                                 log(f"{email} — captcha token injected but page did not advance")
                         else:
                             log(f"{email} — captcha solver could not obtain token")
-                    else:
-                        log(f"{email} — set CAPTCHA_API_KEY in deploy/.env to auto-solve puzzles")
+                    elif _rc_result != "passed":
+                        log(
+                            f"{email} — puzzle unsolved: enable free audio "
+                            f"(pip install faster-whisper) or CAPTCHA_API_KEY for 2Captcha"
+                        )
                 except Exception as _solver_err:
                     log(f"{email} — captcha solver error: {_solver_err}")
         except Exception as _rc_err:

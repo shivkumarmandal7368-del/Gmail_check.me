@@ -1,0 +1,182 @@
+"""Free reCAPTCHA v2 path: accessibility audio + local Whisper (no 2Captcha)."""
+
+from __future__ import annotations
+
+import os
+import re
+import tempfile
+import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from selenium.webdriver.remote.webdriver import WebDriver
+
+
+def _log(msg: str) -> None:
+    print(f"[UC] [captcha-audio] {msg}", flush=True)
+
+
+def free_audio_enabled() -> bool:
+    """On by default; set CAPTCHA_FREE_AUDIO=0 to disable."""
+    return os.environ.get("CAPTCHA_FREE_AUDIO", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+_whisper_model = None
+
+
+def _transcribe_audio(path: str) -> str | None:
+    global _whisper_model
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        _log("install faster-whisper on VPS: .venv/bin/pip install faster-whisper")
+        return None
+    model_name = os.environ.get("WHISPER_MODEL", "tiny.en")
+    if _whisper_model is None:
+        _log(f"loading Whisper model {model_name} (first run downloads ~75MB)…")
+        _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
+    segments, _ = _whisper_model.transcribe(path, language="en", beam_size=1)
+    text = " ".join(s.text for s in segments).strip()
+    if not text:
+        return None
+    # reCAPTCHA audio is usually digits or a short phrase
+    cleaned = re.sub(r"[^a-zA-Z0-9\s]", "", text)
+    cleaned = " ".join(cleaned.split())
+    _log(f"Whisper heard: {cleaned[:80]}")
+    return cleaned or text
+
+
+def _switch_challenge_frame(driver: "WebDriver") -> bool:
+    from selenium.webdriver.common.by import By
+
+    driver.switch_to.default_content()
+    frames = driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha'][src*='bframe']")
+    if not frames:
+        frames = driver.find_elements(By.CSS_SELECTOR, "iframe[title*='recaptcha']")
+    for fr in frames:
+        try:
+            if fr.is_displayed() and fr.size.get("height", 0) > 40:
+                driver.switch_to.frame(fr)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _download_challenge_audio(driver: "WebDriver", session) -> str | None:
+    from selenium.webdriver.common.by import By
+
+    url = None
+    for sel in ("#audio-source", "audio source", "audio"):
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, sel)
+            url = el.get_attribute("src")
+            if url:
+                break
+        except Exception:
+            continue
+    if not url:
+        try:
+            link = driver.find_element(By.CSS_SELECTOR, ".rc-audiochallenge-tdownload-link")
+            url = link.get_attribute("href")
+        except Exception:
+            pass
+    if not url:
+        return None
+    for c in driver.get_cookies():
+        session.cookies.set(c["name"], c["value"], domain=c.get("domain"))
+    r = session.get(url, timeout=30)
+    r.raise_for_status()
+    suffix = ".mp3" if "mpeg" in (r.headers.get("content-type") or "") else ".wav"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(r.content)
+    tmp.close()
+    return tmp.name
+
+
+def try_solve_recaptcha_audio_page(driver: "WebDriver") -> bool:
+    """Switch to audio challenge, transcribe locally, submit. Returns True if submitted."""
+    if not free_audio_enabled():
+        return False
+    from selenium.webdriver.common.by import By
+    import requests as req
+
+    if not _switch_challenge_frame(driver):
+        _log("no visible recaptcha challenge iframe")
+        return False
+
+    audio_btn = None
+    for sel in (
+        "#recaptcha-audio-button",
+        ".rc-button-audio",
+        "button#recaptcha-audio-button",
+        "button.rc-button-audio",
+    ):
+        try:
+            audio_btn = driver.find_element(By.CSS_SELECTOR, sel)
+            if audio_btn.is_displayed():
+                break
+        except Exception:
+            audio_btn = None
+    if not audio_btn:
+        _log("audio button not shown (Google may block audio for this session)")
+        driver.switch_to.default_content()
+        return False
+
+    try:
+        audio_btn.click()
+    except Exception as exc:
+        _log(f"audio button click failed: {exc}")
+        driver.switch_to.default_content()
+        return False
+    time.sleep(1.2)
+
+    session = req.Session()
+    audio_path = None
+    try:
+        audio_path = _download_challenge_audio(driver, session)
+        if not audio_path:
+            _log("could not download audio clip")
+            return False
+        answer = _transcribe_audio(audio_path)
+        if not answer:
+            return False
+        resp = None
+        for sel in ("#audio-response", "input#audio-response", ".rc-audiochallenge-input-field"):
+            try:
+                resp = driver.find_element(By.CSS_SELECTOR, sel)
+                break
+            except Exception:
+                continue
+        if not resp:
+            _log("audio response input not found")
+            return False
+        resp.clear()
+        resp.send_keys(answer)
+        time.sleep(0.4)
+        verify = None
+        for sel in ("#recaptcha-verify-button", "button#recaptcha-verify-button", "#recaptcha-audio-verify-button"):
+            try:
+                verify = driver.find_element(By.CSS_SELECTOR, sel)
+                break
+            except Exception:
+                continue
+        if verify:
+            verify.click()
+        else:
+            resp.send_keys("\n")
+        _log("audio answer submitted")
+        time.sleep(2.5)
+        return True
+    finally:
+        driver.switch_to.default_content()
+        if audio_path:
+            try:
+                os.unlink(audio_path)
+            except Exception:
+                pass
