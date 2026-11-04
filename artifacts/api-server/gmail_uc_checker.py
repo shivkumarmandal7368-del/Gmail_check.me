@@ -831,8 +831,21 @@ def _recaptcha_checkbox_ticked(driver) -> bool:
         return False
 
 
-def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = True) -> bool:
-    """One attempt inside the anchor iframe. Returns True if ticked after click."""
+def _cdp_click_xy(driver, x: float, y: float) -> None:
+    """Trusted mouse click in the top viewport (reCAPTCHA ignores JS clicks)."""
+    for typ, buttons in (("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": typ,
+            "x": float(x),
+            "y": float(y),
+            "button": "left",
+            "buttons": buttons,
+            "clickCount": 1,
+        })
+
+
+def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
+    """Trusted click on the checkbox. JS touch events do not tick reCAPTCHA."""
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.action_chains import ActionChains
 
@@ -841,6 +854,13 @@ def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = True) -> bool:
     if fr is None:
         return False
     try:
+        iframe_box = driver.execute_script(
+            """
+            const r = arguments[0].getBoundingClientRect();
+            return {x: r.left, y: r.top, w: r.width, h: r.height};
+            """,
+            fr,
+        ) or {}
         driver.switch_to.frame(fr)
         box = None
         for sel in (
@@ -856,38 +876,53 @@ def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = True) -> bool:
                     break
             except Exception:
                 continue
-        if box is None:
-            driver.switch_to.default_content()
-            return False
+        inner = None
+        if box is not None:
+            try:
+                inner = driver.execute_script(
+                    """
+                    const r = arguments[0].getBoundingClientRect();
+                    return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+                    """,
+                    box,
+                )
+            except Exception:
+                inner = None
+        driver.switch_to.default_content()
+        ix = float(iframe_box.get("x") or 0)
+        iy = float(iframe_box.get("y") or 0)
+        iw = float(iframe_box.get("w") or 0)
+        ih = float(iframe_box.get("h") or 0)
+        if inner:
+            x = ix + float(inner.get("x") or 0)
+            y = iy + float(inner.get("y") or 0)
+        else:
+            # Checkbox sits on the left of the anchor widget.
+            x = ix + min(28.0, max(12.0, iw * 0.12))
+            y = iy + ih / 2
         try:
-            driver.execute_script(
-                "arguments[0].scrollIntoView({block:'center', inline:'center'});", box
-            )
+            _cdp_click_xy(driver, x, y)
+        except Exception as exc:
+            log(f"reCAPTCHA CDP click failed: {exc}")
+        rand_sleep(350, 700)
+        if _recaptcha_checkbox_ticked(driver):
+            return True
+        # Chromedriver click is also a real input event inside the iframe.
+        try:
+            driver.switch_to.default_content()
+            fr = _find_recaptcha_anchor_iframe(driver)
+            if fr is not None:
+                driver.switch_to.frame(fr)
+                box = driver.find_elements(By.CSS_SELECTOR, "#recaptcha-anchor, .recaptcha-checkbox-border")
+                if box:
+                    try:
+                        box[0].click()
+                    except Exception:
+                        ActionChains(driver).move_to_element(box[0]).click().perform()
         except Exception:
             pass
-        rand_sleep(80, 180)
-        clicked = False
-        if use_touch:
-            try:
-                touch_click(driver, box)
-                clicked = True
-            except Exception:
-                pass
-        if not clicked:
-            try:
-                ActionChains(driver).move_to_element(box).pause(0.05).click().perform()
-                clicked = True
-            except Exception:
-                pass
-        if not clicked:
-            try:
-                driver.execute_script("arguments[0].click();", box)
-            except Exception:
-                pass
-        rand_sleep(200, 450)
-        ticked = _recaptcha_checkbox_ticked(driver)
-        driver.switch_to.default_content()
-        return ticked
+        rand_sleep(350, 700)
+        return _recaptcha_checkbox_ticked(driver)
     except Exception:
         try:
             driver.switch_to.default_content()
@@ -925,7 +960,7 @@ def handle_recaptcha_checkbox(
                 _rc_result = "passed"
                 log(f"{email} — reCAPTCHA already ticked (attempt {attempt})")
                 break
-            if _click_recaptcha_checkbox_once(driver, use_touch=True):
+            if _click_recaptcha_checkbox_once(driver):
                 _rc_result = "passed"
                 log(f"{email} — I'm not a robot checkbox clicked (attempt {attempt})")
                 break
@@ -935,7 +970,7 @@ def handle_recaptcha_checkbox(
             else:
                 log(f"{email} — reCAPTCHA click attempts exhausted")
 
-        wait_deadline = time.time() + max(_pace.get("rc_wait_s", 10), 12)
+        wait_deadline = time.time() + max(pace.get("rc_wait_s", 10), 12)
         while time.time() < wait_deadline and _rc_result != "passed":
             driver.switch_to.default_content()
             if "challenge/recaptcha" not in (driver.current_url or ""):
@@ -944,7 +979,7 @@ def handle_recaptcha_checkbox(
             if _recaptcha_checkbox_ticked(driver):
                 _rc_result = "passed"
                 break
-            time.sleep(_pace.get("rc_poll_s", 0.25))
+            time.sleep(pace.get("rc_poll_s", 0.25))
 
         if _rc_result == "passed":
             # Wait for password page / leave recaptcha URL
@@ -960,7 +995,7 @@ def handle_recaptcha_checkbox(
                     time.sleep(0.3)
                     if "challenge/recaptcha" not in driver.current_url:
                         break
-                time.sleep(_pace.get("rc_poll_s", 0.25))
+                time.sleep(pace.get("rc_poll_s", 0.25))
         else:
             driver.switch_to.default_content()
             from selenium.webdriver.common.by import By as _By
