@@ -10,9 +10,25 @@
  * Accounts already in-flight will run to completion (or TIMEOUT_MS).
  */
 
-import { createJob, emitJobEvent, getJob, cancelJob, pauseJob as markJobPaused, resumeJob as markJobResumed } from "./jobStore.js";
+import { execSync } from "node:child_process";
+import { createJob, emitJobEvent, getJob, getActiveJob, cancelJob, pauseJob as markJobPaused, resumeJob as markJobResumed } from "./jobStore.js";
 import type { Job } from "./jobStore.js";
 import { browserLoginCheck } from "./browserLoginChecker.js";
+
+/** Kill leftover Python checkers from a paused/crashed job so flock slots unblock. */
+function reapStaleGmailCheckerProcesses(): void {
+  try {
+    const out = execSync("pgrep -f gmail_uc_checker.py 2>/dev/null || true", {
+      encoding: "utf8",
+    }).trim();
+    if (!out) return;
+    const pids = out.split("\n").filter(Boolean);
+    console.log(`[JobRunner] Reaping ${pids.length} stale gmail_uc_checker process(es): ${pids.join(", ")}`);
+    execSync("pkill -TERM -f gmail_uc_checker.py || true");
+  } catch {
+    /* pgrep/pkill optional */
+  }
+}
 
 // In-memory abort controllers — lost on server restart, but that's OK because
 // restarted jobs are marked "interrupted" by initJobStore().
@@ -37,6 +53,13 @@ export interface StartJobParams {
  * client without waiting for completion.
  */
 export function startJob(params: StartJobParams): string {
+  const active = getActiveJob();
+  if (active) {
+    console.log(`[JobRunner] Stopping previous running job ${active.id} before starting a new one`);
+    abortJob(active.id);
+  }
+  reapStaleGmailCheckerProcesses();
+
   const job = createJob(params);
   const jobId = job.id;
   launchJob(jobId, params, true);

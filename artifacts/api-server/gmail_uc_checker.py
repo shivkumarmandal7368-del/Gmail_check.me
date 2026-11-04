@@ -68,6 +68,62 @@ _CHROME_LAUNCH_LOCK_PATH = "/tmp/gmail_checker_chrome_launch.lock"
 # Prevents OOM kill when multiple accounts are checked concurrently.
 # The launch lock above only covers startup (~3s); this one wraps the full login flow.
 _CHROME_SESSION_LOCK_PATH = "/tmp/gmail_checker_chrome_session.lock"
+_CHROME_SESSION_HOLDER_PATH = "/tmp/gmail_checker_chrome_session.holder"
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _read_session_holder_pid() -> int | None:
+    try:
+        with open(_CHROME_SESSION_HOLDER_PATH, encoding="utf-8") as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def _write_session_holder_pid(pid: int) -> None:
+    try:
+        with open(_CHROME_SESSION_HOLDER_PATH, "w", encoding="utf-8") as f:
+            f.write(str(pid))
+    except Exception:
+        pass
+
+
+def _clear_session_holder_pid() -> None:
+    try:
+        os.remove(_CHROME_SESSION_HOLDER_PATH)
+    except Exception:
+        pass
+
+
+def _flock_exclusive_wait(fd, log, *, label: str, heartbeat_sec: float = 4.0) -> None:
+    """Blocking flock with periodic stderr logs so the UI does not look frozen."""
+    import errno
+
+    start = time.monotonic()
+    last_log = -heartbeat_sec
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as e:
+            if e.errno not in (errno.EAGAIN, errno.EACCES):
+                raise
+        elapsed = time.monotonic() - start
+        if elapsed - last_log >= heartbeat_sec:
+            last_log = elapsed
+            extra = ""
+            if "session" in label.lower():
+                holder = _read_session_holder_pid()
+                if holder is not None:
+                    extra = f" — holder pid {holder} ({'alive' if _pid_alive(holder) else 'dead'})"
+            log(f"{label} ({int(elapsed)}s{extra})…")
 
 
 def _find_free_port() -> int:
@@ -3791,11 +3847,18 @@ def check_gmail(
 
     log(f"Launching Chrome (UC)…")
 
-    # ── Start private Xvfb display OUTSIDE the Chrome lock ─────────────────
-    # A separate short-lived display-allocation lock ensures no two accounts
-    # pick the same Xvfb display number.  The 0.5s Xvfb startup wait happens
-    # OUTSIDE the Chrome lock, so all accounts can initialise their displays
-    # in parallel rather than one at a time.
+    # ── Session slot FIRST — only one Chrome login at a time (OOM guard) ───
+    # Must be before Xvfb so a queued account does not start a display then hang.
+    _session_lock_fd = open(_CHROME_SESSION_LOCK_PATH, "w")
+    _flock_exclusive_wait(
+        _session_lock_fd,
+        log,
+        label="Waiting for Chrome session slot (OOM guard)",
+    )
+    _write_session_holder_pid(os.getpid())
+    log("Chrome session slot acquired")
+
+    # ── Private Xvfb display (short display-allocation lock) ───────────────
     _DISPLAY_ALLOC_LOCK = "/tmp/gmail_checker_display_alloc.lock"
     _xvfb_proc = None
     _disp_num = 99
@@ -3817,23 +3880,12 @@ def check_gmail(
     finally:
         fcntl.flock(_disp_lock_fd, fcntl.LOCK_UN)
         _disp_lock_fd.close()
-    time.sleep(0.5)  # Xvfb startup wait — runs in parallel while other accounts wait for Chrome lock
+    time.sleep(0.5)  # Xvfb startup wait
 
-    # ── Step B.5: Chrome session slot — held for ENTIRE login session ────────
-    # Prevents OOM kill: only ONE full Chrome instance runs at a time.
-    # Other concurrent accounts queue here and start after current one finishes.
-    _session_lock_fd = open(_CHROME_SESSION_LOCK_PATH, "w")
-    log("Waiting for Chrome session slot (OOM guard)…")
-    fcntl.flock(_session_lock_fd, fcntl.LOCK_EX)
-    log("Chrome session slot acquired")
-
-    # ── Step C: Chrome launch lock — now only covers the fast Chrome start ──
-    # With chromedriver pre-patched and Xvfb already running, this lock holds
-    # for only ~2-4s (Chrome process start + brief CDP settle) instead of ~13s.
+    # ── Chrome launch lock — serializes chromedriver bind (~2–4s) ───────────
     _lock_fd = open(_CHROME_LAUNCH_LOCK_PATH, "w")
-    log("Waiting for Chrome launch slot…")
-    fcntl.flock(_lock_fd, fcntl.LOCK_EX)
-    log("Chrome launch slot acquired — starting Chrome")
+    _flock_exclusive_wait(_lock_fd, log, label="Waiting for Chrome launch slot")
+    log("Chrome launch slot acquired — starting Chrome (LocalToNet slow ho to 30–60s lag sakta hai)")
     _cd_port = _find_free_port()
     log(f"ChromeDriver port: {_cd_port}")
     try:
@@ -4101,6 +4153,8 @@ def check_gmail(
         try:
             fcntl.flock(_session_lock_fd, fcntl.LOCK_UN)
             _session_lock_fd.close()
+            if _read_session_holder_pid() == os.getpid():
+                _clear_session_holder_pid()
             log("Chrome session slot released")
         except Exception:
             pass
