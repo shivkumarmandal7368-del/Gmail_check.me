@@ -962,8 +962,72 @@ def _cdp_touch_xy(driver, x: float, y: float) -> None:
         log(f"reCAPTCHA touch click skipped: {exc}")
 
 
+def _cdp_click_element(driver, element) -> bool:
+    """Click the visible center of a control. ActionChains misses overlay buttons."""
+    try:
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block:'center', inline:'center'});",
+            element,
+        )
+    except Exception:
+        pass
+    try:
+        rect = driver.execute_script(
+            "var r = arguments[0].getBoundingClientRect();"
+            "return {x: r.left, y: r.top, w: r.width, h: r.height};",
+            element,
+        ) or {}
+        w = float(rect.get("w") or 0)
+        h = float(rect.get("h") or 0)
+        if w < 4 or h < 4:
+            return False
+        _cdp_click_xy(driver, float(rect["x"]) + w / 2, float(rect["y"]) + h / 2)
+        return True
+    except Exception as exc:
+        log(f"CDP element click failed: {exc}")
+        return False
+
+
+def _find_control_by_label(driver, labels: tuple[str, ...]):
+    """Button whose own text is one of the labels, including inside a shadow root."""
+    try:
+        return driver.execute_script(
+            """
+            var want = arguments[0];
+            function norm(el) {
+              return (el.innerText || el.textContent || '')
+                .replace(/\\s+/g, ' ').trim().toLowerCase();
+            }
+            function walk(root, hits) {
+              if (!root || !root.querySelectorAll) return;
+              var nodes = root.querySelectorAll('button, [role="button"], a, span, div');
+              for (var i = 0; i < nodes.length; i++) {
+                var el = nodes[i];
+                var t = norm(el);
+                if (t && want.indexOf(t) !== -1 && t.length < 28) hits.push(el);
+                if (el.shadowRoot) walk(el.shadowRoot, hits);
+              }
+            }
+            var hits = [];
+            walk(document, hits);
+            for (var j = 0; j < hits.length; j++) {
+              var n = hits[j];
+              var b = n.closest ? (n.closest('button, [role="button"], a') || n) : n;
+              var r = b.getBoundingClientRect();
+              if (r.width > 8 && r.height > 8) return b;
+            }
+            return null;
+            """,
+            [x.lower() for x in labels],
+        )
+    except Exception:
+        return None
+
+
 def _trusted_button_click(driver, element) -> bool:
     """Real pointer click. Google ignores the synthetic touch events on Next."""
+    if _cdp_click_element(driver, element):
+        return True
     from selenium.webdriver.common.action_chains import ActionChains
     try:
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
@@ -978,6 +1042,43 @@ def _trusted_button_click(driver, element) -> bool:
             return True
         except Exception:
             return False
+
+
+def _page_visible_text(driver) -> str:
+    try:
+        return (
+            driver.execute_script(
+                "return ((document.body && document.body.innerText) || '')"
+            )
+            or ""
+        ).lower()
+    except Exception:
+        return ""
+
+
+def _google_error_dialog_open(driver) -> bool:
+    return "something went wrong" in _page_visible_text(driver)
+
+
+def _clear_google_error_dialog(driver, email: str) -> bool:
+    """Dismiss Google's sign-in error. Next does nothing while that dialog is up."""
+    if not _google_error_dialog_open(driver):
+        return False
+    log(f"{email} — Google error dialog, clicking Restart")
+    el = _find_control_by_label(driver, ("Restart", "Try again"))
+    clicked = bool(el is not None and _cdp_click_element(driver, el))
+    if not clicked:
+        clicked = _click_button_text(driver, ("Restart", "Try again"))
+    time.sleep(1.1)
+    if not _google_error_dialog_open(driver):
+        log(f"{email} — error dialog closed")
+        return True
+    log(f"{email} — Restart did not close the dialog, reloading the sign-in page")
+    try:
+        driver.get(GOOGLE_EMAIL_SIGNIN)
+    except Exception as exc:
+        log(f"{email} — sign-in reload failed: {exc}")
+    return True
 
 
 def _click_button_text(driver, labels: tuple[str, ...]) -> bool:
@@ -1333,7 +1434,14 @@ def handle_recaptcha_checkbox(
         anchor_since = None
         found = {}
         _last_wait_log = 0.0
+        _reloaded_robot = False
         while time.time() < ready_deadline:
+            if _google_error_dialog_open(driver):
+                _clear_google_error_dialog(driver, email)
+                ready_deadline = max(ready_deadline, time.time() + 16)
+                anchor_since = None
+                time.sleep(0.4)
+                continue
             found = _cdp_find_recaptcha(driver)
             if found.get("checkbox"):
                 break
@@ -1345,6 +1453,22 @@ def handle_recaptcha_checkbox(
             else:
                 anchor_since = None
             waited = time.time() - ready_started
+            if (
+                not _reloaded_robot
+                and not found.get("anchor")
+                and waited >= 12
+            ):
+                _reloaded_robot = True
+                log(f"{email} — robot checkbox still missing, reloading the page")
+                try:
+                    driver.switch_to.default_content()
+                    driver.get(driver.current_url)
+                except Exception as exc:
+                    log(f"{email} — robot page reload failed: {exc}")
+                ready_deadline = max(ready_deadline, time.time() + 18)
+                anchor_since = None
+                time.sleep(0.6)
+                continue
             if waited - _last_wait_log >= 5:
                 _last_wait_log = waited
                 log(f"{email} — waiting for the robot checkbox ({int(waited)}s)")
@@ -7178,30 +7302,6 @@ def _do_login(
         except Exception:
             return False
 
-    def _restart_google_error() -> bool:
-        """Google's 'Something went wrong' dialog blocks Next until Restart is tapped."""
-        try:
-            body = (driver.find_element(By.TAG_NAME, "body").text or "").lower()
-        except Exception:
-            return False
-        if "something went wrong" not in body:
-            return False
-        log(f"{email} — Google error dialog, clicking Restart")
-        try:
-            el = driver.execute_script("""
-                var nodes = document.querySelectorAll('button, [role="button"], a, span');
-                for (var i = 0; i < nodes.length; i++) {
-                  var t = (nodes[i].innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                  if (t === 'restart' || t === 'try again') return nodes[i];
-                }
-                return null;
-            """)
-        except Exception:
-            el = None
-        if el is not None and _trusted_button_click(driver, el):
-            return True
-        return _click_button_text(driver, ("Restart", "Try again"))
-
     _click_email_next()
     # A slow phone proxy can take as long to leave this page as it took to open it.
     _nav_deadline = time.time() + (32 if _phone_fast else 12)
@@ -7228,22 +7328,25 @@ def _do_login(
                 break
         except Exception:
             pass
-        if _restarts < 2 and _restart_google_error():
+        if _restarts < 2 and _clear_google_error_dialog(driver, email):
             _restarts += 1
-            time.sleep(1.2)
             email_field = wait_for_any(EMAIL_SELECTORS, timeout=12) or email_field
-            if _phone_fast:
-                fast_paste(driver, email_field, email)
-            else:
-                clipboard_type(driver, email_field, email)
-            _click_email_next()
+            try:
+                if _phone_fast:
+                    fast_paste(driver, email_field, email)
+                else:
+                    clipboard_type(driver, email_field, email)
+                _click_email_next()
+            except Exception as exc:
+                log(f"{email} — resubmit after Restart failed: {exc}")
             _next_retried = False
             _next_at = time.time()
-            _nav_deadline = max(_nav_deadline, time.time() + 20)
+            _nav_deadline = max(_nav_deadline, time.time() + 24)
             continue
-        # First tap can land while the form is still painting. Click once more
-        # only if the email box is still on screen and no error dialog is up.
-        if not _next_retried and (time.time() - _next_at) > 4 and _email_box_visible():
+        # A second Next too soon interrupts the first request and Google
+        # opens "Something went wrong". Wait until that request has had a
+        # chance to leave the page.
+        if not _next_retried and (time.time() - _next_at) > 10 and _email_box_visible():
             log(f"{email} — email page still open, clicking Next again")
             _click_email_next()
             _next_retried = True
@@ -7626,7 +7729,7 @@ def _do_login(
                     el = None
                 if el is None:
                     return False
-                if _trusted_button_click(driver, el):
+                if _cdp_click_element(driver, el) or _trusted_button_click(driver, el):
                     log(f"{email} — Authenticator clicked")
                     return True
                 try:
