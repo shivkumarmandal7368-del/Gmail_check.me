@@ -1,0 +1,28 @@
+name: VPS Set Proxy
+
+on:
+  workflow_dispatch:
+    inputs:
+      proxy_url:
+        description: "Full PROXY_URL (http://user:pass@host:port)"
+        required: true
+        type: string
+
+jobs:
+  set-proxy:
+    if: github.repository == 'shivkumarmandal7368-del/Gmail_check.me'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update PROXY_URL on VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /home/vanguard/vanguard-mx
+            git fetch origin main
+            git checkout main
+            git pull --ff-only origin main
+            sudo VANGUARD_REPO_DIR=/home/vanguard/vanguard-mx VANGUARD_USER=vanguard \
+              bash scripts/vps-set-proxy-env.sh '${{ inputs.proxy_url }}'
