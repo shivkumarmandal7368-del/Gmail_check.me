@@ -7511,47 +7511,43 @@ def _do_login(
             log(f"{email} — Clicking 'Google Authenticator' option")
 
             def _click_authenticator():
-                """Real tap. Google ignores a synthetic JS click on this row."""
-                from selenium.webdriver.common.by import By as _By
-                xpath = (
-                    "//*[@data-challengetype='6']"
-                    "|//li[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'authenticator')]"
-                    "|//*[@role='link' or @role='button'][contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'authenticator')]"
-                )
+                """Real tap on the Authenticator row. The list paints a moment after the URL changes."""
                 try:
-                    els = driver.find_elements(_By.XPATH, xpath)
-                except Exception:
-                    els = []
-                for el in els:
-                    try:
-                        if el.is_displayed() and _trusted_button_click(driver, el):
-                            log(f"{email} — Authenticator clicked")
-                            return True
-                    except Exception:
-                        continue
-                try:
-                    clicked = driver.execute_script("""
+                    el = driver.execute_script("""
                         var byType = document.querySelector('[data-challengetype="6"]');
-                        if (byType) { byType.click(); return true; }
-                        return false;
+                        if (byType) return byType;
+                        var nodes = document.querySelectorAll('li, [role="link"], [role="button"], [data-challengetype]');
+                        for (var i = 0; i < nodes.length; i++) {
+                          var t = (nodes[i].innerText || '').toLowerCase();
+                          if (t.indexOf('authenticator') !== -1 && t.length < 90) return nodes[i];
+                        }
+                        return null;
                     """)
-                    if clicked:
-                        log(f"{email} — Authenticator JS fallback click")
-                        return True
-                except Exception as e:
-                    log(f"Authenticator click error: {e}")
-                return False
+                except Exception:
+                    el = None
+                if el is None:
+                    return False
+                if _trusted_button_click(driver, el):
+                    log(f"{email} — Authenticator clicked")
+                    return True
+                try:
+                    el.click()
+                    log(f"{email} — Authenticator element click")
+                    return True
+                except Exception as exc:
+                    log(f"Authenticator click error: {exc}")
+                    return False
 
             tmark("2fa start")
-            _click_authenticator()
+            _row_deadline = time.time() + (2.5 if _pace["fast"] else 8)
+            while time.time() < _row_deadline and not _click_authenticator():
+                time.sleep(0.2)
 
-            # The row opens the code box in about a second. Do not sit out the
-            # full timeout when the first tap missed.
-            totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=_pace["2fa_totp_wait"])
+            totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2.5 if _pace["fast"] else _pace["2fa_totp_wait"])
             if totp_field is None and _pace["fast"]:
                 log(f"{email} — Authenticator tap missed, clicking again")
                 _click_authenticator()
-                totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=1.5)
+                totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2.0)
 
             # Fallback: try "Try another way" → then click authenticator again
             if totp_field is None:
@@ -7752,6 +7748,7 @@ def _do_login(
     # Google often shows recovery/address/terms screens before landing on Gmail.
     # Strategy: try to dismiss nicely first; if still not at Gmail after a few
     # attempts, force-navigate directly to the inbox.
+    _last_interstitial_totp = 0.0
     for _attempt in range(8):
         url, text = page_state()
         host = get_hostname(url)
@@ -7972,8 +7969,13 @@ def _do_login(
                 pass
             dismissed = True
 
-        # TOTP page reappeared — enter a fresh code and continue
+        # TOTP page reappeared — enter a fresh code and continue.
+        # On the fast path a code was just submitted; looping here used to paste
+        # it again four times before Google finished the redirect.
         elif "challenge/totp" in url or "challenge/selection" in url:
+            if _pace.get("fast") and time.time() - _last_interstitial_totp < 4:
+                time.sleep(0.25)
+                continue
             log(f"{email} — TOTP/selection page reappeared in interstitial loop, re-entering")
             if totp_secret:
                 # Wait out the window only when Google rejected the code.
@@ -8000,14 +8002,14 @@ def _do_login(
                         driver.execute_script("""
                             var byType = document.querySelector('[data-challengetype="6"]');
                             if (byType) { byType.click(); return; }
-                            var all = Array.from(document.querySelectorAll('*'));
+                            var all = Array.from(document.querySelectorAll('li, [role="link"], [role="button"]'));
                             var found = all.find(function(el) {
-                                return el.children.length === 0 && el.innerText &&
-                                       el.innerText.toLowerCase().indexOf('authenticator') !== -1;
+                                var t = (el.innerText || '').toLowerCase();
+                                return t.indexOf('authenticator') !== -1 && t.length < 90;
                             });
                             if (found) found.click();
                         """)
-                        rand_sleep(700, 1200)
+                        rand_sleep(*( (200, 350) if _pace.get("fast") else (700, 1200) ))
                     tf = wait_for_any([
                         'input[name="totpPin"]', 'input[name="Pin"]',
                         'input[autocomplete="one-time-code"]', 'input[type="tel"]',
@@ -8018,6 +8020,7 @@ def _do_login(
                             fast_paste(driver, tf, fresh_code)
                             if not _click_button_text(driver, ("Next", "Verify")):
                                 tf.send_keys(Keys.ENTER)
+                            _last_interstitial_totp = time.time()
                         else:
                             tf.clear()
                             rand_sleep(50, 100)
