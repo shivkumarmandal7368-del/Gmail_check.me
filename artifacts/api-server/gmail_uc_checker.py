@@ -7178,10 +7178,35 @@ def _do_login(
         except Exception:
             return False
 
+    def _restart_google_error() -> bool:
+        """Google's 'Something went wrong' dialog blocks Next until Restart is tapped."""
+        try:
+            body = (driver.find_element(By.TAG_NAME, "body").text or "").lower()
+        except Exception:
+            return False
+        if "something went wrong" not in body:
+            return False
+        log(f"{email} — Google error dialog, clicking Restart")
+        try:
+            el = driver.execute_script("""
+                var nodes = document.querySelectorAll('button, [role="button"], a, span');
+                for (var i = 0; i < nodes.length; i++) {
+                  var t = (nodes[i].innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                  if (t === 'restart' || t === 'try again') return nodes[i];
+                }
+                return null;
+            """)
+        except Exception:
+            el = None
+        if el is not None and _trusted_button_click(driver, el):
+            return True
+        return _click_button_text(driver, ("Restart", "Try again"))
+
     _click_email_next()
     # A slow phone proxy can take as long to leave this page as it took to open it.
     _nav_deadline = time.time() + (32 if _phone_fast else 12)
     _next_retried = False
+    _restarts = 0
     _next_at = time.time()
     while time.time() < _nav_deadline:
         try:
@@ -7203,8 +7228,21 @@ def _do_login(
                 break
         except Exception:
             pass
+        if _restarts < 2 and _restart_google_error():
+            _restarts += 1
+            time.sleep(1.2)
+            email_field = wait_for_any(EMAIL_SELECTORS, timeout=12) or email_field
+            if _phone_fast:
+                fast_paste(driver, email_field, email)
+            else:
+                clipboard_type(driver, email_field, email)
+            _click_email_next()
+            _next_retried = False
+            _next_at = time.time()
+            _nav_deadline = max(_nav_deadline, time.time() + 20)
+            continue
         # First tap can land while the form is still painting. Click once more
-        # only if the email box is still on screen.
+        # only if the email box is still on screen and no error dialog is up.
         if not _next_retried and (time.time() - _next_at) > 4 and _email_box_visible():
             log(f"{email} — email page still open, clicking Next again")
             _click_email_next()
