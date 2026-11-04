@@ -2064,7 +2064,7 @@ def _login_pace(proxy_url: str | None) -> dict:
         "signed_in": (80, 160) if fast else (400, 700),
         "totp_wait_s": 8 if fast else 30,
         "totp_poll_s": 0.2 if fast else 0.5,
-        "2fa_totp_wait": 3 if fast else 18,
+        "2fa_totp_wait": 1.2 if fast else 18,
         "skip_logout": fast,
         "rc_pre_click": (250, 500) if fast else (1200, 2200),
         "rc_poll_s": 0.2 if fast else 0.4,
@@ -7511,34 +7511,47 @@ def _do_login(
             log(f"{email} — Clicking 'Google Authenticator' option")
 
             def _click_authenticator():
+                """Real tap. Google ignores a synthetic JS click on this row."""
+                from selenium.webdriver.common.by import By as _By
+                xpath = (
+                    "//*[@data-challengetype='6']"
+                    "|//li[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'authenticator')]"
+                    "|//*[@role='link' or @role='button'][contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'authenticator')]"
+                )
                 try:
-                    driver.execute_script("""
-                        // Try by data-challengetype (totp = 6)
+                    els = driver.find_elements(_By.XPATH, xpath)
+                except Exception:
+                    els = []
+                for el in els:
+                    try:
+                        if el.is_displayed() and _trusted_button_click(driver, el):
+                            log(f"{email} — Authenticator clicked")
+                            return True
+                    except Exception:
+                        continue
+                try:
+                    clicked = driver.execute_script("""
                         var byType = document.querySelector('[data-challengetype="6"]');
-                        if (byType) { byType.click(); return; }
-                        // Try by visible text containing "authenticator"
-                        var allEls = Array.from(document.querySelectorAll(
-                            'li, div[role="listitem"], [data-challengetype]'));
-                        var found = allEls.find(function(el) {
-                            return el.innerText && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
-                        });
-                        if (found) { found.click(); return; }
-                        // Broader fallback — any clickable element with the word
-                        var broader = Array.from(document.querySelectorAll('*')).find(function(el) {
-                            return el.children.length === 0
-                                && el.innerText
-                                && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
-                        });
-                        if (broader) broader.click();
+                        if (byType) { byType.click(); return true; }
+                        return false;
                     """)
+                    if clicked:
+                        log(f"{email} — Authenticator JS fallback click")
+                        return True
                 except Exception as e:
                     log(f"Authenticator click error: {e}")
+                return False
 
+            tmark("2fa start")
             _click_authenticator()
-            rand_sleep(*_pace["medium"])
 
-            # Wait for the TOTP input to appear (longer timeout — SPA navigation on dp page)
+            # The row opens the code box in about a second. Do not sit out the
+            # full timeout when the first tap missed.
             totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=_pace["2fa_totp_wait"])
+            if totp_field is None and _pace["fast"]:
+                log(f"{email} — Authenticator tap missed, clicking again")
+                _click_authenticator()
+                totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=1.5)
 
             # Fallback: try "Try another way" → then click authenticator again
             if totp_field is None:
@@ -7557,12 +7570,14 @@ def _do_login(
                     rand_sleep(*_pace["medium"])
                     _click_authenticator()
                     rand_sleep(*_pace["medium"])
-                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=4 if _pace["fast"] else 8)
+                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2 if _pace["fast"] else 8)
                 except Exception as e:
                     log(f"Try another way error: {e}")
 
         url, text = page_state()
         log(f"{email} — After 2FA handling: {url[:70]}, totp_field={'found' if totp_field else 'NOT found'}")
+        if totp_field is not None:
+            tmark("totp field ready")
 
     # ── Enter TOTP code (whether we just navigated here or were already here) ─
     if totp_field is not None:
@@ -7578,9 +7593,11 @@ def _do_login(
 
         # One submit. Re-entering the same page immediately costs ~10s and Google ignores it.
         enter_fresh_totp_once("Step 4 — TOTP")
+        tmark("totp submitted")
         if not _pace["fast"]:
             clear_totp_pages(max_rounds=2, pause_label="Step 4 — extra TOTP")
         _last_totp_submit = time.time()
+        _totp_next_retried = False
 
         rand_sleep(*_pace["totp_after"])
 
@@ -7603,10 +7620,19 @@ def _do_login(
                 log(f"{email} — left TOTP page → {url[:70]}")
                 break
 
-            if is_totp_challenge_url(url) and (time.time() - _last_totp_submit) >= 6:
-                enter_fresh_totp_once("TOTP while waiting for redirect")
+            _retry_after = 1.4 if _pace["fast"] else 6
+            if (
+                is_totp_challenge_url(url)
+                and not _totp_next_retried
+                and (time.time() - _last_totp_submit) >= _retry_after
+            ):
+                # The code is already in the box. Click Next again instead of
+                # waiting 6s and typing the same code a second time.
+                log(f"{email} — TOTP page still open, clicking Next again")
+                if not _click_button_text(driver, ("Next", "Verify")):
+                    enter_fresh_totp_once("TOTP while waiting for redirect")
+                _totp_next_retried = True
                 _last_totp_submit = time.time()
-                rand_sleep(*_pace["totp_after"])
                 continue
 
             # ── Early exit: detect "Verify your info to continue" immediately ──
@@ -7646,6 +7672,8 @@ def _do_login(
         rand_sleep(*_pace["totp_after"])
         url, text = page_state()
         log(f"{email} — After TOTP submit (final): {url[:70]}")
+        tmark("totp done")
+        _log_login_timing_summary()
         if "gds.google.com" in url and _pace["fast"]:
             try:
                 driver.get(ACCOUNT_HOME)
