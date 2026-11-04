@@ -448,8 +448,21 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             _log(f"audio button click failed: {exc} — trying CDP")
             driver.switch_to.default_content()
             return _try_audio_via_cdp(driver)
-        time.sleep(1.4)
 
+        # The password page can open while this clip is still loading.
+        clip_deadline = time.time() + 1.6
+        while time.time() < clip_deadline:
+            try:
+                driver.switch_to.default_content()
+                if "challenge/recaptcha" not in (driver.current_url or ""):
+                    _log("left recaptcha page")
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+        if not _switch_challenge_frame(driver):
+            return False
         session = req.Session()
         audio_path = None
         try:
@@ -457,7 +470,7 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             if not audio_path:
                 _log("could not download audio clip")
                 driver.switch_to.default_content()
-                continue
+                return False
             answer = _transcribe_audio(audio_path)
             if not answer:
                 driver.switch_to.default_content()

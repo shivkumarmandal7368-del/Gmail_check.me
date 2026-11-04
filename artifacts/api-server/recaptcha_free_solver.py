@@ -36,6 +36,33 @@ def _wait_recaptcha_cleared(
     return False
 
 
+def _parent_left_recaptcha(driver: "WebDriver") -> bool:
+    try:
+        driver.switch_to.default_content()
+        return "challenge/recaptcha" not in (driver.current_url or "")
+    except Exception:
+        return False
+
+
+def _image_grid_ready(driver: "WebDriver") -> bool:
+    """True when the picture challenge is already painted. Audio would only slow that down."""
+    from selenium.webdriver.common.by import By
+    from recaptcha_audio_solver import _switch_challenge_frame
+
+    if not _switch_challenge_frame(driver):
+        return False
+    try:
+        tiles = driver.find_elements(By.CSS_SELECTOR, "td.rc-imageselect-tile, .rc-imageselect-tile")
+        return len(tiles) >= 4
+    except Exception:
+        return False
+    finally:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+
+
 def run_free_captcha_pipeline(
     driver: "WebDriver",
     checkbox_ticked: Callable[[], bool],
@@ -45,22 +72,44 @@ def run_free_captcha_pipeline(
     if not free_audio_enabled() and not free_vision_enabled():
         return False
 
+    # The checkbox click often reaches the password page on its own.
+    # Clicking the headphone button during that hop added several seconds.
+    if not _image_grid_ready(driver):
+        grace = time.time() + 2.2
+        while time.time() < grace:
+            if _parent_left_recaptcha(driver):
+                _log("left recaptcha page")
+                return True
+            time.sleep(0.2)
+
     for cycle in range(1, max_cycles + 1):
         _log(f"cycle {cycle}/{max_cycles}")
+        if _parent_left_recaptcha(driver):
+            _log("left recaptcha page")
+            return True
         solved = False
+        grid_first = free_vision_enabled() and _image_grid_ready(driver)
 
-        if free_audio_enabled():
+        if grid_first:
+            _log("try image (YOLO)")
+            if try_solve_recaptcha_image_page(driver, rounds=4):
+                if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
+                    _log("cleared after vision")
+                    return True
+                solved = True
+
+        if free_audio_enabled() and not _parent_left_recaptcha(driver):
             _log("try audio (Whisper)")
             if try_solve_recaptcha_audio_page(driver):
-                if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=22):
+                if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
                     _log("cleared after audio")
                     return True
                 solved = True
 
-        if free_vision_enabled():
+        if free_vision_enabled() and not grid_first and not _parent_left_recaptcha(driver):
             _log("try image (YOLO)")
-            if try_solve_recaptcha_image_page(driver, rounds=2):
-                if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=22):
+            if try_solve_recaptcha_image_page(driver, rounds=4):
+                if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
                     _log("cleared after vision")
                     return True
                 solved = True

@@ -1434,11 +1434,10 @@ def handle_recaptcha_checkbox(
         anchor_since = None
         found = {}
         _last_wait_log = 0.0
-        _reloaded_robot = False
         while time.time() < ready_deadline:
             if _google_error_dialog_open(driver):
                 _clear_google_error_dialog(driver, email)
-                ready_deadline = max(ready_deadline, time.time() + 16)
+                ready_deadline = max(ready_deadline, time.time() + 12)
                 anchor_since = None
                 time.sleep(0.4)
                 continue
@@ -1453,22 +1452,6 @@ def handle_recaptcha_checkbox(
             else:
                 anchor_since = None
             waited = time.time() - ready_started
-            if (
-                not _reloaded_robot
-                and not found.get("anchor")
-                and waited >= 12
-            ):
-                _reloaded_robot = True
-                log(f"{email} — robot checkbox still missing, reloading the page")
-                try:
-                    driver.switch_to.default_content()
-                    driver.get(driver.current_url)
-                except Exception as exc:
-                    log(f"{email} — robot page reload failed: {exc}")
-                ready_deadline = max(ready_deadline, time.time() + 18)
-                anchor_since = None
-                time.sleep(0.6)
-                continue
             if waited - _last_wait_log >= 5:
                 _last_wait_log = waited
                 log(f"{email} — waiting for the robot checkbox ({int(waited)}s)")
@@ -7713,15 +7696,26 @@ def _do_login(
             log(f"{email} — Clicking 'Google Authenticator' option")
 
             def _click_authenticator():
-                """Real tap on the Authenticator row. The list paints a moment after the URL changes."""
+                """Real tap on the visible Authenticator row. A hidden node throws and burns seconds."""
                 try:
                     el = driver.execute_script("""
-                        var byType = document.querySelector('[data-challengetype="6"]');
-                        if (byType) return byType;
-                        var nodes = document.querySelectorAll('li, [role="link"], [role="button"], [data-challengetype]');
+                        function box(el) {
+                          if (!el || !el.getBoundingClientRect) return null;
+                          var r = el.getBoundingClientRect();
+                          if (r.width < 24 || r.height < 18) return null;
+                          return el;
+                        }
+                        var nodes = document.querySelectorAll('[data-challengetype="6"]');
                         for (var i = 0; i < nodes.length; i++) {
-                          var t = (nodes[i].innerText || '').toLowerCase();
-                          if (t.indexOf('authenticator') !== -1 && t.length < 90) return nodes[i];
+                          var n = nodes[i];
+                          var hit = box(n) || box(n.parentElement);
+                          if (hit) return hit;
+                        }
+                        nodes = document.querySelectorAll('li, [role="link"], [role="button"]');
+                        for (var j = 0; j < nodes.length; j++) {
+                          var t = (nodes[j].innerText || '').toLowerCase();
+                          if (t.indexOf('authenticator') !== -1 && t.length < 90 && box(nodes[j]))
+                            return nodes[j];
                         }
                         return null;
                     """)
@@ -7729,27 +7723,26 @@ def _do_login(
                     el = None
                 if el is None:
                     return False
-                if _cdp_click_element(driver, el) or _trusted_button_click(driver, el):
+                if _cdp_click_element(driver, el):
                     log(f"{email} — Authenticator clicked")
                     return True
-                try:
-                    el.click()
-                    log(f"{email} — Authenticator element click")
-                    return True
-                except Exception as exc:
-                    log(f"Authenticator click error: {exc}")
-                    return False
+                return False
 
             tmark("2fa start")
-            _row_deadline = time.time() + (2.5 if _pace["fast"] else 8)
-            while time.time() < _row_deadline and not _click_authenticator():
-                time.sleep(0.2)
-
-            totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2.5 if _pace["fast"] else _pace["2fa_totp_wait"])
-            if totp_field is None and _pace["fast"]:
-                log(f"{email} — Authenticator tap missed, clicking again")
-                _click_authenticator()
-                totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2.0)
+            _row_deadline = time.time() + (4 if _pace["fast"] else 8)
+            _auth_clicks = 0
+            while time.time() < _row_deadline and totp_field is None:
+                if is_totp_challenge_url(driver.current_url or ""):
+                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=1.2)
+                    break
+                totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=0.15)
+                if totp_field is not None:
+                    break
+                if _auth_clicks < 2 and _click_authenticator():
+                    _auth_clicks += 1
+                    time.sleep(0.35)
+                else:
+                    time.sleep(0.15)
 
             # Fallback: try "Try another way" → then click authenticator again
             if totp_field is None:
@@ -7818,14 +7811,24 @@ def _do_login(
                 log(f"{email} — left TOTP page → {url[:70]}")
                 break
 
-            _retry_after = 1.4 if _pace["fast"] else 6
+            _retry_after = 3.0 if _pace["fast"] else 6
+            _totp_still_shown = False
+            if is_totp_challenge_url(url):
+                try:
+                    for _sel in TOTP_INPUT_SELECTORS:
+                        _box = driver.find_element(By.CSS_SELECTOR, _sel)
+                        if _box.is_displayed():
+                            _totp_still_shown = True
+                            break
+                except Exception:
+                    _totp_still_shown = False
             if (
-                is_totp_challenge_url(url)
+                _totp_still_shown
                 and not _totp_next_retried
                 and (time.time() - _last_totp_submit) >= _retry_after
             ):
-                # The code is already in the box. Click Next again instead of
-                # waiting 6s and typing the same code a second time.
+                # The code is still on screen, so the first Next did not register.
+                # If the box is already gone, Google is navigating and a second tap interrupts it.
                 log(f"{email} — TOTP page still open, clicking Next again")
                 if not _click_button_text(driver, ("Next", "Verify")):
                     enter_fresh_totp_once("TOTP while waiting for redirect")
