@@ -393,6 +393,12 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
     import requests as req
 
     for attempt in range(1, attempts + 1):
+        try:
+            if "challenge/recaptcha" not in (driver.current_url or ""):
+                _log("left recaptcha page")
+                return True
+        except Exception:
+            pass
         if not _switch_challenge_frame(driver):
             _log("no selenium challenge iframe — using CDP")
             return _try_audio_via_cdp(driver)

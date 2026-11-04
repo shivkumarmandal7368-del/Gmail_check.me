@@ -1362,6 +1362,10 @@ def handle_recaptcha_checkbox(
                 _rc_result = "passed"
                 log(f"{email} — I'm not a robot checkbox clicked (attempt {attempt})")
                 break
+            if _cdp_challenge_open(driver):
+                log(f"{email} — reCAPTCHA challenge is open")
+                _rc_result = "image"
+                break
             if attempt < 2:
                 log(f"{email} — reCAPTCHA click attempt {attempt} did not tick — retry")
                 rand_sleep(200, 400)
@@ -2056,7 +2060,7 @@ def _login_pace(proxy_url: str | None) -> dict:
         "totp_after": (200, 350) if fast else (700, 1200),
         "totp_clear": (250, 450) if fast else (900, 1400),
         "signed_in": (80, 160) if fast else (400, 700),
-        "totp_wait_s": 16 if fast else 30,
+        "totp_wait_s": 8 if fast else 30,
         "totp_poll_s": 0.2 if fast else 0.5,
         "2fa_totp_wait": 3 if fast else 18,
         "skip_logout": fast,
@@ -5337,29 +5341,34 @@ def _do_login(
                 log(f"{email} — {label}: TOTP field not found")
                 return False
             try:
-                touch_click(driver, field)
-                rand_sleep(60, 120)
-                try:
-                    field.clear()
-                except Exception:
-                    pass
-                rand_sleep(40, 80)
-                clipboard_type(driver, field, code)
-                rand_sleep(100, 200)
-                try:
-                    field.send_keys(Keys.ENTER)
-                except Exception:
-                    pass
-                driver.execute_script(
-                    """
-                    var btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-                    var next = btns.find(function(b) {
-                      var t = (b.innerText || b.textContent || '').trim().toLowerCase();
-                      return t === 'next' || t === 'verify' || t === 'continue';
-                    });
-                    if (next && !next.disabled) next.click();
-                    """
-                )
+                if _pace.get("fast"):
+                    fast_paste(driver, field, code)
+                    if not _click_button_text(driver, ("Next", "Verify")):
+                        field.send_keys(Keys.ENTER)
+                else:
+                    touch_click(driver, field)
+                    rand_sleep(60, 120)
+                    try:
+                        field.clear()
+                    except Exception:
+                        pass
+                    rand_sleep(40, 80)
+                    clipboard_type(driver, field, code)
+                    rand_sleep(100, 200)
+                    try:
+                        field.send_keys(Keys.ENTER)
+                    except Exception:
+                        pass
+                    driver.execute_script(
+                        """
+                        var btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+                        var next = btns.find(function(b) {
+                          var t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                          return t === 'next' || t === 'verify' || t === 'continue';
+                        });
+                        if (next && !next.disabled) next.click();
+                        """
+                    )
                 totp_code = code
                 log(f"{email} — {label}: TOTP submitted")
                 return True
@@ -7577,7 +7586,15 @@ def _do_login(
             url = driver.current_url
             if signed_in_host(url) or is_google_password_change_url(url):
                 break
-            if "gds.google.com" in url or "myaccount.google.com" in url:
+            # Match the host only. The totp URL's continue= query contains
+            # myaccount.google.com and used to look like we had already left.
+            _totp_host = ""
+            try:
+                from urllib.parse import urlparse as _urlparse
+                _totp_host = (_urlparse(url).hostname or "").lower()
+            except Exception:
+                _totp_host = ""
+            if _totp_host == "myaccount.google.com" or _totp_host.endswith("gds.google.com"):
                 log(f"{email} — left TOTP page → {url[:70]}")
                 break
 
@@ -7926,15 +7943,24 @@ def _do_login(
         elif "challenge/totp" in url or "challenge/selection" in url:
             log(f"{email} — TOTP/selection page reappeared in interstitial loop, re-entering")
             if totp_secret:
-                # Previous TOTP code was already consumed/rejected — same code
-                # will always fail because TOTP codes are one-time-use per 30s window.
-                # Always wait for the next window before generating a fresh code.
-                _secs_until_next = 30 - (int(time.time()) % 30)
-                if _secs_until_next > 1:
-                    log(f"{email} — Waiting {_secs_until_next}s for next TOTP window (previous code consumed)…")
-                    time.sleep(_secs_until_next + 0.5)
+                # Wait out the window only when Google rejected the code.
+                # A page that is still sitting on the prompt can take the same code.
+                _totp_body = ""
+                try:
+                    _totp_body = driver.find_element(By.TAG_NAME, "body").text.lower()
+                except Exception:
+                    _totp_body = ""
+                _code_rejected = any(x in _totp_body for x in (
+                    "wrong code", "didn't work", "code is incorrect",
+                    "try again", "expired",
+                ))
+                if _code_rejected:
+                    _secs_until_next = 30 - (int(time.time()) % 30)
+                    if _secs_until_next > 1:
+                        log(f"{email} — Waiting {_secs_until_next}s for next TOTP window")
+                        time.sleep(_secs_until_next + 0.4)
                 fresh_code = generate_totp(totp_secret)
-                log(f"{email} — Fresh TOTP code (new window): {fresh_code}")
+                log(f"{email} — Fresh TOTP code ready")
                 try:
                     # On selection page, click authenticator first
                     if "challenge/selection" in url:
@@ -7955,12 +7981,17 @@ def _do_login(
                         'input[aria-label*="code"]',
                     ], timeout=8)
                     if tf:
-                        tf.clear()
-                        rand_sleep(50, 100)
-                        human_type(tf, fresh_code)
-                        rand_sleep(150, 300)
-                        tf.send_keys(Keys.ENTER)
-                        rand_sleep(800, 1500)
+                        if _pace.get("fast"):
+                            fast_paste(driver, tf, fresh_code)
+                            if not _click_button_text(driver, ("Next", "Verify")):
+                                tf.send_keys(Keys.ENTER)
+                        else:
+                            tf.clear()
+                            rand_sleep(50, 100)
+                            human_type(tf, fresh_code)
+                            rand_sleep(150, 300)
+                            tf.send_keys(Keys.ENTER)
+                            rand_sleep(800, 1500)
                         dismissed = True
                 except Exception as e:
                     log(f"Re-TOTP error: {e}")
