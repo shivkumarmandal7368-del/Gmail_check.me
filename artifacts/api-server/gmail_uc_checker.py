@@ -7188,7 +7188,18 @@ def _do_login(
             _cur = driver.current_url or ""
             if "signin/rejected" in _cur or ("signin/" in _cur and "identifier" not in _cur):
                 break
-            if driver.find_elements(By.CSS_SELECTOR, 'input[name="Passwd"], input[type="password"]'):
+            # The email page keeps a hidden password input. Only a visible box counts.
+            _pw_seen = False
+            for _pw in driver.find_elements(By.CSS_SELECTOR, 'input[name="Passwd"], input[type="password"]'):
+                try:
+                    if (_pw.get_attribute("name") or "") == "hiddenPassword":
+                        continue
+                    if _pw.is_displayed():
+                        _pw_seen = True
+                        break
+                except Exception:
+                    continue
+            if _pw_seen:
                 break
         except Exception:
             pass
