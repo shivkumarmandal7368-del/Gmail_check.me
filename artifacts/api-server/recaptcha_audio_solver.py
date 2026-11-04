@@ -94,24 +94,38 @@ def _switch_challenge_frame(driver: "WebDriver") -> bool:
         except Exception:
             pass
     driver.switch_to.default_content()
+    best = None
+    best_area = 0
     for fr in frames:
         try:
-            driver.switch_to.default_content()
             src = (fr.get_attribute("src") or "").lower()
             title = (fr.get_attribute("title") or "").lower()
             if "bframe" not in src and "challenge" not in title:
                 continue
             size = fr.size or {}
-            if (size.get("height") or 0) < 80 and (size.get("width") or 0) < 80:
+            width = float(size.get("width") or 0)
+            height = float(size.get("height") or 0)
+            # A hidden bframe can be 400x0. Both sides must be on screen.
+            if width < 80 or height < 80:
                 continue
-            driver.switch_to.frame(fr)
-            return True
+            area = width * height
+            if area > best_area:
+                best_area = area
+                best = fr
         except Exception:
-            try:
-                driver.switch_to.default_content()
-            except Exception:
-                pass
-    return False
+            continue
+    if best is None:
+        return False
+    try:
+        driver.switch_to.default_content()
+        driver.switch_to.frame(best)
+        return True
+    except Exception:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        return False
 
 
 def _cdp_attrs(node: dict) -> dict:
