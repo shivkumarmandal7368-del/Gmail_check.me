@@ -814,11 +814,10 @@ def touch_click(driver, element):
             pass
 
 
-def _find_recaptcha_anchor_iframe(driver, log_miss: bool = False):
-    """Anchor checkbox iframe, including ones inside shadow DOM."""
-    driver.switch_to.default_content()
+def _page_iframes(driver):
+    """Iframes in the current document, including open shadow roots."""
     try:
-        frames = driver.execute_script("""
+        return driver.execute_script("""
             const out = [];
             function walk(root) {
               if (!root || !root.querySelectorAll) return;
@@ -829,40 +828,63 @@ def _find_recaptcha_anchor_iframe(driver, log_miss: bool = False):
             return out;
         """) or []
     except Exception:
-        frames = []
+        return []
+
+
+def _find_recaptcha_anchor_iframe(driver, log_miss: bool = False):
+    """Anchor checkbox iframe, including one nested inside another same-origin frame."""
+    driver.switch_to.default_content()
+    frames = list(_page_iframes(driver))
+    parents = list(frames)
+    for parent in parents:
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(parent)
+            frames.extend(_page_iframes(driver))
+        except Exception:
+            pass
+    driver.switch_to.default_content()
     best = None
-    best_score = -1
+    best_score = -1.0
     notes = []
     for fr in frames:
         try:
+            driver.switch_to.default_content()
             meta = driver.execute_script("""
                 const f = arguments[0];
                 const r = f.getBoundingClientRect();
-                return {src: (f.src||'').slice(0,140), title: f.title||'', x:r.left, y:r.top, w:r.width, h:r.height};
+                return {src: (f.src||'').slice(0,160), title: f.title||'', x:r.left, y:r.top, w:r.width, h:r.height};
             """, fr) or {}
             src = (meta.get("src") or "").lower()
             title = (meta.get("title") or "").lower()
             w = float(meta.get("w") or 0)
             h = float(meta.get("h") or 0)
-            notes.append(f"{int(w)}x{int(h)} {src[:90] or title[:40]}")
-            if "bframe" in src or w < 20 or h < 20:
+            notes.append(f"{int(w)}x{int(h)} {(src or title)[:80]}")
+            if "bframe" in src:
                 continue
-            # Only the real checkbox widget, not a page URL that merely contains the word recaptcha.
             is_anchor = "/recaptcha/" in src and "anchor" in src
             is_robot_title = "not a robot" in title or "i'm not a robot" in title
             if not is_anchor and not is_robot_title:
                 continue
-            score = (5 if is_anchor else 0) + (4 if is_robot_title else 0) + min(int(w), 300) / 100
+            if w < 8 or h < 8:
+                continue
+            score = (5 if is_anchor else 0) + (4 if is_robot_title else 0) + min(w, 300) / 100
             if score > best_score:
                 best_score = score
                 best = fr
         except Exception:
             continue
+    driver.switch_to.default_content()
     if best is None and log_miss:
-        if notes:
-            log("reCAPTCHA iframes seen: " + " | ".join(notes[:6]))
-        else:
-            log("reCAPTCHA iframes seen: none")
+        try:
+            snippet = driver.execute_script(
+                "return ((document.body && document.body.innerText) || '').replace(/\\s+/g,' ').slice(0,160)"
+            ) or ""
+        except Exception:
+            snippet = ""
+        log("reCAPTCHA iframes seen: " + (" | ".join(notes[:8]) if notes else "none"))
+        if snippet:
+            log(f"reCAPTCHA page text: {snippet}")
     return best
 
 
@@ -1017,7 +1039,7 @@ def handle_recaptcha_checkbox(
     _rc_result = "missed"
 
     try:
-        deadline = time.time() + 6
+        deadline = time.time() + 12
         _found = None
         while time.time() < deadline and _found is None:
             _found = _find_recaptcha_anchor_iframe(driver)
