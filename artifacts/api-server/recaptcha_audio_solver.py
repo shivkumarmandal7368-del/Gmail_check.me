@@ -422,11 +422,12 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             _log("audio button present but not displayed — clicking it anyway")
 
         try:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", audio_btn)
             audio_btn.click()
         except Exception as exc:
-            _log(f"audio button click failed: {exc}")
+            _log(f"audio button click failed: {exc} — trying CDP")
             driver.switch_to.default_content()
-            return False
+            return _try_audio_via_cdp(driver)
         time.sleep(1.4)
 
         session = req.Session()
