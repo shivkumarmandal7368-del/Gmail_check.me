@@ -892,6 +892,12 @@ def _recaptcha_checkbox_ticked(driver) -> bool:
     from selenium.webdriver.common.by import By
 
     driver.switch_to.default_content()
+    found = _cdp_find_recaptcha(driver)
+    aria = (found.get("checkbox") or {}).get("aria")
+    if aria == "true":
+        return True
+    if found.get("checkbox"):
+        return False
     fr = _find_recaptcha_anchor_iframe(driver)
     if fr is None:
         return False
@@ -917,27 +923,43 @@ def _recaptcha_checkbox_ticked(driver) -> bool:
 
 
 def _cdp_click_xy(driver, x: float, y: float) -> None:
-    """Trusted click. Mobile reCAPTCHA listens to touch, desktop to mouse."""
-    try:
-        driver.execute_cdp_cmd("Input.dispatchTouchEvent", {
-            "type": "touchStart",
-            "touchPoints": [{"x": float(x), "y": float(y), "radiusX": 8, "radiusY": 8, "force": 0.8, "id": 1}],
-        })
-        driver.execute_cdp_cmd("Input.dispatchTouchEvent", {
-            "type": "touchEnd",
-            "touchPoints": [],
-        })
-    except Exception:
-        pass
-    for typ, buttons in (("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)):
+    """Trusted press on the phone viewport. A 0ms touchEnd was ignored by reCAPTCHA."""
+    x, y = float(x), float(y)
+    for typ, buttons in (("mouseMoved", 0), ("mousePressed", 1)):
         driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
             "type": typ,
-            "x": float(x),
-            "y": float(y),
+            "x": x,
+            "y": y,
             "button": "left",
             "buttons": buttons,
             "clickCount": 1,
         })
+    time.sleep(0.08)
+    driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+        "type": "mouseReleased",
+        "x": x,
+        "y": y,
+        "button": "left",
+        "buttons": 0,
+        "clickCount": 1,
+    })
+
+
+def _cdp_touch_xy(driver, x: float, y: float) -> None:
+    x, y = float(x), float(y)
+    point = {"x": x, "y": y, "radiusX": 6, "radiusY": 6, "force": 0.7, "id": 1}
+    try:
+        driver.execute_cdp_cmd("Input.dispatchTouchEvent", {
+            "type": "touchStart",
+            "touchPoints": [point],
+        })
+        time.sleep(0.09)
+        driver.execute_cdp_cmd("Input.dispatchTouchEvent", {
+            "type": "touchEnd",
+            "touchPoints": [],
+        })
+    except Exception as exc:
+        log(f"reCAPTCHA touch click skipped: {exc}")
 
 
 def _trusted_button_click(driver, element) -> bool:
@@ -979,101 +1001,210 @@ def _click_button_text(driver, labels: tuple[str, ...]) -> bool:
     return False
 
 
-def _cdp_recaptcha_nodes(driver) -> list[dict]:
-    """Find reCAPTCHA iframes even inside closed shadow roots."""
+def _cdp_node_attrs(node: dict) -> dict:
+    raw = node.get("attributes") or []
+    return {raw[i]: raw[i + 1] for i in range(0, len(raw) - 1, 2)}
+
+
+def _cdp_find_recaptcha(driver) -> dict:
+    """Anchor iframe, its checkbox, and the challenge bframe. Pierce closed shadow."""
     try:
         doc = driver.execute_cdp_cmd("DOM.getDocument", {"depth": -1, "pierce": True})
     except Exception as exc:
         log(f"reCAPTCHA DOM pierce failed: {exc}")
-        return []
-    hits: list[dict] = []
+        return {}
+    anchor = None
+    checkbox = None
+    bframe = None
 
-    def walk(node):
+    def walk(node, in_anchor: bool = False):
+        nonlocal anchor, checkbox, bframe
         if not isinstance(node, dict):
             return
-        attrs = node.get("attributes") or []
-        attr = {attrs[i]: attrs[i + 1] for i in range(0, len(attrs) - 1, 2)}
+        attr = _cdp_node_attrs(node)
+        name = (node.get("nodeName") or "").lower()
         src = attr.get("src") or ""
-        title = attr.get("title") or ""
+        low = src.lower()
         node_id = attr.get("id") or ""
-        blob = f"{src} {title} {node_id}".lower()
-        if "recaptcha" in blob or "not a robot" in blob:
-            hits.append({
+        child_anchor = in_anchor
+        if name == "iframe" and "/recaptcha/" in low and "anchor" in low and "bframe" not in low:
+            anchor = {
                 "backendNodeId": node.get("backendNodeId"),
-                "src": src[:140],
-                "title": title[:60],
+                "src": src[:160],
                 "id": node_id,
-            })
-        for child in node.get("children") or []:
-            walk(child)
-        for shadow in node.get("shadowRoots") or []:
-            walk(shadow)
+            }
+            child_anchor = True
+        elif name == "iframe" and "bframe" in low:
+            bframe = {"backendNodeId": node.get("backendNodeId"), "src": src[:160]}
+        if child_anchor and node_id == "recaptcha-anchor":
+            checkbox = {
+                "backendNodeId": node.get("backendNodeId"),
+                "id": node_id,
+                "aria": attr.get("aria-checked"),
+            }
+        elif child_anchor and checkbox is None and attr.get("role") == "checkbox":
+            checkbox = {
+                "backendNodeId": node.get("backendNodeId"),
+                "id": node_id,
+                "aria": attr.get("aria-checked"),
+            }
         content = node.get("contentDocument")
         if content:
-            walk(content)
+            walk(content, child_anchor)
+        for child in node.get("children") or []:
+            walk(child, in_anchor)
+        for shadow in node.get("shadowRoots") or []:
+            walk(shadow, in_anchor)
 
     walk(doc.get("root") or {})
-    return hits
+    return {"anchor": anchor, "checkbox": checkbox, "bframe": bframe}
+
+
+def _cdp_content_quad(driver, backend_id):
+    if not backend_id:
+        return None
+    try:
+        res = driver.execute_cdp_cmd("DOM.getContentQuads", {"backendNodeId": int(backend_id)})
+        quads = res.get("quads") or []
+        return quads[0] if quads else None
+    except Exception as exc:
+        log(f"reCAPTCHA quad skipped: {str(exc).splitlines()[0][:140]}")
+        return None
+
+
+def _quad_bounds(quad):
+    xs, ys = quad[0::2], quad[1::2]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _viewport_css(driver):
+    try:
+        w, h, dpr = driver.execute_script(
+            "return [window.innerWidth||412, window.innerHeight||868, window.devicePixelRatio||1]"
+        )
+        return float(w), float(h), float(dpr or 1)
+    except Exception:
+        return 412.0, 868.0, 1.0
+
+
+def _point_inside(x: float, y: float, rect, pad: float = 6) -> bool:
+    if rect is None:
+        return False
+    left, top, right, bottom = rect
+    return left - pad <= x <= right + pad and top - pad <= y <= bottom + pad
+
+
+def _recaptcha_click_point(driver, found: dict):
+    """CSS viewport point of the checkbox. Quads may be CSS, device px, or iframe-local."""
+    anchor = found.get("anchor") or {}
+    checkbox = found.get("checkbox") or {}
+    vw, vh, dpr = _viewport_css(driver)
+    iq = _cdp_content_quad(driver, anchor.get("backendNodeId"))
+    cq = _cdp_content_quad(driver, checkbox.get("backendNodeId"))
+    if iq is None and cq is None:
+        return None
+
+    def fits(rect) -> bool:
+        if rect is None:
+            return False
+        left, top, right, bottom = rect
+        w, h = right - left, bottom - top
+        return w > 20 and h > 20 and right <= vw + 60 and bottom <= vh + 120 and left >= -30 and top >= -40
+
+    def scale(rect, factor: float):
+        return tuple(v * factor for v in rect)
+
+    raw_i = _quad_bounds(iq) if iq else None
+    iframe_css = None
+    if raw_i and fits(raw_i):
+        iframe_css = raw_i
+    elif raw_i and dpr > 1.15 and fits(scale(raw_i, 1 / dpr)):
+        iframe_css = scale(raw_i, 1 / dpr)
+    elif raw_i:
+        iframe_css = raw_i
+
+    if cq is None:
+        if not iframe_css:
+            return None
+        left, top, right, bottom = iframe_css
+        return left + 28, (top + bottom) / 2, "iframe-left"
+
+    cl, ct, cr, cb = _quad_bounds(cq)
+    cx, cy = (cl + cr) / 2, (ct + cb) / 2
+    candidates = [
+        (cx, cy, "checkbox"),
+        (cx / dpr, cy / dpr, "checkbox/dpr") if dpr > 1.15 else None,
+    ]
+    if iframe_css:
+        il, it, ir, ib = iframe_css
+        candidates.append((il + cx, it + cy, "iframe+local"))
+        if dpr > 1.15:
+            candidates.append((il + cx / dpr, it + cy / dpr, "iframe+local/dpr"))
+        candidates.append((il + 28, (it + ib) / 2, "iframe-left"))
+    for item in candidates:
+        if not item:
+            continue
+        x, y, how = item
+        if iframe_css and _point_inside(x, y, iframe_css, pad=12):
+            log(
+                f"reCAPTCHA target {how} click={int(x)},{int(y)} "
+                f"iframe={int(iframe_css[0])},{int(iframe_css[1])} "
+                f"{int(iframe_css[2]-iframe_css[0])}x{int(iframe_css[3]-iframe_css[1])} "
+                f"dpr={dpr:.2f} aria={checkbox.get('aria')}"
+            )
+            return x, y, how
+    if iframe_css:
+        il, it, ir, ib = iframe_css
+        x, y = il + 28, (it + ib) / 2
+        log(f"reCAPTCHA target fallback click={int(x)},{int(y)} dpr={dpr:.2f}")
+        return x, y, "fallback"
+    return None
+
+
+def _cdp_challenge_open(driver) -> bool:
+    """True only when the image/audio challenge popup is actually on screen."""
+    found = _cdp_find_recaptcha(driver)
+    bf = found.get("bframe") or {}
+    quad = _cdp_content_quad(driver, bf.get("backendNodeId"))
+    if not quad:
+        return False
+    left, top, right, bottom = _quad_bounds(quad)
+    vw, _vh, dpr = _viewport_css(driver)
+    w, h = right - left, bottom - top
+    if w > vw * 1.25 and dpr > 1.15:
+        w, h = w / dpr, h / dpr
+    return h > 140 and w > 180
 
 
 def _cdp_click_recaptcha_checkbox(driver) -> bool:
-    nodes = _cdp_recaptcha_nodes(driver)
-    if not nodes:
+    found = _cdp_find_recaptcha(driver)
+    anchor = found.get("anchor")
+    checkbox = found.get("checkbox")
+    if not anchor and not checkbox:
         return False
-    log("reCAPTCHA DOM nodes: " + " | ".join(
-        f"{n.get('id') or '-'} {(n.get('src') or n.get('title') or '')[:70]}" for n in nodes[:5]
-    ))
-    ordered = sorted(nodes, key=lambda n: (
-        0 if "anchor" in (n.get("src") or "") and "bframe" not in (n.get("src") or "") else
-        1 if n.get("id") == "recaptcha-anchor" else 2
-    ))
-    for node in ordered:
-        src = (node.get("src") or "").lower()
-        if "bframe" in src:
-            continue
-        backend = node.get("backendNodeId")
-        if not backend:
-            continue
-        try:
-            model = driver.execute_cdp_cmd("DOM.getBoxModel", {"backendNodeId": backend})
-            content = model["model"]["content"]
-            xs, ys = content[0::2], content[1::2]
-            left, right = min(xs), max(xs)
-            top, bottom = min(ys), max(ys)
-            if right - left < 8 or bottom - top < 8:
-                continue
-            # Checkbox is the left side of the anchor widget.
-            x = left + (22 if node.get("id") != "recaptcha-anchor" else (right - left) / 2)
-            y = (top + bottom) / 2
-            _cdp_click_xy(driver, x, y)
-            log(f"reCAPTCHA CDP click at {int(x)},{int(y)}")
-            rand_sleep(500, 800)
-            if _recaptcha_checkbox_ticked(driver):
-                return True
-        except Exception as exc:
-            log(f"reCAPTCHA box model click skipped: {exc}")
-    return _recaptcha_checkbox_ticked(driver)
-    """Trusted click. Mobile reCAPTCHA listens to touch, desktop to mouse."""
-    try:
-        driver.execute_cdp_cmd("Input.dispatchTouchEvent", {
-            "type": "touchStart",
-            "touchPoints": [{"x": float(x), "y": float(y), "radiusX": 8, "radiusY": 8, "force": 0.8, "id": 1}],
-        })
-        driver.execute_cdp_cmd("Input.dispatchTouchEvent", {
-            "type": "touchEnd",
-            "touchPoints": [],
-        })
-    except Exception:
-        pass
-    for typ, buttons in (("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)):
-        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
-            "type": typ,
-            "x": float(x),
-            "y": float(y),
-            "button": "left",
-            "buttons": buttons,
-            "clickCount": 1,
-        })
+    src = (anchor or {}).get("src") or ""
+    log(
+        f"reCAPTCHA anchor {(src[:90] or '-')}"
+        f" checkbox={bool(checkbox)} aria={(checkbox or {}).get('aria')}"
+    )
+    point = _recaptcha_click_point(driver, found)
+    if not point:
+        return False
+    x, y, _how = point
+    _cdp_click_xy(driver, x, y)
+    time.sleep(0.45)
+    aria = (_cdp_find_recaptcha(driver).get("checkbox") or {}).get("aria")
+    log(f"reCAPTCHA aria after mouse click: {aria}")
+    if aria == "true":
+        return True
+    if _cdp_challenge_open(driver):
+        log("reCAPTCHA challenge popup opened on mouse click")
+        return False
+    _cdp_touch_xy(driver, x, y)
+    time.sleep(0.45)
+    aria = (_cdp_find_recaptcha(driver).get("checkbox") or {}).get("aria")
+    log(f"reCAPTCHA aria after touch click: {aria}")
+    return aria == "true"
 
 
 def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
@@ -1084,6 +1215,9 @@ def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
     driver.switch_to.default_content()
     if _cdp_click_recaptcha_checkbox(driver):
         return True
+    if _cdp_challenge_open(driver):
+        log("reCAPTCHA challenge popup is open — solver will run")
+        return False
     fr = _find_recaptcha_anchor_iframe(driver)
     if fr is None:
         return False
@@ -1097,20 +1231,13 @@ def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
     try:
         driver.switch_to.frame(fr)
         box = None
-        deadline = time.time() + 5
+        deadline = time.time() + 1.6
         while time.time() < deadline and box is None:
-            for sel in (
-                "#recaptcha-anchor",
-                ".recaptcha-checkbox-border",
-                ".recaptcha-checkbox",
-                "span.recaptcha-checkbox",
-            ):
-                els = driver.find_elements(By.CSS_SELECTOR, sel)
-                if els:
-                    box = els[0]
-                    break
-            if box is None:
-                time.sleep(0.25)
+            els = driver.find_elements(By.CSS_SELECTOR, "#recaptcha-anchor")
+            if els:
+                box = els[0]
+                break
+            time.sleep(0.2)
         if box is None:
             src = ""
             try:
@@ -1123,31 +1250,25 @@ def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
             return False
         checked_before = box.get_attribute("aria-checked")
         try:
-            ActionChains(driver).move_to_element(box).pause(0.05).click().perform()
+            box.click()
         except Exception as exc:
-            log(f"reCAPTCHA ActionChains click failed: {exc}")
+            log(f"reCAPTCHA element.click failed: {exc}")
             try:
-                box.click()
+                ActionChains(driver).move_to_element(box).pause(0.05).click().perform()
             except Exception as exc2:
-                log(f"reCAPTCHA element.click failed: {exc2}")
-        rand_sleep(400, 700)
-        checked_after = box.get_attribute("aria-checked")
+                log(f"reCAPTCHA ActionChains click failed: {exc2}")
+        time.sleep(0.4)
+        try:
+            checked_after = box.get_attribute("aria-checked")
+        except Exception:
+            checked_after = None
         log(f"reCAPTCHA aria-checked {checked_before} → {checked_after}")
-        ticked = checked_after == "true"
         driver.switch_to.default_content()
-        if ticked:
+        if checked_after == "true" or _recaptcha_checkbox_ticked(driver):
             return True
-        # Challenge popup counts as a successful click even if the box is not checked yet.
-        from selenium.webdriver.common.by import By as _By
-        for bf in driver.find_elements(_By.CSS_SELECTOR, "iframe[src*='bframe']"):
-            try:
-                h = bf.size.get("height", 0) or 0
-                if h > 30 or bf.is_displayed():
-                    log("reCAPTCHA challenge iframe opened")
-                    return True
-            except Exception:
-                continue
-        return _recaptcha_checkbox_ticked(driver)
+        if _cdp_challenge_open(driver):
+            log("reCAPTCHA challenge popup is open — solver will run")
+        return False
     except Exception as exc:
         log(f"reCAPTCHA in-frame click error: {exc}")
         try:
@@ -1177,14 +1298,11 @@ def handle_recaptcha_checkbox(
     _rc_result = "missed"
 
     try:
-        deadline = time.time() + 12
-        _found = None
-        while time.time() < deadline and _found is None:
-            _found = _find_recaptcha_anchor_iframe(driver)
-            if _found is None:
-                time.sleep(0.35)
-        if _found is None:
-            _find_recaptcha_anchor_iframe(driver, log_miss=True)
+        # CDP pierce finds the anchor immediately. Do not sit here waiting for Selenium.
+        if not _cdp_find_recaptcha(driver).get("anchor"):
+            time.sleep(0.4)
+            if not _cdp_find_recaptcha(driver).get("anchor"):
+                _find_recaptcha_anchor_iframe(driver, log_miss=True)
 
         for attempt in range(1, 3):
             if _recaptcha_checkbox_ticked(driver):
@@ -1215,33 +1333,23 @@ def handle_recaptcha_checkbox(
             time.sleep(pace.get("rc_poll_s", 0.25))
 
         if _rc_result == "passed":
-            # Wait for password page / leave recaptcha URL
-            nav_deadline = time.time() + (6 if pace.get("fast") else 14)
+            # Leave only when Google actually drops the recaptcha URL.
+            # The recaptcha URL itself does not contain "identifier", so that
+            # check used to break immediately and the password step ran too early.
+            nav_deadline = time.time() + (5 if pace.get("fast") else 12)
             while time.time() < nav_deadline:
                 driver.switch_to.default_content()
                 cur = driver.current_url or ""
                 if "challenge/recaptcha" not in cur:
                     break
-                if "challenge/pwd" in cur or "identifier" not in cur:
-                    break
-                if _recaptcha_checkbox_ticked(driver):
-                    time.sleep(0.3)
-                    if "challenge/recaptcha" not in driver.current_url:
-                        break
                 time.sleep(pace.get("rc_poll_s", 0.25))
+            driver.switch_to.default_content()
+            if "challenge/recaptcha" in (driver.current_url or ""):
+                log(f"{email} — still on recaptcha URL after checkbox")
+                _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
         else:
             driver.switch_to.default_content()
-            from selenium.webdriver.common.by import By as _By
-
-            _image = False
-            for _bf in driver.find_elements(_By.CSS_SELECTOR, "iframe[src*='bframe']"):
-                try:
-                    if _bf.is_displayed() and (_bf.size.get("height", 0) or 0) > 80:
-                        _image = True
-                        break
-                except Exception:
-                    pass
-            _rc_result = "image" if _image else "timeout"
+            _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
 
         if _rc_result != "passed":
             try:

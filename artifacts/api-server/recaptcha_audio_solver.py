@@ -71,6 +71,7 @@ def _switch_challenge_frame(driver: "WebDriver") -> bool:
     from selenium.webdriver.common.by import By
 
     driver.switch_to.default_content()
+    frames: list = []
     try:
         frames = driver.execute_script("""
             const out = [];
@@ -84,11 +85,24 @@ def _switch_challenge_frame(driver: "WebDriver") -> bool:
         """) or []
     except Exception:
         frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+    parents = list(frames)
+    for parent in parents:
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(parent)
+            frames.extend(driver.find_elements(By.CSS_SELECTOR, "iframe"))
+        except Exception:
+            pass
+    driver.switch_to.default_content()
     for fr in frames:
         try:
+            driver.switch_to.default_content()
             src = (fr.get_attribute("src") or "").lower()
             title = (fr.get_attribute("title") or "").lower()
             if "bframe" not in src and "challenge" not in title:
+                continue
+            size = fr.size or {}
+            if (size.get("height") or 0) < 80 and (size.get("width") or 0) < 80:
                 continue
             driver.switch_to.frame(fr)
             return True
@@ -98,6 +112,246 @@ def _switch_challenge_frame(driver: "WebDriver") -> bool:
             except Exception:
                 pass
     return False
+
+
+def _cdp_attrs(node: dict) -> dict:
+    raw = node.get("attributes") or []
+    return {raw[i]: raw[i + 1] for i in range(0, len(raw) - 1, 2)}
+
+
+def _cdp_bframe(driver: "WebDriver") -> dict:
+    """Challenge iframe plus the nodes inside it, including closed shadow roots."""
+    try:
+        doc = driver.execute_cdp_cmd("DOM.getDocument", {"depth": -1, "pierce": True})
+    except Exception as exc:
+        _log(f"DOM pierce failed: {exc}")
+        return {}
+    bframe = None
+    nodes: list[dict] = []
+
+    def walk(node, in_bf: bool = False):
+        nonlocal bframe
+        if not isinstance(node, dict):
+            return
+        attr = _cdp_attrs(node)
+        name = (node.get("nodeName") or "").lower()
+        src = (attr.get("src") or "")
+        child_bf = in_bf
+        if name == "iframe" and "bframe" in src.lower():
+            bframe = {
+                "backendNodeId": node.get("backendNodeId"),
+                "src": src[:140],
+            }
+            child_bf = True
+        if child_bf and node.get("backendNodeId"):
+            nodes.append({
+                "backendNodeId": node.get("backendNodeId"),
+                "name": name,
+                "id": attr.get("id") or "",
+                "class": attr.get("class") or "",
+                "src": src[:180],
+            })
+        content = node.get("contentDocument")
+        if content:
+            if child_bf and not bframe.get("docId"):
+                bframe["docId"] = content.get("backendNodeId")
+            walk(content, child_bf)
+        for child in node.get("children") or []:
+            walk(child, in_bf)
+        for shadow in node.get("shadowRoots") or []:
+            walk(shadow, in_bf)
+
+    walk(doc.get("root") or {})
+    if not bframe:
+        return {}
+    bframe["nodes"] = nodes
+    return bframe
+
+
+def _css_point(driver: "WebDriver", iframe_id, node_id):
+    def quad(bid):
+        if not bid:
+            return None
+        try:
+            res = driver.execute_cdp_cmd("DOM.getContentQuads", {"backendNodeId": int(bid)})
+            quads = res.get("quads") or []
+            return quads[0] if quads else None
+        except Exception:
+            return None
+
+    def bounds(q):
+        xs, ys = q[0::2], q[1::2]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    try:
+        vw, vh, dpr = driver.execute_script(
+            "return [window.innerWidth||412, window.innerHeight||868, window.devicePixelRatio||1]"
+        )
+        vw, vh, dpr = float(vw), float(vh), float(dpr or 1)
+    except Exception:
+        vw, vh, dpr = 412.0, 868.0, 1.0
+
+    iq, cq = quad(iframe_id), quad(node_id)
+    if cq is None:
+        return None
+
+    def fits(rect) -> bool:
+        left, top, right, bottom = rect
+        return right - left > 8 and bottom <= vh + 140 and right <= vw + 80 and left >= -40 and top >= -40
+
+    raw_i = bounds(iq) if iq else None
+    iframe = None
+    if raw_i and fits(raw_i):
+        iframe = raw_i
+    elif raw_i and dpr > 1.15 and fits(tuple(v / dpr for v in raw_i)):
+        iframe = tuple(v / dpr for v in raw_i)
+    cl, ct, cr, cb = bounds(cq)
+    cx, cy = (cl + cr) / 2.0, (ct + cb) / 2.0
+    options = [(cx, cy), (cx / dpr, cy / dpr) if dpr > 1.15 else (cx, cy)]
+    if iframe:
+        options.append((iframe[0] + cx, iframe[1] + cy))
+        options.append((iframe[0] + cx / dpr, iframe[1] + cy / dpr))
+    for x, y in options:
+        if iframe and iframe[0] - 8 <= x <= iframe[2] + 8 and iframe[1] - 8 <= y <= iframe[3] + 8:
+            return x, y
+        if iframe is None and 0 <= x <= vw and 0 <= y <= vh:
+            return x, y
+    return None
+
+
+def _cdp_click_point(driver: "WebDriver", x: float, y: float) -> None:
+    x, y = float(x), float(y)
+    for typ, buttons in (("mouseMoved", 0), ("mousePressed", 1)):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": typ, "x": x, "y": y, "button": "left", "buttons": buttons, "clickCount": 1,
+        })
+    time.sleep(0.07)
+    driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+        "type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1,
+    })
+
+
+def _pick_node(nodes: list[dict], ids: tuple[str, ...], classes: tuple[str, ...] = ()) -> dict | None:
+    for node in nodes:
+        if node.get("id") in ids:
+            return node
+    for node in nodes:
+        blob = node.get("class") or ""
+        if any(c in blob for c in classes):
+            return node
+    return None
+
+
+def _audio_bytes_from_frame(driver: "WebDriver", doc_id) -> tuple[bytes, str] | None:
+    if not doc_id:
+        return None
+    try:
+        resolved = driver.execute_cdp_cmd("DOM.resolveNode", {"backendNodeId": int(doc_id)})
+        oid = (resolved.get("object") or {}).get("objectId")
+        if not oid:
+            return None
+        res = driver.execute_cdp_cmd("Runtime.callFunctionOn", {
+            "objectId": oid,
+            "awaitPromise": True,
+            "returnByValue": True,
+            "functionDeclaration": """async function() {
+                const el = document.querySelector('#audio-source, audio source, audio');
+                const src = el && (el.src || el.getAttribute('src'));
+                if (!src) return null;
+                const r = await fetch(src);
+                const buf = await r.arrayBuffer();
+                const bytes = new Uint8Array(buf);
+                let bin = '';
+                for (let i = 0; i < bytes.length; i += 0x8000) {
+                  bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+                }
+                return {b64: btoa(bin), type: (r.headers.get('content-type') || '')};
+            }""",
+        })
+        value = (res.get("result") or {}).get("value") or {}
+        import base64
+        raw = value.get("b64")
+        if not raw:
+            return None
+        return base64.b64decode(raw), value.get("type") or ""
+    except Exception as exc:
+        _log(f"in-frame audio fetch failed: {exc}")
+        return None
+
+
+def _try_audio_via_cdp(driver: "WebDriver") -> bool:
+    """Click the audio challenge inside a shadow/cross-origin bframe."""
+    frame = _cdp_bframe(driver)
+    if not frame:
+        _log("no bframe in DOM pierce")
+        return False
+    btn = _pick_node(
+        frame.get("nodes") or [],
+        ("recaptcha-audio-button",),
+        ("rc-button-audio",),
+    )
+    if not btn:
+        _log("audio button not in challenge frame")
+        return False
+    point = _css_point(driver, frame.get("backendNodeId"), btn.get("backendNodeId"))
+    if not point:
+        _log("audio button has no click point")
+        return False
+    _log(f"CDP audio button click at {int(point[0])},{int(point[1])}")
+    _cdp_click_point(driver, point[0], point[1])
+    time.sleep(1.3)
+
+    frame = _cdp_bframe(driver)
+    payload = _audio_bytes_from_frame(driver, frame.get("docId"))
+    if not payload:
+        _log("could not read audio from challenge frame")
+        return False
+    data, ctype = payload
+    suffix = ".mp3" if "mpeg" in ctype or "mp3" in ctype else ".wav"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(data)
+    tmp.close()
+    try:
+        answer = _transcribe_audio(tmp.name)
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+    if not answer:
+        return False
+    frame = _cdp_bframe(driver)
+    field = _pick_node(
+        frame.get("nodes") or [],
+        ("audio-response",),
+        ("rc-audiochallenge-response-field",),
+    )
+    if not field:
+        _log("audio response field not found")
+        return False
+    field_point = _css_point(driver, frame.get("backendNodeId"), field.get("backendNodeId"))
+    if not field_point:
+        return False
+    _cdp_click_point(driver, field_point[0], field_point[1])
+    time.sleep(0.15)
+    try:
+        driver.execute_cdp_cmd("Input.insertText", {"text": answer})
+    except Exception as exc:
+        _log(f"insertText failed: {exc}")
+        return False
+    verify = _pick_node(
+        frame.get("nodes") or [],
+        ("recaptcha-verify-button",),
+        ("rc-button-default",),
+    )
+    if verify:
+        vpoint = _css_point(driver, frame.get("backendNodeId"), verify.get("backendNodeId"))
+        if vpoint:
+            time.sleep(0.2)
+            _cdp_click_point(driver, vpoint[0], vpoint[1])
+    _log("audio answer submitted via CDP")
+    time.sleep(2.2)
+    return True
 
 
 def _download_challenge_audio(driver: "WebDriver", session) -> str | None:
@@ -140,8 +394,8 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
 
     for attempt in range(1, attempts + 1):
         if not _switch_challenge_frame(driver):
-            _log("no visible recaptcha challenge iframe")
-            return False
+            _log("no selenium challenge iframe — using CDP")
+            return _try_audio_via_cdp(driver)
 
         audio_btn = None
         for sel in (
