@@ -6386,27 +6386,14 @@ def _do_login(
 
             if _rc_result != "passed":
                 try:
-                    from recaptcha_audio_solver import (
-                        free_audio_enabled,
-                        try_solve_recaptcha_audio_page,
-                    )
+                    from recaptcha_free_solver import run_free_captcha_pipeline
                     from recaptcha_solver import captcha_solver_configured, try_solve_recaptcha_on_page
 
-                    if free_audio_enabled() and _rc_result in ("image", "timeout", "missed"):
-                        log(f"{email} — trying free audio captcha (local Whisper)…")
-                        if try_solve_recaptcha_audio_page(driver):
-                            _audio_deadline = time.time() + 25
-                            while time.time() < _audio_deadline:
-                                driver.switch_to.default_content()
-                                if "challenge/recaptcha" not in driver.current_url:
-                                    _rc_result = "passed"
-                                    log(f"{email} — free audio captcha OK")
-                                    break
-                                if _checkbox_ticked():
-                                    _rc_result = "passed"
-                                    log(f"{email} — free audio captcha OK (checkbox ticked)")
-                                    break
-                                time.sleep(0.5)
+                    if _rc_result in ("image", "timeout", "missed"):
+                        log(f"{email} — free captcha pipeline (Whisper audio + YOLO vision)…")
+                        if run_free_captcha_pipeline(driver, _checkbox_ticked, max_cycles=3):
+                            _rc_result = "passed"
+                            log(f"{email} — free captcha pipeline OK")
 
                     if _rc_result != "passed" and captcha_solver_configured():
                         log(f"{email} — image/timeout captcha — sending to solver API…")
@@ -6454,7 +6441,10 @@ def _do_login(
             try:
                 from recaptcha_solver import captcha_solver_configured as _csc
                 if not _csc():
-                    _why += " Set CAPTCHA_API_KEY in deploy/.env (2Captcha or CapSolver) for auto-solve."
+                    _why += (
+                        " Free path: pip install faster-whisper on VPS (audio captcha), "
+                        "or set CAPTCHA_API_KEY for paid image solve."
+                    )
             except Exception:
                 pass
             _fail = {

@@ -4,3 +4,5 @@ selenium>=4.18.0
 requests>=2.31.0
 # Optional — free reCAPTCHA audio path (~75MB model download on first use)
 faster-whisper>=1.1.0
+ultralytics>=8.3.0
+opencv-python-headless>=4.10.0
