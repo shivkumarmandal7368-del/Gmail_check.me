@@ -13,7 +13,7 @@ from recaptcha_image_solver import free_vision_enabled, try_solve_recaptcha_imag
 
 
 def _log(msg: str) -> None:
-    print(f"[UC] [captcha-free] {msg}", flush=True)
+    print(f"[UC] [captcha-free] {msg}", file=__import__("sys").stderr, flush=True)
 
 
 def _wait_recaptcha_cleared(

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 def _log(msg: str) -> None:
-    print(f"[UC] [captcha-audio] {msg}", flush=True)
+    print(f"[UC] [captcha-audio] {msg}", file=__import__("sys").stderr, flush=True)
 
 
 def free_audio_enabled() -> bool:

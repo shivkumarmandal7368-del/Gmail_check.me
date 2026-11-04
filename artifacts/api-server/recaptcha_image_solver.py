@@ -15,7 +15,7 @@ from recaptcha_audio_solver import _switch_challenge_frame
 
 
 def _log(msg: str) -> None:
-    print(f"[UC] [captcha-vision] {msg}", flush=True)
+    print(f"[UC] [captcha-vision] {msg}", file=__import__("sys").stderr, flush=True)
 
 
 def free_vision_enabled() -> bool:

@@ -814,41 +814,61 @@ def touch_click(driver, element):
             pass
 
 
-def _find_recaptcha_anchor_iframe(driver):
-    """Visible reCAPTCHA checkbox iframe (not the image bframe)."""
-    from selenium.webdriver.common.by import By
-
+def _find_recaptcha_anchor_iframe(driver, log_miss: bool = False):
+    """Anchor checkbox iframe, including ones inside shadow DOM."""
     driver.switch_to.default_content()
-    frames = driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha'], iframe[title*='reCAPTCHA']")
-    scored: list[tuple[int, object]] = []
+    try:
+        frames = driver.execute_script("""
+            const out = [];
+            function walk(root) {
+              if (!root || !root.querySelectorAll) return;
+              root.querySelectorAll('iframe').forEach(f => out.push(f));
+              root.querySelectorAll('*').forEach(n => { if (n.shadowRoot) walk(n.shadowRoot); });
+            }
+            walk(document);
+            return out;
+        """) or []
+    except Exception:
+        frames = []
+    best = None
+    best_score = -1
+    notes = []
     for fr in frames:
         try:
-            src = (fr.get_attribute("src") or "").lower()
-            title = (fr.get_attribute("title") or "").lower()
+            meta = driver.execute_script("""
+                const f = arguments[0];
+                const r = f.getBoundingClientRect();
+                return {src: (f.src||'').slice(0,140), title: f.title||'', x:r.left, y:r.top, w:r.width, h:r.height};
+            """, fr) or {}
+            src = (meta.get("src") or "").lower()
+            title = (meta.get("title") or "").lower()
+            w = float(meta.get("w") or 0)
+            h = float(meta.get("h") or 0)
+            notes.append(f"{int(w)}x{int(h)} {src[:70] or title[:40]}")
             if "bframe" in src:
                 continue
-            if not fr.is_displayed():
-                continue
-            w = fr.size.get("width", 0) or 0
-            h = fr.size.get("height", 0) or 0
-            if w < 8 or h < 8:
+            if w < 20 or h < 20:
                 continue
             score = 0
-            if "anchor" in src:
-                score += 4
-            if "api2" in src:
-                score += 2
-            if "recaptcha" in title:
+            if "recaptcha" in src or "recaptcha" in title:
                 score += 3
-            if score == 0:
-                score = 1
-            scored.append((score, fr))
+            if "anchor" in src:
+                score += 5
+            if "i'm not a robot" in title or "not a robot" in title:
+                score += 4
+            if score <= 0:
+                continue
+            if score > best_score:
+                best_score = score
+                best = fr
         except Exception:
             continue
-    if not scored:
-        return None
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return scored[0][1]
+    if best is None and log_miss:
+        if notes:
+            log("reCAPTCHA iframes seen: " + " | ".join(notes[:6]))
+        else:
+            log("reCAPTCHA iframes seen: none")
+    return best
 
 
 def _recaptcha_checkbox_ticked(driver) -> bool:
@@ -880,7 +900,18 @@ def _recaptcha_checkbox_ticked(driver) -> bool:
 
 
 def _cdp_click_xy(driver, x: float, y: float) -> None:
-    """Trusted mouse click in the top viewport (reCAPTCHA ignores JS clicks)."""
+    """Trusted click. Mobile reCAPTCHA listens to touch, desktop to mouse."""
+    try:
+        driver.execute_cdp_cmd("Input.dispatchTouchEvent", {
+            "type": "touchStart",
+            "touchPoints": [{"x": float(x), "y": float(y), "radiusX": 8, "radiusY": 8, "force": 0.8, "id": 1}],
+        })
+        driver.execute_cdp_cmd("Input.dispatchTouchEvent", {
+            "type": "touchEnd",
+            "touchPoints": [],
+        })
+    except Exception:
+        pass
     for typ, buttons in (("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)):
         driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
             "type": typ,
@@ -999,9 +1030,14 @@ def handle_recaptcha_checkbox(
     _rc_result = "missed"
 
     try:
-        deadline = time.time() + 12
-        while time.time() < deadline and _find_recaptcha_anchor_iframe(driver) is None:
-            time.sleep(0.25)
+        deadline = time.time() + 6
+        _found = None
+        while time.time() < deadline and _found is None:
+            _found = _find_recaptcha_anchor_iframe(driver)
+            if _found is None:
+                time.sleep(0.35)
+        if _found is None:
+            _find_recaptcha_anchor_iframe(driver, log_miss=True)
 
         for attempt in range(1, 3):
             if _recaptcha_checkbox_ticked(driver):
