@@ -7180,7 +7180,7 @@ def _do_login(
 
     _click_email_next()
     # A slow phone proxy can take as long to leave this page as it took to open it.
-    _nav_deadline = time.time() + (20 if _phone_fast else 12)
+    _nav_deadline = time.time() + (32 if _phone_fast else 12)
     _next_retried = False
     _next_at = time.time()
     while time.time() < _nav_deadline:
@@ -7343,7 +7343,28 @@ def _do_login(
     # ── Step 3: Enter password ────────────────────────────────────────────────
     log(f"{email} — Step 3: typing password")
     tmark("password step start")
-    pw_field = wait_for_any(PW_SELECTORS, timeout=8)
+    pw_field = None
+    _pw_deadline = time.time() + (14 if _phone_fast else 8)
+    while time.time() < _pw_deadline and pw_field is None:
+        _cur_pw = driver.current_url or ""
+        if "challenge/recaptcha" in _cur_pw:
+            log(f"{email} — robot page opened while waiting for password")
+            _rc_result = handle_recaptcha_checkbox(
+                driver, email, pace=_pace, proxy_url=proxy_url, page_state=page_state,
+            )
+            url, text = page_state()
+            log(f"{email} — After I'm not a robot ({_rc_result}): {url[:70]}")
+            if _rc_result != "passed" and "challenge/recaptcha" in (driver.current_url or ""):
+                shot = screenshot_b64()
+                return {
+                    "status": "verification_required",
+                    "reason": "Google showed I'm not a robot and the checkbox did not open the password page.",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
+            pw_field = wait_for_any(PW_SELECTORS, timeout=10)
+            break
+        pw_field = wait_for_any(PW_SELECTORS, timeout=0.4)
 
     if pw_field:
         url, text = page_state()
@@ -7353,16 +7374,26 @@ def _do_login(
 
     if not pw_field:
         url, text = page_state()
-        result = classify(url, text)
-        if result:
-            return result
-        shot = screenshot_b64()
-        return {
-            "status": "unknown",
-            "reason": f"Password field not found. URL: {url[:80]}",
-            "totpCode": totp_code,
-            "debugScreenshot": shot,
-        }
+        if "challenge/recaptcha" in url:
+            log(f"{email} — robot page opened while waiting for password")
+            _rc_result = handle_recaptcha_checkbox(
+                driver, email, pace=_pace, proxy_url=proxy_url, page_state=page_state,
+            )
+            url, text = page_state()
+            log(f"{email} — After I'm not a robot ({_rc_result}): {url[:70]}")
+            if "challenge/recaptcha" not in (driver.current_url or ""):
+                pw_field = wait_for_any(PW_SELECTORS, timeout=10)
+        if not pw_field:
+            result = classify(url, text)
+            if result:
+                return result
+            shot = screenshot_b64()
+            return {
+                "status": "unknown",
+                "reason": f"Password field not found. URL: {url[:80]}",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
 
     if _phone_fast:
         try:
@@ -7390,7 +7421,7 @@ def _do_login(
     # Wait for URL to advance past the password page (proxy latency can be 2-4s).
     # Polling is more reliable than a fixed sleep — catches fast AND slow responses.
     _pre_pwd_url = driver.current_url
-    _pwd_wait_s = 4 if _phone_fast else 10
+    _pwd_wait_s = 20 if _phone_fast else 10
     _nav_deadline = time.time() + _pwd_wait_s
     while time.time() < _nav_deadline:
         try:
