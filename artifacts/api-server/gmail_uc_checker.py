@@ -924,7 +924,7 @@ def _cdp_click_xy(driver, x: float, y: float) -> None:
 
 
 def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
-    """Trusted click on the checkbox. JS touch events do not tick reCAPTCHA."""
+    """Click the checkbox from inside its iframe. Parent-page coordinates miss on a phone viewport."""
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.action_chains import ActionChains
 
@@ -933,13 +933,13 @@ def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
     if fr is None:
         return False
     try:
-        iframe_box = driver.execute_script(
-            """
-            const r = arguments[0].getBoundingClientRect();
-            return {x: r.left, y: r.top, w: r.width, h: r.height};
-            """,
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block:'center', inline:'center'});",
             fr,
-        ) or {}
+        )
+    except Exception:
+        pass
+    try:
         driver.switch_to.frame(fr)
         box = None
         for sel in (
@@ -948,61 +948,43 @@ def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
             ".recaptcha-checkbox",
             "span.recaptcha-checkbox",
         ):
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            if els:
+                box = els[0]
+                break
+        if box is None:
+            log("reCAPTCHA anchor iframe has no #recaptcha-anchor")
+            driver.switch_to.default_content()
+            return False
+        checked_before = box.get_attribute("aria-checked")
+        try:
+            ActionChains(driver).move_to_element(box).pause(0.05).click().perform()
+        except Exception as exc:
+            log(f"reCAPTCHA ActionChains click failed: {exc}")
             try:
-                els = driver.find_elements(By.CSS_SELECTOR, sel)
-                if els:
-                    box = els[0]
-                    break
+                box.click()
+            except Exception as exc2:
+                log(f"reCAPTCHA element.click failed: {exc2}")
+        rand_sleep(400, 700)
+        checked_after = box.get_attribute("aria-checked")
+        log(f"reCAPTCHA aria-checked {checked_before} → {checked_after}")
+        ticked = checked_after == "true"
+        driver.switch_to.default_content()
+        if ticked:
+            return True
+        # Challenge popup counts as a successful click even if the box is not checked yet.
+        from selenium.webdriver.common.by import By as _By
+        for bf in driver.find_elements(_By.CSS_SELECTOR, "iframe[src*='bframe']"):
+            try:
+                h = bf.size.get("height", 0) or 0
+                if h > 30 or bf.is_displayed():
+                    log("reCAPTCHA challenge iframe opened")
+                    return True
             except Exception:
                 continue
-        inner = None
-        if box is not None:
-            try:
-                inner = driver.execute_script(
-                    """
-                    const r = arguments[0].getBoundingClientRect();
-                    return {x: r.left + r.width / 2, y: r.top + r.height / 2};
-                    """,
-                    box,
-                )
-            except Exception:
-                inner = None
-        driver.switch_to.default_content()
-        ix = float(iframe_box.get("x") or 0)
-        iy = float(iframe_box.get("y") or 0)
-        iw = float(iframe_box.get("w") or 0)
-        ih = float(iframe_box.get("h") or 0)
-        if inner:
-            x = ix + float(inner.get("x") or 0)
-            y = iy + float(inner.get("y") or 0)
-        else:
-            # Checkbox sits on the left of the anchor widget.
-            x = ix + min(28.0, max(12.0, iw * 0.12))
-            y = iy + ih / 2
-        try:
-            _cdp_click_xy(driver, x, y)
-        except Exception as exc:
-            log(f"reCAPTCHA CDP click failed: {exc}")
-        rand_sleep(350, 700)
-        if _recaptcha_checkbox_ticked(driver):
-            return True
-        # Chromedriver click is also a real input event inside the iframe.
-        try:
-            driver.switch_to.default_content()
-            fr = _find_recaptcha_anchor_iframe(driver)
-            if fr is not None:
-                driver.switch_to.frame(fr)
-                box = driver.find_elements(By.CSS_SELECTOR, "#recaptcha-anchor, .recaptcha-checkbox-border")
-                if box:
-                    try:
-                        box[0].click()
-                    except Exception:
-                        ActionChains(driver).move_to_element(box[0]).click().perform()
-        except Exception:
-            pass
-        rand_sleep(350, 700)
         return _recaptcha_checkbox_ticked(driver)
-    except Exception:
+    except Exception as exc:
+        log(f"reCAPTCHA in-frame click error: {exc}")
         try:
             driver.switch_to.default_content()
         except Exception:
