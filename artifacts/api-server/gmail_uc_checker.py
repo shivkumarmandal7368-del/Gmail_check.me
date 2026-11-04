@@ -3773,6 +3773,8 @@ def check_gmail(
     )
 
     options = uc.ChromeOptions()
+    # Return after DOMContentLoaded — full load through phone proxy can cost 20–40s.
+    options.page_load_strategy = "eager"
     options.add_argument(f"--user-data-dir={profile_dir}")
     # TCP forwarder replaces MV2 extension — Chrome for Testing 151 crashes when
     # an MV2 extension is loaded under Xvfb.  A local socketserver proxy has no
@@ -3880,7 +3882,7 @@ def check_gmail(
     finally:
         fcntl.flock(_disp_lock_fd, fcntl.LOCK_UN)
         _disp_lock_fd.close()
-    time.sleep(0.5)  # Xvfb startup wait
+    time.sleep(0.25 if _phone_proxy_fast(proxy) else 0.5)  # Xvfb startup wait
 
     # ── Chrome launch lock — serializes chromedriver bind (~2–4s) ───────────
     _lock_fd = open(_CHROME_LAUNCH_LOCK_PATH, "w")
@@ -3907,13 +3909,15 @@ def check_gmail(
         _active_locks  = [_session_lock_fd]
         # Reduced from 2.5s → 1.0s: Chrome process is already running, just
         # letting CDP settle.  Lock is released sooner so next account can start.
-        time.sleep(1.0)
+        time.sleep(0.35 if _phone_proxy_fast(proxy) else 1.0)
     except Exception as e:
         fcntl.flock(_lock_fd, fcntl.LOCK_UN)
         _lock_fd.close()
         try:
             fcntl.flock(_session_lock_fd, fcntl.LOCK_UN)
             _session_lock_fd.close()
+            if _read_session_holder_pid() == os.getpid():
+                _clear_session_holder_pid()
         except Exception:
             pass
         _cleanup(None, _xvfb_proc)
@@ -3935,43 +3939,53 @@ def check_gmail(
 
     log("Chrome launched")
 
+    _phone_fast = _phone_proxy_fast(proxy or geo_proxy)
+
     # Locale follows the IP Chrome is actually using, not the preflight request.
-    # A rotating gateway can hand those two calls different exits.
-    exit_ip = read_browser_exit_ip(driver)
-    if exit_ip:
-        lock_fingerprint_to_exit_ip(fp, exit_ip)
-        apply_keyboard_layout(fp.get("keyboard") or "us", os.environ.get("DISPLAY"))
-        try:
-            with open(os.path.join(profile_dir, "fingerprint.json"), "w") as _locale_fp:
-                json.dump(fp, _locale_fp, indent=2)
-        except Exception as _locale_save_err:
-            log(f"Locale fingerprint save skipped: {_locale_save_err}")
+    # Phone/LocalToNet: preflight already locked geo + IP — skip 3–8s ipify tab loads.
+    if _phone_fast and fp.get("geoLocked") and fp.get("ip"):
+        exit_ip = str(fp["ip"])
+        apply_keyboard_layout(fp.get("keyboard") or "in", os.environ.get("DISPLAY"))
+        log(
+            f"LOCALE_LOCK ip={exit_ip} tz={fp.get('timezone')} lang={fp.get('language')} "
+            f"keyboard={fp.get('keyboard')} cc={fp.get('countryCode')} (preflight, skipped ipify)"
+        )
     else:
-        _pre_ip = proxy_fetch_exit_ip(proxy) if proxy else None
-        if _pre_ip:
-            lock_fingerprint_to_exit_ip(fp, _pre_ip)
+        exit_ip = read_browser_exit_ip(driver)
+        if exit_ip:
+            lock_fingerprint_to_exit_ip(fp, exit_ip)
             apply_keyboard_layout(fp.get("keyboard") or "us", os.environ.get("DISPLAY"))
             try:
-                driver.execute_cdp_cmd("Emulation.setTimezoneOverride",
-                                       {"timezoneId": fp.get("timezone", "Asia/Kolkata")})
-                driver.execute_cdp_cmd("Emulation.setLocaleOverride",
-                                       {"locale": fp.get("language", "en-IN")})
-                log(f"Chrome exit IP unread — applied ipify locale → {fp.get('timezone')} / {fp.get('language')}")
-            except Exception as _ipify_cdp:
-                log(f"Chrome exit IP unread — ipify locale CDP skipped: {_ipify_cdp}")
-        elif proxy and _proxy_implies_india(proxy):
-            _merge_geo_into_fingerprint(fp, _india_geo_fallback(None))
-            fp["keyboard"] = "in"
-            apply_keyboard_layout("in", os.environ.get("DISPLAY"))
-            try:
-                driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": "Asia/Kolkata"})
-                driver.execute_cdp_cmd("Emulation.setLocaleOverride", {"locale": "en-IN"})
-            except Exception:
-                pass
-            log("Chrome exit IP unread — LocalToNet India fallback applied")
+                with open(os.path.join(profile_dir, "fingerprint.json"), "w") as _locale_fp:
+                    json.dump(fp, _locale_fp, indent=2)
+            except Exception as _locale_save_err:
+                log(f"Locale fingerprint save skipped: {_locale_save_err}")
         else:
-            fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-US")
-            log("Chrome exit IP unread — keeping the preflight locale")
+            _pre_ip = proxy_fetch_exit_ip(proxy) if proxy else None
+            if _pre_ip:
+                lock_fingerprint_to_exit_ip(fp, _pre_ip)
+                apply_keyboard_layout(fp.get("keyboard") or "us", os.environ.get("DISPLAY"))
+                try:
+                    driver.execute_cdp_cmd("Emulation.setTimezoneOverride",
+                                           {"timezoneId": fp.get("timezone", "Asia/Kolkata")})
+                    driver.execute_cdp_cmd("Emulation.setLocaleOverride",
+                                           {"locale": fp.get("language", "en-IN")})
+                    log(f"Chrome exit IP unread — applied ipify locale → {fp.get('timezone')} / {fp.get('language')}")
+                except Exception as _ipify_cdp:
+                    log(f"Chrome exit IP unread — ipify locale CDP skipped: {_ipify_cdp}")
+            elif proxy and _proxy_implies_india(proxy):
+                _merge_geo_into_fingerprint(fp, _india_geo_fallback(None))
+                fp["keyboard"] = "in"
+                apply_keyboard_layout("in", os.environ.get("DISPLAY"))
+                try:
+                    driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": "Asia/Kolkata"})
+                    driver.execute_cdp_cmd("Emulation.setLocaleOverride", {"locale": "en-IN"})
+                except Exception:
+                    pass
+                log("Chrome exit IP unread — LocalToNet India fallback applied")
+            else:
+                fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-US")
+                log("Chrome exit IP unread — keeping the preflight locale")
     if fresh_profile:
         log(
             f"FRESH_DEVICE canvas={fp.get('canvasSeed')} profile={profile_dir} "
@@ -4220,6 +4234,21 @@ def _do_login(
 ) -> dict:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
+
+    _login_t0 = time.time()
+    _timing_marks: list[tuple[str, int]] = []
+
+    def tmark(label: str) -> None:
+        ms = int((time.time() - _login_t0) * 1000)
+        _timing_marks.append((label, ms))
+        log(f"[timing +{ms}ms] {label}")
+
+    _phone_fast = _phone_proxy_fast(proxy_url)
+    _post_nav_sleep = (150, 350) if _phone_fast else (600, 1000)
+    _use_warmup = not robot_check_only and (
+        not _phone_fast
+        or os.environ.get("PHONE_WARMUP", "").strip().lower() in ("1", "true", "yes")
+    )
 
     # One TOTP code per 30s window — reuse across multiple prompts in the same window.
     _totp_cache: dict = {
@@ -6012,7 +6041,12 @@ def _do_login(
                 "debugScreenshot": shot,
             }
 
-    _signin_entry = LOGIN_START if change_password_after_login else GOOGLE_EMAIL_SIGNIN
+    # Phone proxy: direct identifier URL is faster than myaccount password redirect (~20s).
+    _signin_entry = (
+        GOOGLE_EMAIL_SIGNIN
+        if (not change_password_after_login or _phone_fast)
+        else LOGIN_START
+    )
 
     # A phone already has Google cookies and a little mouse history. A cold
     # profile that opens the sign-in form immediately is what makes the
@@ -6036,38 +6070,44 @@ def _do_login(
             }
         url, text = page_state()
         log(f"{email} — After nav: {url[:70]}")
+        tmark("robot sign-in nav")
     else:
         if not change_password_after_login:
-            try:
-                log(f"{email} — Warmup: google.com")
-                driver.get("https://www.google.com")
-                _warm_deadline = time.time() + 8
-                while time.time() < _warm_deadline:
-                    try:
-                        if driver.execute_script("return document.readyState") == "complete":
-                            break
-                    except Exception:
-                        pass
-                    time.sleep(0.3)
-                _xdt = _get_xdotool()
-                _win = _get_chrome_win_id()
-                if _xdt and _win:
-                    _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
-                    subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
-                    for _mv in range(3):
-                        subprocess.run(
-                            [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
-                            capture_output=True, timeout=3, env=_denv,
-                        )
-                        time.sleep(random.uniform(0.15, 0.35))
-                rand_sleep(600, 1100)
-            except Exception as _warm_err:
-                log(f"{email} — warmup skipped: {_warm_err}")
+            if _use_warmup:
+                try:
+                    log(f"{email} — Warmup: google.com")
+                    driver.get("https://www.google.com")
+                    _warm_deadline = time.time() + (4 if _phone_fast else 8)
+                    while time.time() < _warm_deadline:
+                        try:
+                            if driver.execute_script("return document.readyState") in ("interactive", "complete"):
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(0.2)
+                    _xdt = _get_xdotool()
+                    _win = _get_chrome_win_id()
+                    if _xdt and _win:
+                        _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
+                        subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
+                        for _mv in range(2 if _phone_fast else 3):
+                            subprocess.run(
+                                [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
+                                capture_output=True, timeout=3, env=_denv,
+                            )
+                            time.sleep(random.uniform(0.1, 0.25))
+                    rand_sleep(400, 700) if _phone_fast else rand_sleep(600, 1100)
+                except Exception as _warm_err:
+                    log(f"{email} — warmup skipped: {_warm_err}")
+                tmark("warmup google.com")
+            elif _phone_fast:
+                log(f"{email} — Phone mode: skip warmup (set PHONE_WARMUP=1 to enable)")
 
             try:
                 log(f"{email} — Opening email sign-in link")
+                tmark("sign-in nav start")
                 driver.get(_signin_entry)
-                rand_sleep(600, 1000)
+                rand_sleep(*_post_nav_sleep)
             except Exception as e:
                 shot = None
                 try:
@@ -6082,37 +6122,43 @@ def _do_login(
                 }
             url, text = page_state()
             log(f"{email} — After nav: {url[:70]}")
+            tmark("sign-in nav done")
         else:
-            try:
-                log(f"{email} — Warmup: google.com")
-                driver.get("https://www.google.com")
-                _warm_deadline = time.time() + 8
-                while time.time() < _warm_deadline:
-                    try:
-                        if driver.execute_script("return document.readyState") == "complete":
-                            break
-                    except Exception:
-                        pass
-                    time.sleep(0.3)
-                _xdt = _get_xdotool()
-                _win = _get_chrome_win_id()
-                if _xdt and _win:
-                    _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
-                    subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
-                    for _mv in range(3):
-                        subprocess.run(
-                            [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
-                            capture_output=True, timeout=3, env=_denv,
-                        )
-                        time.sleep(random.uniform(0.15, 0.35))
-                rand_sleep(600, 1100)
-            except Exception as _warm_err:
-                log(f"{email} — warmup skipped: {_warm_err}")
+            if _use_warmup:
+                try:
+                    log(f"{email} — Warmup: google.com")
+                    driver.get("https://www.google.com")
+                    _warm_deadline = time.time() + (4 if _phone_fast else 8)
+                    while time.time() < _warm_deadline:
+                        try:
+                            if driver.execute_script("return document.readyState") in ("interactive", "complete"):
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(0.2)
+                    _xdt = _get_xdotool()
+                    _win = _get_chrome_win_id()
+                    if _xdt and _win:
+                        _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
+                        subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
+                        for _mv in range(2 if _phone_fast else 3):
+                            subprocess.run(
+                                [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
+                                capture_output=True, timeout=3, env=_denv,
+                            )
+                            time.sleep(random.uniform(0.1, 0.25))
+                    rand_sleep(400, 700) if _phone_fast else rand_sleep(600, 1100)
+                except Exception as _warm_err:
+                    log(f"{email} — warmup skipped: {_warm_err}")
+                tmark("warmup google.com")
+            elif _phone_fast:
+                log(f"{email} — Phone mode: skip warmup (set PHONE_WARMUP=1 to enable)")
 
             log(f"{email} — Opening password-page sign-in link")
             try:
+                tmark("sign-in nav start")
                 driver.get(_signin_entry)
-                rand_sleep(600, 1000)
+                rand_sleep(*_post_nav_sleep)
             except Exception as e:
                 shot = None
                 try:
@@ -6128,6 +6174,7 @@ def _do_login(
 
             url, text = page_state()
             log(f"{email} — After nav: {url[:70]}")
+            tmark("sign-in nav done")
 
     # Defined early so TOTP right after LOGIN_START is handled before email step.
     def finish_after_totp(start_label: str) -> dict | None:
@@ -6313,6 +6360,7 @@ def _do_login(
 
     # ── Step 2: Enter email ───────────────────────────────────────────────────
     log(f"{email} — Step 2: typing email")
+    tmark("email step start")
     email_field = wait_for_any(EMAIL_SELECTORS, timeout=8)
 
     if not email_field and not change_password_after_login:
@@ -6391,6 +6439,7 @@ def _do_login(
 
     url, text = page_state()
     log(f"{email} — After email submit: {url[:70]}")
+    tmark("email step done")
 
     if "signin/rejected" in url:
         shot = screenshot_b64()
@@ -6626,6 +6675,7 @@ def _do_login(
 
     # ── Step 3: Enter password ────────────────────────────────────────────────
     log(f"{email} — Step 3: typing password")
+    tmark("password step start")
     pw_field = wait_for_any(PW_SELECTORS, timeout=8)
 
     if pw_field:
@@ -6667,19 +6717,27 @@ def _do_login(
     # Wait for URL to advance past the password page (proxy latency can be 2-4s).
     # Polling is more reliable than a fixed sleep — catches fast AND slow responses.
     _pre_pwd_url = driver.current_url
-    _nav_deadline = time.time() + 10
+    _pwd_wait_s = 4 if _phone_fast else 10
+    _nav_deadline = time.time() + _pwd_wait_s
     while time.time() < _nav_deadline:
         try:
             _cur = driver.current_url
             if _cur != _pre_pwd_url and "challenge/pwd" not in _cur:
                 break
+            _, _body = page_state()
+            if any(x in _body for x in (
+                "wrong password", "didn't recognize", "incorrect password",
+                "password you entered",
+            )):
+                break
         except Exception:
             pass
-        time.sleep(0.25)
-    rand_sleep(300, 600)  # extra settle after URL change
+        time.sleep(0.2)
+    rand_sleep(150, 300) if _phone_fast else rand_sleep(300, 600)
 
     url, text = page_state()
     log(f"{email} — After password submit: {url[:70]}")
+    tmark("password step done")
 
     # ── Quick wrong-password check (before anything else) ─────────────────────
     if any(x in text for x in [
