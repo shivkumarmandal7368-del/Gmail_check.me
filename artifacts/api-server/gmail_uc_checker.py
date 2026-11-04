@@ -1326,11 +1326,13 @@ def handle_recaptcha_checkbox(
     _rc_result = "missed"
 
     try:
-        # The recaptcha URL loads before the checkbox iframe exists.
-        # Poll the pierced DOM (not Selenium) until the anchor is actually there.
-        ready_deadline = time.time() + 8
+        # The recaptcha URL often shows "Loading" for a long time on a phone
+        # proxy. The checkbox iframe is injected only after that script arrives.
+        ready_deadline = time.time() + (22 if pace.get("fast") else 15)
+        ready_started = time.time()
         anchor_since = None
         found = {}
+        _last_wait_log = 0.0
         while time.time() < ready_deadline:
             found = _cdp_find_recaptcha(driver)
             if found.get("checkbox"):
@@ -1338,11 +1340,15 @@ def handle_recaptcha_checkbox(
             if found.get("anchor"):
                 if anchor_since is None:
                     anchor_since = time.time()
-                elif time.time() - anchor_since >= 1.0:
+                elif time.time() - anchor_since >= 0.6:
                     break
             else:
                 anchor_since = None
-            time.sleep(0.25)
+            waited = time.time() - ready_started
+            if waited - _last_wait_log >= 5:
+                _last_wait_log = waited
+                log(f"{email} — waiting for the robot checkbox ({int(waited)}s)")
+            time.sleep(0.3)
         if found.get("anchor") or found.get("checkbox"):
             log(
                 f"{email} — reCAPTCHA widget in DOM "
@@ -7148,38 +7154,51 @@ def _do_login(
         rand_sleep(80, 160)
         clipboard_type(driver, email_field, email)
         rand_sleep(100, 200)
-    # Click the "Next" button via touch — more human than Keys.ENTER (detectable as Selenium)
-    _email_next = wait_for_any([
-        '#identifierNext button', '#identifierNext', '[jsname="LgbsSe"]',
-        'button[type="button"]', 'div[role="button"]',
-    ], timeout=4)
-    if _email_next and _trusted_button_click(driver, _email_next):
-        log(f"{email} — Next clicked")
-    elif not _click_button_text(driver, ("Next",)):
-        email_field.send_keys(Keys.ENTER)
-        log(f"{email} — Next via Enter")
-    else:
-        log(f"{email} — Next clicked by label")
 
-    # Wait for any URL change that signals automation rejection or a challenge page.
-    # Google's sign-in is an SPA: after typing email + clicking Next, the URL
-    # STAYS at /v3/signin/identifier while the password field appears in-place.
-    # We only break early if Google navigates away (rejected or challenge).
-    # If the URL doesn't change (normal SPA case), we time out and proceed to
-    # Step 3 which looks for the password field directly.
-    _nav_deadline = time.time() + 8
+    def _click_email_next() -> bool:
+        # Only the real Next control. A generic button on this page is not Next.
+        nxt = wait_for_any(["#identifierNext button", "#identifierNext"], timeout=2)
+        if nxt and _trusted_button_click(driver, nxt):
+            log(f"{email} — Next clicked")
+            return True
+        if _click_button_text(driver, ("Next",)):
+            log(f"{email} — Next clicked by label")
+            return True
+        try:
+            email_field.send_keys(Keys.ENTER)
+            log(f"{email} — Next via Enter")
+            return True
+        except Exception:
+            return False
+
+    def _email_box_visible() -> bool:
+        try:
+            box = driver.find_element(By.CSS_SELECTOR, "#identifierId, input[type='email']")
+            return bool(box.is_displayed())
+        except Exception:
+            return False
+
+    _click_email_next()
+    # A slow phone proxy can take as long to leave this page as it took to open it.
+    _nav_deadline = time.time() + (20 if _phone_fast else 12)
+    _next_retried = False
+    _next_at = time.time()
     while time.time() < _nav_deadline:
         try:
-            _cur = driver.current_url
+            _cur = driver.current_url or ""
             if "signin/rejected" in _cur or ("signin/" in _cur and "identifier" not in _cur):
+                break
+            if driver.find_elements(By.CSS_SELECTOR, 'input[name="Passwd"], input[type="password"]'):
                 break
         except Exception:
             pass
-        time.sleep(0.15 if _phone_fast else 0.25)
-    if _phone_fast:
-        rand_sleep(40, 80)
-    else:
-        rand_sleep(300, 600)
+        # First tap can land while the form is still painting. Click once more
+        # only if the email box is still on screen.
+        if not _next_retried and (time.time() - _next_at) > 4 and _email_box_visible():
+            log(f"{email} — email page still open, clicking Next again")
+            _click_email_next()
+            _next_retried = True
+        time.sleep(0.25)
 
     url, text = page_state()
     log(f"{email} — After email submit: {url[:70]}")
