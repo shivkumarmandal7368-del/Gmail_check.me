@@ -71,16 +71,32 @@ def _switch_challenge_frame(driver: "WebDriver") -> bool:
     from selenium.webdriver.common.by import By
 
     driver.switch_to.default_content()
-    frames = driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha'][src*='bframe']")
-    if not frames:
-        frames = driver.find_elements(By.CSS_SELECTOR, "iframe[title*='recaptcha']")
+    try:
+        frames = driver.execute_script("""
+            const out = [];
+            function walk(root) {
+              if (!root || !root.querySelectorAll) return;
+              root.querySelectorAll('iframe').forEach(f => out.push(f));
+              root.querySelectorAll('*').forEach(n => { if (n.shadowRoot) walk(n.shadowRoot); });
+            }
+            walk(document);
+            return out;
+        """) or []
+    except Exception:
+        frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
     for fr in frames:
         try:
-            if fr.is_displayed() and fr.size.get("height", 0) > 40:
-                driver.switch_to.frame(fr)
-                return True
+            src = (fr.get_attribute("src") or "").lower()
+            title = (fr.get_attribute("title") or "").lower()
+            if "bframe" not in src and "challenge" not in title:
+                continue
+            driver.switch_to.frame(fr)
+            return True
         except Exception:
-            continue
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
     return False
 
 
