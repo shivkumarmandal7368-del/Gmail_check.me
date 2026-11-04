@@ -3087,6 +3087,20 @@ def get_chrome_version(chrome_path: str | None) -> str | None:
         return None
 
 
+def _proxy_host_prefer_ipv4(hostname: str) -> str:
+    """VPS often has no IPv6 route; LocalToNet AAAA breaks requests otherwise."""
+    if not hostname or "localtonet" not in hostname.lower():
+        return hostname
+    try:
+        import socket
+        infos = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM)
+        if infos:
+            return infos[0][4][0]
+    except Exception:
+        pass
+    return hostname
+
+
 def requests_proxy_url(proxy_url: str) -> str:
     """Proxy URL safe for requests/urllib3.
 
@@ -3095,7 +3109,7 @@ def requests_proxy_url(proxy_url: str) -> str:
     """
     from urllib.parse import urlparse, quote
     parsed = urlparse(proxy_url)
-    host = parsed.hostname or ""
+    host = _proxy_host_prefer_ipv4(parsed.hostname or "")
     port = parsed.port or 80
     user = quote(parsed.username or "", safe="")
     password = quote(parsed.password or "", safe="")
