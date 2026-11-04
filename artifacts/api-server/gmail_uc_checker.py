@@ -1288,6 +1288,35 @@ def proxy_fetch_exit_ip(proxy_url: str, timeout: int = 15) -> str | None:
     return None
 
 
+_GEO_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _geo_cache_key(proxy_url: str) -> str:
+    from urllib.parse import urlparse
+    import re as _re_geo
+    parsed = urlparse(proxy_url if "://" in proxy_url else f"http://{proxy_url}")
+    user = _re_geo.sub(r"(?:-session-[A-Za-z0-9]+)+$", "", parsed.username or "")
+    return f"{parsed.hostname}:{parsed.port or 0}:{user}"
+
+
+def _phone_proxy_fast(proxy_url: str | None) -> bool:
+    """LocalToNet / phone exit: skip slow in-proxy geo loops (saves 20–40s per account)."""
+    if not proxy_url:
+        return False
+    mode = os.environ.get("PROXY_PHONE_MODE", "1").strip().lower()
+    if mode in ("0", "false", "no", "off"):
+        return False
+    low = proxy_url.lower()
+    return "localtonet" in low or _proxy_implies_india(proxy_url)
+
+
+def _geo_cache_ttl() -> int:
+    try:
+        return max(30, min(600, int(os.environ.get("GEO_CACHE_SECONDS", "180"))))
+    except ValueError:
+        return 180
+
+
 def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dict | None:
     """Fetch exit IP geo info through the proxy. Tries three services in order per attempt:
       1. ip-api.com  (HTTP, comprehensive)
@@ -1300,6 +1329,13 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
     import requests as req
 
     tag = f"[geo{(' ' + _label) if _label else ''}]"
+
+    if _phone_proxy_fast(proxy_url):
+        _ck = _geo_cache_key(proxy_url)
+        _hit = _GEO_CACHE.get(_ck)
+        if _hit and (time.time() - _hit[0]) < _geo_cache_ttl():
+            log(f"{tag} phone-proxy geo cache hit ({int(time.time() - _hit[0])}s old)")
+            return dict(_hit[1])
 
     # Parse + re-encode proxy URL once — proxy usernames can contain + and other special
     # chars that Python's urllib mis-handles. We parse manually and re-encode each part.
@@ -1344,7 +1380,7 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
         log(f"{tag} [0/3] ipify got {_ipify_ip} but direct ip-api lookup failed")
     if _live:
         log(f"{tag} [0/3] ipify+ip-api → {_ipify_ip}")
-        return _build_result(
+        _res = _build_result(
             ip=_live.get("ip") or _ipify_ip,
             tz=_live.get("timezone"),
             cc=_live.get("countryCode", "US"),
@@ -1360,8 +1396,15 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
             proxy_flag=_live.get("proxy"),
             hosting=_live.get("hosting"),
         )
+        _store_geo_cache(proxy_url, _res)
+        return _res
 
-    for _attempt in range(1, _retries + 1):
+    _effective_retries = _retries
+    if _phone_proxy_fast(proxy_url):
+        # Phone tunnels are slow for fat JSON through the proxy; ipify path is enough.
+        _effective_retries = 0
+
+    for _attempt in range(1, _effective_retries + 1):
         # ── Service 1: ip-api.com (HTTP, most comprehensive) ─────────────────
         try:
             log(f"{tag} [1/3] ip-api.com attempt {_attempt}/{_retries}")
@@ -1431,16 +1474,18 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
         except Exception as _e3:
             log(f"{tag} ipinfo.io failed: {_e3}")
 
-        if _attempt < _retries:
-            log(f"{tag} All 3 services failed on attempt {_attempt}/{_retries}, retrying in 3s…")
+        if _attempt < _effective_retries:
+            log(f"{tag} All 3 services failed on attempt {_attempt}/{_effective_retries}, retrying in 3s…")
             _time.sleep(3)
 
-    log(f"{tag} ⚠️ GEO LOCK FAILED after {_retries} attempts (all 3 services) — timezone/language mismatch risk!")
+    if _effective_retries:
+        log(f"{tag} ⚠️ GEO LOCK FAILED after {_effective_retries} attempts (all 3 services) — timezone/language mismatch risk!")
     _fallback_ip = _ipify_ip or proxy_fetch_exit_ip(proxy_url)
     _hint = _proxy_country_hint(proxy_url)
     if _hint == "IN" or _proxy_implies_india(proxy_url):
         fb = _india_geo_fallback(_fallback_ip)
         log(f"{tag} Using India locale fallback (proxy/localtonet) ip={_fallback_ip}")
+        _store_geo_cache(proxy_url, fb)
         return fb
     if _hint == "US":
         fb = _us_geo_fallback(_fallback_ip)
@@ -1466,9 +1511,19 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
     return None
 
 
+def _store_geo_cache(proxy_url: str, geo: dict | None) -> None:
+    if not geo or not _phone_proxy_fast(proxy_url):
+        return
+    try:
+        _GEO_CACHE[_geo_cache_key(proxy_url)] = (time.time(), dict(geo))
+    except Exception:
+        pass
+
+
 def _sync_fingerprint_geo_from_proxy(fp: dict, proxy: str, fp_path: str | None = None) -> dict:
     """Always align timezone/language with the proxy exit IP before Chrome starts."""
-    geo = geo_lookup_proxy(proxy, _label="session-preflight", _retries=2)
+    geo = geo_lookup_proxy(proxy, _label="session-preflight", _retries=1)
+    _store_geo_cache(proxy, geo)
     if geo:
         _merge_geo_into_fingerprint(fp, geo)
         fp["keyboard"] = fp.get("keyboard") or keyboard_layout_for_language(fp.get("language") or "en-US")
@@ -1769,7 +1824,8 @@ def get_or_create_fingerprint(
     # Timezone + language — from proxy exit IP if available, else random
     if proxy:
         log("[geo] preflight v2 (ipify-first, localtonet India fallback)")
-        geo = geo_lookup_proxy(proxy, _label="new-profile", _retries=2)
+        geo = geo_lookup_proxy(proxy, _label="new-profile", _retries=1)
+        _store_geo_cache(proxy, geo)
     else:
         geo = None
     if geo:
