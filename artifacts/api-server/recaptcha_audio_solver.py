@@ -56,6 +56,18 @@ def _patch_av_open() -> None:
     av.open = open_compat
 
 
+def preload_whisper() -> None:
+    """Load the speech model while Chrome is still starting."""
+    global _whisper_model
+    _patch_av_open()
+    if _whisper_model is not None:
+        return
+    from faster_whisper import WhisperModel
+    model_name = os.environ.get("WHISPER_MODEL", "tiny.en")
+    _log(f"preloading Whisper {model_name}")
+    _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
+
+
 def _transcribe_audio(path: str) -> str | None:
     global _whisper_model
     _patch_av_open()
@@ -64,7 +76,7 @@ def _transcribe_audio(path: str) -> str | None:
     except ImportError:
         _log("install faster-whisper on VPS: .venv/bin/pip install faster-whisper")
         return None
-    model_name = os.environ.get("WHISPER_MODEL", "base.en")
+    model_name = os.environ.get("WHISPER_MODEL", "tiny.en")
     if _whisper_model is None:
         _log(f"loading Whisper model {model_name} (first run downloads model weights)…")
         _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")

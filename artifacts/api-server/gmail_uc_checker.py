@@ -286,6 +286,14 @@ def _find_free_display() -> int:
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
+def _preload_whisper_bg() -> None:
+    try:
+        from recaptcha_audio_solver import preload_whisper
+        preload_whisper()
+    except Exception as exc:
+        log(f"Whisper preload skipped: {exc}")
+
+
 def log(msg: str):
     print(f"[UC] {msg}", file=sys.stderr, flush=True)
 
@@ -1322,6 +1330,19 @@ def _cdp_click_recaptcha_checkbox(driver) -> bool:
     if not point:
         return False
     x, y, _how = point
+    # A real finger travels onto the box. One teleport is scored as a bot.
+    sx = max(12.0, x - random.randint(80, 160))
+    sy = max(12.0, y - random.randint(50, 120))
+    for step in range(1, 5):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": "mouseMoved",
+            "x": sx + (x - sx) * step / 4,
+            "y": sy + (y - sy) * step / 4,
+            "button": "none",
+            "buttons": 0,
+        })
+        time.sleep(0.045)
+    time.sleep(0.12)
     _cdp_click_xy(driver, x, y)
     time.sleep(0.45)
     aria = (_cdp_find_recaptcha(driver).get("checkbox") or {}).get("aria")
@@ -1527,8 +1548,8 @@ def handle_recaptcha_checkbox(
                 from recaptcha_solver import captcha_solver_configured, try_solve_recaptcha_on_page
 
                 if _rc_result in ("image", "timeout", "missed"):
-                    log(f"{email} — free captcha pipeline (Whisper audio + YOLO vision)…")
-                    if run_free_captcha_pipeline(driver, _recaptcha_checkbox_ticked, max_cycles=3):
+                    log(f"{email} — free captcha pipeline (audio first, then vision)…")
+                    if run_free_captcha_pipeline(driver, _recaptcha_checkbox_ticked, max_cycles=1):
                         _rc_result = "passed"
                         log(f"{email} — free captcha pipeline OK")
 
@@ -4269,6 +4290,7 @@ def main():
     )
 
     _t0 = time.time()
+    threading.Thread(target=_preload_whisper_bg, daemon=True).start()
     result = check_gmail(
         email, password, totp_secret, proxy, fresh_profile,
         proxy_for_ip_check, device_index, change_password,
@@ -4329,7 +4351,7 @@ def main():
     if result["durationMs"] >= 45000:
         log(
             f"{email} — Slow check tip: sign-in nav + LocalToNet proxy dominate; "
-            "phone mode skips warmup/ipify; PHONE_WARMUP=1 only if captcha badho"
+            "google.com warmup stays on so the checkbox is not a cold profile"
         )
     print(json.dumps(result), flush=True)
 
@@ -4623,6 +4645,23 @@ def check_gmail(
         # Keep the emulated Android UA/client hints aligned with the actual
         # Chrome binary used by undetected-chromedriver.
         fp["chromeVersion"] = chrome_version_full
+    # A real new phone passes the checkbox because the browser matches the device.
+    # This host is Linux Chrome. Claiming a Pixel (Android UA, touch, Mali GPU)
+    # while the TLS fingerprint stays Linux is what makes Google open the puzzle.
+    consistent_browser = os.environ.get("CONSISTENT_BROWSER", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+    if consistent_browser:
+        fp["screenW"] = 1366
+        fp["screenH"] = 768
+        fp["availH"] = 728
+        fp["dpr"] = 1
+        fp["platform"] = "Linux x86_64"
+        fp["maxTouchPoints"] = 0
+        log(
+            "CONSISTENT_BROWSER — real Linux Chrome, fake Android off. "
+            "Phone model stays in the profile only; the sign-in browser matches this machine."
+        )
     fp_summary = (f"{fp['model']} | {fp['webglRenderer']} | "
                   f"{fp['screenW']}x{fp['screenH']} dpr={fp['dpr']} | canvas={fp['canvasSeed']}")
     geo_info = (f"tz={fp.get('timezone','?')} lang={fp.get('language','?')} "
@@ -4684,15 +4723,13 @@ def check_gmail(
     # Do not pass the usual Selenium flag bundle (--disable-component-update,
     # --disable-default-apps, --disable-background-networking, etc.). Google's
     # sign-in page treats that set as an insecure/automated browser.
-    options.add_argument(f"--user-agent={MOBILE_UA}")
-    options.add_argument("--touch-events=enabled")
+    if not consistent_browser:
+        options.add_argument(f"--user-agent={MOBILE_UA}")
+        options.add_argument("--touch-events=enabled")
+        options.add_argument(f"--force-device-memory={fp['deviceMemory']}")
     # DPR comes from Emulation.setDeviceMetricsOverride only. Combining it with
     # --force-device-scale-factor double-scales innerWidth vs outerWidth, which
     # fingerprint.com scores as Developer Tools + Tampering.
-    # Chrome 151 removed Emulation.setDeviceMemoryOverride CDP command.
-    # Use the Chrome flag instead so navigator.deviceMemory reports the correct
-    # spoofed value (instead of undefined which is a strong automation signal).
-    options.add_argument(f"--force-device-memory={fp['deviceMemory']}")
     # VM detection fix: SwiftShader renders via GPU-like pipeline instead of --disable-gpu
     # which exposes software rendering signals. These flags make WebGL work and match
     # what real Android Chrome reports (device_check.py uses the same set).
@@ -4884,93 +4921,96 @@ def check_gmail(
     except Exception as e:
         log(f"CDP timezone/locale warning (non-fatal): {e}")
 
-    # VM detection fix: override hardware concurrency at the CDP level so it matches
-    # the JS patch. Without this CDP override, browser internals still report real
-    # Replit VM thread count (16-32) which fingerprinters detect via timing attacks.
-    try:
-        driver.execute_cdp_cmd("Emulation.setHardwareConcurrencyOverride",
-                               {"hardwareConcurrency": fp["hwConcurrency"]})
-        log(f"CDP hwConcurrency set → {fp['hwConcurrency']}")
-    except Exception as e:
-        log(f"CDP hwConcurrency warning (non-fatal): {e}")
+    if consistent_browser:
+        log("CDP phone emulation skipped — real Chrome UA, window, and touch")
+    else:
+        # VM detection fix: override hardware concurrency at the CDP level so it matches
+        # the JS patch. Without this CDP override, browser internals still report real
+        # Replit VM thread count (16-32) which fingerprinters detect via timing attacks.
+        try:
+            driver.execute_cdp_cmd("Emulation.setHardwareConcurrencyOverride",
+                                   {"hardwareConcurrency": fp["hwConcurrency"]})
+            log(f"CDP hwConcurrency set → {fp['hwConcurrency']}")
+        except Exception as e:
+            log(f"CDP hwConcurrency warning (non-fatal): {e}")
 
-    # Touch BEFORE device metrics so the viewport is a phone, not a desktop
-    # window with a mobile UA (Google rejects that mix as an insecure browser).
-    try:
-        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
-            "enabled":        True,
-            "maxTouchPoints": fp["maxTouchPoints"],
-            "configuration":  "mobile",
-        })
-        log(f"CDP touch emulation set → maxTouchPoints={fp['maxTouchPoints']}")
-    except Exception as e:
-        log(f"CDP touch emulation warning (non-fatal): {e}")
+        # Touch BEFORE device metrics so the viewport is a phone, not a desktop
+        # window with a mobile UA (Google rejects that mix as an insecure browser).
+        try:
+            driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
+                "enabled":        True,
+                "maxTouchPoints": fp["maxTouchPoints"],
+                "configuration":  "mobile",
+            })
+            log(f"CDP touch emulation set → maxTouchPoints={fp['maxTouchPoints']}")
+        except Exception as e:
+            log(f"CDP touch emulation warning (non-fatal): {e}")
 
-    # Viewport height is the usable screen (availH), not the full panel height.
-    # Using screenH here makes innerHeight larger than a real phone and is scored
-    # as DevTools / tampering.
-    _view_h = int(fp.get("availH") or fp["screenH"])
-    try:
-        driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
-            "width":             fp["screenW"],
-            "height":            _view_h,
-            "deviceScaleFactor": fp["dpr"],
-            "mobile":            True,
-            "hasTouch":          True,
-            "screenWidth":       fp["screenW"],
-            "screenHeight":      fp["screenH"],
-        })
-        log(f"CDP deviceMetrics set → {fp['screenW']}x{_view_h} dpr={fp['dpr']}")
-    except Exception as e:
-        log(f"CDP deviceMetrics warning (non-fatal): {e}")
+        # Viewport height is the usable screen (availH), not the full panel height.
+        # Using screenH here makes innerHeight larger than a real phone and is scored
+        # as DevTools / tampering.
+        _view_h = int(fp.get("availH") or fp["screenH"])
+        try:
+            driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                "width":             fp["screenW"],
+                "height":            _view_h,
+                "deviceScaleFactor": fp["dpr"],
+                "mobile":            True,
+                "hasTouch":          True,
+                "screenWidth":       fp["screenW"],
+                "screenHeight":      fp["screenH"],
+            })
+            log(f"CDP deviceMetrics set → {fp['screenW']}x{_view_h} dpr={fp['dpr']}")
+        except Exception as e:
+            log(f"CDP deviceMetrics warning (non-fatal): {e}")
 
-    # deviceMemory override at C++ level — the JS prototype patch alone can be
-    # bypassed by fingerprint.com reading the CDP-reported value directly.
-    try:
-        driver.execute_cdp_cmd("Emulation.setDeviceMemoryOverride",
-                               {"memory": fp["deviceMemory"]})
-        log(f"CDP deviceMemory set → {fp['deviceMemory']} GiB")
-    except Exception as e:
-        log(f"CDP deviceMemory skipped: {str(e).splitlines()[0][:160]}")
+        # deviceMemory override at C++ level — the JS prototype patch alone can be
+        # bypassed by fingerprint.com reading the CDP-reported value directly.
+        try:
+            driver.execute_cdp_cmd("Emulation.setDeviceMemoryOverride",
+                                   {"memory": fp["deviceMemory"]})
+            log(f"CDP deviceMemory set → {fp['deviceMemory']} GiB")
+        except Exception as e:
+            log(f"CDP deviceMemory skipped: {str(e).splitlines()[0][:160]}")
 
-    # VM detection fix: Emulation.setUserAgentOverride sets navigator.userAgent and
-    # navigator.platform at the CDP emulation layer — deeper than Network.setUserAgentOverride.
-    # fingerprint.com compares the CDP-emulation-reported platform against the JS-reported
-    # platform; both must agree on "Linux armv8l" to avoid a VM mismatch signal.
-    # CRITICAL: Must include userAgentMetadata here too — calling Emulation.setUserAgentOverride
-    # WITHOUT userAgentMetadata causes Chrome 151 to clear navigator.userAgentData.brands to [],
-    # mobile to false, and platform to '' — a major Tampering signal that overrides both
-    # Network.setUserAgentOverride metadata AND our JS-level Navigator.prototype.userAgentData fix.
-    try:
-        driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
-            "userAgent":      MOBILE_UA,
-            "acceptLanguage": f"{fp['language']},en;q=0.9",
-            "platform":       fp["platform"],
-            "userAgentMetadata": {
-                "brands": [
-                    {"brand": "Not(A;Brand",   "version": "8"},
-                    {"brand": "Chromium",      "version": fp["chromeVersion"].split(".")[0]},
-                    {"brand": "Google Chrome", "version": fp["chromeVersion"].split(".")[0]},
-                ],
-                "fullVersionList": [
-                    {"brand": "Not(A;Brand",   "version": "8.0.0.0"},
-                    {"brand": "Chromium",      "version": fp["chromeVersion"]},
-                    {"brand": "Google Chrome", "version": fp["chromeVersion"]},
-                ],
-                "fullVersion": fp["chromeVersion"],
-                "platform": "Android",
-                "platformVersion": str(fp["androidVersion"]) + ".0.0",
-                "architecture": "",
-                "model": fp["model"],
-                "mobile": True,
-                "bitness": "",
-                "wow64": False,
-                "formFactors": ["Mobile"],
-            },
-        })
-        log(f"CDP Emulation UA override set → platform={fp['platform']} (with userAgentMetadata)")
-    except Exception as e:
-        log(f"CDP Emulation UA override warning (non-fatal): {e}")
+        # VM detection fix: Emulation.setUserAgentOverride sets navigator.userAgent and
+        # navigator.platform at the CDP emulation layer — deeper than Network.setUserAgentOverride.
+        # fingerprint.com compares the CDP-emulation-reported platform against the JS-reported
+        # platform; both must agree on "Linux armv8l" to avoid a VM mismatch signal.
+        # CRITICAL: Must include userAgentMetadata here too — calling Emulation.setUserAgentOverride
+        # WITHOUT userAgentMetadata causes Chrome 151 to clear navigator.userAgentData.brands to [],
+        # mobile to false, and platform to '' — a major Tampering signal that overrides both
+        # Network.setUserAgentOverride metadata AND our JS-level Navigator.prototype.userAgentData fix.
+        try:
+            driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
+                "userAgent":      MOBILE_UA,
+                "acceptLanguage": f"{fp['language']},en;q=0.9",
+                "platform":       fp["platform"],
+                "userAgentMetadata": {
+                    "brands": [
+                        {"brand": "Not(A;Brand",   "version": "8"},
+                        {"brand": "Chromium",      "version": fp["chromeVersion"].split(".")[0]},
+                        {"brand": "Google Chrome", "version": fp["chromeVersion"].split(".")[0]},
+                    ],
+                    "fullVersionList": [
+                        {"brand": "Not(A;Brand",   "version": "8.0.0.0"},
+                        {"brand": "Chromium",      "version": fp["chromeVersion"]},
+                        {"brand": "Google Chrome", "version": fp["chromeVersion"]},
+                    ],
+                    "fullVersion": fp["chromeVersion"],
+                    "platform": "Android",
+                    "platformVersion": str(fp["androidVersion"]) + ".0.0",
+                    "architecture": "",
+                    "model": fp["model"],
+                    "mobile": True,
+                    "bitness": "",
+                    "wow64": False,
+                    "formFactors": ["Mobile"],
+                },
+            })
+            log(f"CDP Emulation UA override set → platform={fp['platform']} (with userAgentMetadata)")
+        except Exception as e:
+            log(f"CDP Emulation UA override warning (non-fatal): {e}")
 
     _login_result: dict = {}
     try:
@@ -5130,9 +5170,11 @@ def _do_login(
     _pace = _login_pace(proxy_url)
     _phone_fast = _pace["fast"]
     _post_nav_sleep = _pace["post_nav"]
-    _use_warmup = not robot_check_only and (
-        not _phone_fast
-        or os.environ.get("PHONE_WARMUP", "").strip().lower() in ("1", "true", "yes")
+    # A new phone opens Google once before the sign-in form and already has
+    # cookies. A cold profile that lands straight on the email page is what
+    # makes the checkbox open a puzzle. PHONE_WARMUP=0 turns this off.
+    _use_warmup = os.environ.get("PHONE_WARMUP", "1").strip().lower() not in (
+        "0", "false", "no", "off",
     )
 
     # One TOTP code per 30s window — reuse across multiple prompts in the same window.
@@ -6951,7 +6993,22 @@ def _do_login(
     # profile that opens the sign-in form immediately is what makes the
     # checkbox escalate to a puzzle. One homepage load is enough; no search.
     if robot_check_only:
-        log(f"{email} — Robot check: skip warmup, open email sign-in")
+        if _use_warmup:
+            try:
+                log(f"{email} — Warmup: google.com")
+                driver.get("https://www.google.com")
+                _warm_deadline = time.time() + 3.5
+                while time.time() < _warm_deadline:
+                    try:
+                        if driver.execute_script("return document.readyState") in ("interactive", "complete"):
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.15)
+                rand_sleep(250, 450)
+            except Exception as _warm_err:
+                log(f"{email} — warmup skipped: {_warm_err}")
+        log(f"{email} — Robot check: open email sign-in")
         try:
             driver.get(_signin_entry)
             time.sleep(0.45)

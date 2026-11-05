@@ -88,27 +88,19 @@ def run_free_captcha_pipeline(
             _log("left recaptcha page")
             return True
         solved = False
-        grid_first = free_vision_enabled() and _image_grid_ready(driver)
-
-        if grid_first:
-            _log("try image (YOLO)")
-            if try_solve_recaptcha_image_page(driver, rounds=4):
-                if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
-                    _log("cleared after vision")
-                    return True
-                solved = True
-
+        # Spoken digits are one clip. The picture grid takes several rounds and
+        # was the slow path that still failed on cars and scooters.
         if free_audio_enabled() and not _parent_left_recaptcha(driver):
-            _log("try audio (Whisper)")
+            _log("try audio first")
             if try_solve_recaptcha_audio_page(driver):
                 if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
                     _log("cleared after audio")
                     return True
                 solved = True
 
-        if free_vision_enabled() and not grid_first and not _parent_left_recaptcha(driver):
+        if free_vision_enabled() and not _parent_left_recaptcha(driver):
             _log("try image (YOLO)")
-            if try_solve_recaptcha_image_page(driver, rounds=4):
+            if try_solve_recaptcha_image_page(driver, rounds=2):
                 if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
                     _log("cleared after vision")
                     return True

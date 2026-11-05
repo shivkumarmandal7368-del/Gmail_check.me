@@ -1011,7 +1011,7 @@ function BrowserChecker() {
                 </div>
               </div>
               <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
-                {freshProfile ? "Pehla khatam, phir agla naya profile aur naya canvas. Phone model yahi selected device rahega. Timezone, language aur keyboard Chrome ke IP se match honge." : "Sab accounts ek hi fingerprint: Device Check ne jo device banaya, wahi. Timezone, language aur keyboard Chrome ke IP se match honge."}
+                {freshProfile ? "Pehla khatam, phir agla naya profile aur naya canvas. Sign-in real Linux Chrome se hota hai, fake phone nahi — isi se checkbox pe puzzle kam khulta hai. Timezone aur language IP se match honge." : "Profile reuse hota hai. Sign-in real Linux Chrome se hota hai, fake phone nahi. Timezone aur language IP se match honge."}
               </p>
             </button>
 
@@ -1922,8 +1922,8 @@ function DeviceChecker() {
         </div>
         <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
           {freshProfile
-            ? "Naya Chrome profile aur naya canvas. Browser Check ka Fresh on bhi agle account par yahi naya fingerprint use karega. Timezone, language aur keyboard us IP par rahenge jo Chrome use kare."
-            : "Yahi fingerprint Browser Check use karega jab Fresh off ho. Timezone, language aur keyboard Chrome ke exit IP se match honge."}
+            ? "Naya Chrome profile aur naya canvas. Sign-in real Linux Chrome se hota hai, fake phone nahi. Timezone, language aur keyboard us IP par rahenge jo Chrome use kare."
+            : "Yahi profile reuse hoga. Sign-in real Linux Chrome se hota hai. Timezone, language aur keyboard Chrome ke exit IP se match honge."}
         </p>
       </button>
 
