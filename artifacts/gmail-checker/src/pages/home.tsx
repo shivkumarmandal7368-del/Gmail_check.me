@@ -146,6 +146,7 @@ function BrowserChecker() {
   const [proxyCheckError, setProxyCheckError] = useState<string>("");
   const [jobStartError, setJobStartError] = useState<string>("");
   const [browserLogs, setBrowserLogs] = useState<Array<{ email?: string; message: string }>>([]);
+  const [liveShots, setLiveShots] = useState<Array<{ label: string; image: string }>>([]);
 
   // refs
   const sseAbortRef      = useRef<AbortController | null>(null);
@@ -446,7 +447,11 @@ function BrowserChecker() {
   };
 
   const handleJobEvent = (evt: any) => {
-    if (evt.type === "log") {
+    if (evt.type === "screen" && typeof evt.image === "string") {
+      const image = evt.image.startsWith("data:") ? evt.image : `data:image/jpeg;base64,${evt.image}`;
+      const label = typeof evt.label === "string" ? evt.label : "Step";
+      setLiveShots(prev => [...prev, { label, image }].slice(-18));
+    } else if (evt.type === "log") {
       setBrowserLogs(prev => [
         ...prev,
         { email: typeof evt.email === "string" ? evt.email : undefined, message: String(evt.message ?? "") },
@@ -588,7 +593,7 @@ function BrowserChecker() {
     sseAbortRef.current?.abort();
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     appendModeRef.current = false;
-    setResults([]); setTotal(credentials.length); setReconnectedAt(null); setRestoredAt(null); setSelectedUnknown(new Set());
+    setResults([]); setLiveShots([]); setTotal(credentials.length); setReconnectedAt(null); setRestoredAt(null); setSelectedUnknown(new Set());
     setJobStatus("running"); setPauseRequested(false); setResumeReady(false);
     setJobStartError("");
     try {
@@ -1068,6 +1073,48 @@ function BrowserChecker() {
             </Button>
           </CardContent>
         </Card>
+
+        {(liveShots.length > 0 || isChecking) && (
+          <Card className="border-border bg-card/40">
+            <CardHeader className="py-2 px-4 border-b border-border">
+              <CardTitle className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">
+                Live screen
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="p-3 space-y-2">
+              {liveShots.length === 0 ? (
+                <p className="text-[11px] font-mono text-muted-foreground">Chrome khulte hi yahi screen update hogi, step by step.</p>
+              ) : (
+                <>
+                  <p className="text-[11px] font-mono text-primary">
+                    {liveShots.length}. {liveShots[liveShots.length - 1].label}
+                  </p>
+                  <img
+                    src={liveShots[liveShots.length - 1].image}
+                    alt={liveShots[liveShots.length - 1].label}
+                    className="rounded border border-border max-w-[320px] w-full cursor-pointer"
+                    onClick={() => window.open(liveShots[liveShots.length - 1].image)}
+                  />
+                  <div className="flex gap-2 overflow-x-auto pb-1">
+                    {liveShots.map((shot, shotIndex) => (
+                      <button
+                        key={`${shot.label}-${shotIndex}`}
+                        type="button"
+                        className="shrink-0 w-[84px] text-left"
+                        onClick={() => window.open(shot.image)}
+                      >
+                        <img src={shot.image} alt={shot.label} className="rounded border border-border w-full" />
+                        <span className="block text-[9px] font-mono text-muted-foreground mt-1 leading-tight">
+                          {shotIndex + 1}. {shot.label}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         {(browserLogs.length > 0 || isChecking) && (
           <Card className="border-border bg-card/40">

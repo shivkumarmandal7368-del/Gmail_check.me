@@ -4528,6 +4528,9 @@ def capture_step(driver, label: str) -> None:
     if not image:
         return
     shots.append({"label": label, "image": image})
+    b64 = image.split(",", 1)[1] if "," in image else image
+    safe = label.replace("\t", " ").replace("\n", " ")
+    print(f"STEP_SHOT\t{safe}\t{b64}", file=sys.stderr, flush=True)
     log(f"step shot: {label}")
 
 

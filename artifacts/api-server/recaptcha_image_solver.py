@@ -347,8 +347,9 @@ def try_solve_recaptcha_image_page(driver: "WebDriver", rounds: int = 4) -> bool
             time.sleep(2.2)
             if not _on_recaptcha():
                 return True
-            rnd += 1
-            continue
+            _log("puzzle still open after the button — switching to audio")
+            driver.switch_to.default_content()
+            return False
         # Dynamic grid: selected cells get a new photo. Look again before verify.
         driver.switch_to.default_content()
         time.sleep(2.0)

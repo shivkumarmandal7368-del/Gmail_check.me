@@ -38,8 +38,27 @@ def free_audio_enabled() -> bool:
 _whisper_model = None
 
 
+def _patch_av_open() -> None:
+    """faster-whisper 1.2 passes metadata_errors to av.open. av 19 rejects that argument and the audio solve dies."""
+    try:
+        import av
+    except Exception:
+        return
+    current = av.open
+    if getattr(current, "_mx_patched", False):
+        return
+
+    def open_compat(*args, **kwargs):
+        kwargs.pop("metadata_errors", None)
+        return current(*args, **kwargs)
+
+    open_compat._mx_patched = True  # type: ignore[attr-defined]
+    av.open = open_compat
+
+
 def _transcribe_audio(path: str) -> str | None:
     global _whisper_model
+    _patch_av_open()
     try:
         from faster_whisper import WhisperModel
     except ImportError:
@@ -51,15 +70,19 @@ def _transcribe_audio(path: str) -> str | None:
         _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
     best: str | None = None
     for beam in (5, 3, 1):
-        segments, _ = _whisper_model.transcribe(
-            path,
-            language="en",
-            beam_size=beam,
-            best_of=3,
-            temperature=0.0,
-            initial_prompt="The numbers are spoken clearly for a captcha.",
-            vad_filter=True,
-        )
+        try:
+            segments, _ = _whisper_model.transcribe(
+                path,
+                language="en",
+                beam_size=beam,
+                best_of=3,
+                temperature=0.0,
+                initial_prompt="The numbers are spoken clearly for a captcha.",
+                vad_filter=True,
+            )
+        except Exception as exc:
+            _log(f"Whisper failed: {exc}")
+            return None
         text = " ".join(s.text for s in segments).strip()
         if not text:
             continue
