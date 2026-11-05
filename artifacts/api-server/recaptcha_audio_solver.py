@@ -313,10 +313,12 @@ def _try_audio_via_cdp(driver: "WebDriver") -> bool:
         return False
     _log(f"CDP audio button click at {int(point[0])},{int(point[1])}")
     _cdp_click_point(driver, point[0], point[1])
-    time.sleep(1.3)
-
-    frame = _cdp_bframe(driver)
-    payload = _audio_bytes_from_frame(driver, frame.get("docId"))
+    payload = None
+    clip_deadline = time.time() + 8.0
+    while time.time() < clip_deadline and not payload:
+        time.sleep(0.4)
+        frame = _cdp_bframe(driver) or {}
+        payload = _audio_bytes_from_frame(driver, frame.get("docId"))
     if not payload:
         _log("could not read audio from challenge frame")
         return False
@@ -388,6 +390,34 @@ def _download_challenge_audio(driver: "WebDriver", session) -> str | None:
             pass
     if not url:
         return None
+    try:
+        driver.set_script_timeout(20)
+        b64 = driver.execute_async_script(
+            """
+            const src = arguments[0];
+            const done = arguments[arguments.length - 1];
+            fetch(src).then(r => r.arrayBuffer()).then(buf => {
+              const bytes = new Uint8Array(buf);
+              let bin = '';
+              for (let i = 0; i < bytes.length; i += 0x8000) {
+                bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+              }
+              done(btoa(bin));
+            }).catch(() => done(null));
+            """,
+            url,
+        )
+        if b64:
+            import base64
+            raw = base64.b64decode(b64)
+            if len(raw) > 100:
+                suffix = ".mp3" if url.lower().split("?")[0].endswith(".mp3") else ".wav"
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+                tmp.write(raw)
+                tmp.close()
+                return tmp.name
+    except Exception as exc:
+        _log(f"in-page audio fetch failed: {exc}")
     for c in driver.get_cookies():
         session.cookies.set(c["name"], c["value"], domain=c.get("domain"))
     r = session.get(url, timeout=30)
@@ -449,28 +479,33 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             driver.switch_to.default_content()
             return _try_audio_via_cdp(driver)
 
-        # The password page can open while this clip is still loading.
-        clip_deadline = time.time() + 1.6
-        while time.time() < clip_deadline:
-            try:
-                driver.switch_to.default_content()
-                if "challenge/recaptcha" not in (driver.current_url or ""):
-                    _log("left recaptcha page")
-                    return True
-            except Exception:
-                pass
-            time.sleep(0.2)
-
-        if not _switch_challenge_frame(driver):
-            return False
+        # The phone proxy often takes several seconds to paint the audio clip.
+        clip_deadline = time.time() + 8.0
         session = req.Session()
         audio_path = None
         try:
-            audio_path = _download_challenge_audio(driver, session)
+            while time.time() < clip_deadline and not audio_path:
+                try:
+                    driver.switch_to.default_content()
+                    if "challenge/recaptcha" not in (driver.current_url or ""):
+                        _log("left recaptcha page")
+                        return True
+                except Exception:
+                    pass
+                if not _switch_challenge_frame(driver):
+                    time.sleep(0.4)
+                    continue
+                try:
+                    audio_path = _download_challenge_audio(driver, session)
+                except Exception as exc:
+                    _log(f"audio download error: {exc}")
+                    audio_path = None
+                if not audio_path:
+                    time.sleep(0.4)
             if not audio_path:
-                _log("could not download audio clip")
+                _log("could not download audio clip — trying the challenge frame")
                 driver.switch_to.default_content()
-                return False
+                return _try_audio_via_cdp(driver)
             answer = _transcribe_audio(audio_path)
             if not answer:
                 driver.switch_to.default_content()
