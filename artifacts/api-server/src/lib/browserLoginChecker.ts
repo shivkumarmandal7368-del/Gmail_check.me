@@ -82,6 +82,7 @@ export interface BrowserLoginResult {
   /** Robot check: not_robot | robot | unknown */
   robotOutcome?: string;
   debugScreenshot?: string;
+  stepScreenshots?: Array<{ label: string; image: string }>;
   exitIp?: string;
   ipInfo?: IpInfo;
   fingerprint?: string;
@@ -261,6 +262,12 @@ async function checkOneAccount(
           reason: parsed.reason ?? "No reason returned",
           totpCode: parsed.totpCode ?? totpCode,
           debugScreenshot: parsed.debugScreenshot ?? undefined,
+          stepScreenshots: Array.isArray(parsed.stepScreenshots)
+            ? parsed.stepScreenshots.filter(
+                (shot: { label?: unknown; image?: unknown }) =>
+                  typeof shot?.label === "string" && typeof shot?.image === "string",
+              )
+            : undefined,
           exitIp: parsed.exitIp ?? undefined,
           ipInfo: parsed.ipInfo ?? undefined,
           fingerprint: parsed.fingerprint ?? undefined,

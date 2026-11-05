@@ -18,6 +18,15 @@ def _log(msg: str) -> None:
     print(f"[UC] [captcha-vision] {msg}", file=__import__("sys").stderr, flush=True)
 
 
+def _snap(driver: "WebDriver", label: str) -> None:
+    fn = getattr(driver, "capture_step", None)
+    if callable(fn):
+        try:
+            fn(label)
+        except Exception:
+            pass
+
+
 def free_vision_enabled() -> bool:
     return os.environ.get("CAPTCHA_FREE_VISION", "1").strip().lower() not in (
         "0",
@@ -217,6 +226,7 @@ def try_solve_recaptcha_image_page(driver: "WebDriver", rounds: int = 4) -> bool
         driver.switch_to.default_content()
         return False
     _log(f"instruction {instruction[:50]!r} → {targets} tiles={len(tiles)}")
+    _snap(driver, "Captcha " + " ".join(instruction.split())[:42])
 
     conf = float(os.environ.get("YOLO_CONF", "0.18"))
     ever_clicked = False
@@ -330,6 +340,7 @@ def try_solve_recaptcha_image_page(driver: "WebDriver", rounds: int = 4) -> bool
                 driver.switch_to.default_content()
                 return False
         if verify is not None and (clicked == 0 or rnd == max_rounds):
+            _snap(driver, f"Captcha round {rnd} before {button_text or 'verify'}")
             verify.click()
             _log(f"round {rnd}: {button_text or 'verify'} clicked")
             driver.switch_to.default_content()

@@ -16,6 +16,15 @@ def _log(msg: str) -> None:
     print(f"[UC] [captcha-audio] {msg}", file=__import__("sys").stderr, flush=True)
 
 
+def _snap(driver: "WebDriver", label: str) -> None:
+    fn = getattr(driver, "capture_step", None)
+    if callable(fn):
+        try:
+            fn(label)
+        except Exception:
+            pass
+
+
 def free_audio_enabled() -> bool:
     """On by default; set CAPTCHA_FREE_AUDIO=0 to disable."""
     return os.environ.get("CAPTCHA_FREE_AUDIO", "1").strip().lower() not in (
@@ -478,6 +487,7 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             _log(f"audio button click failed: {exc} — trying CDP")
             driver.switch_to.default_content()
             return _try_audio_via_cdp(driver)
+        _snap(driver, "Captcha audio")
 
         # The phone proxy often takes several seconds to paint the audio clip.
         clip_deadline = time.time() + 8.0
@@ -504,6 +514,7 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
                     time.sleep(0.4)
             if not audio_path:
                 _log("could not download audio clip — trying the challenge frame")
+                _snap(driver, "Captcha audio missing")
                 driver.switch_to.default_content()
                 return _try_audio_via_cdp(driver)
             answer = _transcribe_audio(audio_path)

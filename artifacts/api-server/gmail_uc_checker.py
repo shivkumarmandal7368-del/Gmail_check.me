@@ -1463,6 +1463,7 @@ def handle_recaptcha_checkbox(
                 f"{email} — reCAPTCHA widget in DOM "
                 f"aria={(found.get('checkbox') or {}).get('aria')}"
             )
+            capture_step(driver, "Robot checkbox")
         else:
             log(f"{email} — reCAPTCHA widget not in DOM")
             _cdp_log_frame_srcs(driver)
@@ -1479,6 +1480,7 @@ def handle_recaptcha_checkbox(
                 break
             if _cdp_challenge_open(driver):
                 log(f"{email} — reCAPTCHA challenge is open")
+                capture_step(driver, "Robot challenge")
                 _rc_result = "image"
                 break
             if attempt < 2:
@@ -4497,6 +4499,38 @@ def _proxy_without_unsupported_sticky(proxy_url: str | None) -> str | None:
     return f"{scheme}{cleaned}{rest}"
 
 
+def _compact_screenshot(driver) -> str | None:
+    """Small JPEG so a full step strip still fits in the job result."""
+    try:
+        png = driver.get_screenshot_as_png()
+    except Exception:
+        return None
+    try:
+        import io as _io
+        from PIL import Image
+
+        im = Image.open(_io.BytesIO(png)).convert("RGB")
+        if im.width > 420:
+            im = im.resize((420, max(1, int(im.height * 420 / im.width))), Image.Resampling.LANCZOS)
+        buf = _io.BytesIO()
+        im.save(buf, format="JPEG", quality=40, optimize=True)
+        raw = buf.getvalue()
+    except Exception:
+        raw = png
+    return "data:image/jpeg;base64," + base64.b64encode(raw).decode()
+
+
+def capture_step(driver, label: str) -> None:
+    shots = getattr(driver, "_step_shots", None)
+    if not isinstance(shots, list) or len(shots) >= 18:
+        return
+    image = _compact_screenshot(driver)
+    if not image:
+        return
+    shots.append({"label": label, "image": image})
+    log(f"step shot: {label}")
+
+
 def check_gmail(
     email: str,
     password: str,
@@ -4733,6 +4767,8 @@ def check_gmail(
         _active_driver = driver
         _active_xvfb   = _xvfb_proc
         _active_locks  = [_session_lock_fd]
+        driver._step_shots = []
+        driver.capture_step = lambda label: capture_step(driver, label)
         # Reduced from 2.5s → 1.0s: Chrome process is already running, just
         # letting CDP settle.  Lock is released sooner so next account can start.
         time.sleep(0.35 if _phone_proxy_fast(proxy) else 1.0)
@@ -4982,6 +5018,13 @@ def check_gmail(
         _login_result = {"status": "unknown", "reason": f"Login error: {str(e)[:300]}", "totpCode": totp_code}
     finally:
         try:
+            capture_step(driver, "Last page")
+        except Exception:
+            pass
+        shots = getattr(driver, "_step_shots", None)
+        if isinstance(_login_result, dict) and isinstance(shots, list) and shots:
+            _login_result["stepScreenshots"] = list(shots)
+        try:
             driver.quit()
         except Exception:
             pass
@@ -5105,10 +5148,15 @@ def _do_login(
         return url, text
 
     def screenshot_b64() -> str | None:
-        try:
-            return f"data:image/jpeg;base64,{base64.b64encode(driver.get_screenshot_as_png()).decode()}"
-        except Exception:
-            return None
+        return _compact_screenshot(driver)
+
+    def snap(label: str) -> None:
+        fn = getattr(driver, "capture_step", None)
+        if callable(fn):
+            try:
+                fn(label)
+            except Exception:
+                pass
 
     def get_hostname(url: str) -> str:
         """Return the actual hostname from the URL (not query string)."""
@@ -6918,6 +6966,7 @@ def _do_login(
             }
         url, text = page_state()
         log(f"{email} — After nav: {url[:70]}")
+        snap("Sign-in page")
         tmark("robot sign-in nav")
     else:
         if not change_password_after_login:
@@ -6970,6 +7019,7 @@ def _do_login(
                 }
             url, text = page_state()
             log(f"{email} — After nav: {url[:70]}")
+            snap("Sign-in page")
             tmark("sign-in nav done")
         else:
             if _use_warmup:
@@ -7022,6 +7072,7 @@ def _do_login(
 
             url, text = page_state()
             log(f"{email} — After nav: {url[:70]}")
+            snap("Sign-in page")
             tmark("sign-in nav done")
 
     # Defined early so TOTP right after LOGIN_START is handled before email step.
@@ -7339,6 +7390,7 @@ def _do_login(
 
     url, text = page_state()
     log(f"{email} — After email submit: {url[:70]}")
+    snap("After email")
     tmark("email step done")
 
     if "signin/rejected" in url:
@@ -7567,6 +7619,7 @@ def _do_login(
 
     url, text = page_state()
     log(f"{email} — After password submit: {url[:70]}")
+    snap("After password")
     tmark("password step done")
     _log_login_timing_summary()
 
@@ -7769,6 +7822,7 @@ def _do_login(
 
         url, text = page_state()
         log(f"{email} — After 2FA handling: {url[:70]}, totp_field={'found' if totp_field else 'NOT found'}")
+        snap("2FA page")
         if totp_field is not None:
             tmark("totp field ready")
 
@@ -7904,6 +7958,7 @@ def _do_login(
         rand_sleep(*_pace["totp_after"])
         url, text = page_state()
         log(f"{email} — After TOTP submit (final): {url[:70]}")
+        snap("After authenticator code")
         tmark("totp done")
         _log_login_timing_summary()
         if "gds.google.com" in url and _pace["fast"]:

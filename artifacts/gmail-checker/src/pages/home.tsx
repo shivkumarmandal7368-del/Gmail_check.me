@@ -1439,6 +1439,27 @@ function BrowserChecker() {
                         {r.status === "checking"
                           ? <span className="text-blue-400/70 text-[11px] flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />Chrome launching…</span>
                           : r.reason}
+                        {Array.isArray((r as any).stepScreenshots) && (r as any).stepScreenshots.length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            <p className="text-[10px] font-mono text-yellow-400/80">Har step ka screenshot</p>
+                            <div className="flex gap-2 overflow-x-auto pb-1 max-w-[640px]">
+                              {(r as any).stepScreenshots.map((shot: { label?: string; image?: string }, shotIndex: number) => (
+                                <button
+                                  key={`${r.email}-${shotIndex}`}
+                                  type="button"
+                                  className="shrink-0 w-[116px] text-left"
+                                  onClick={() => shot.image && window.open(shot.image)}
+                                >
+                                  <img src={shot.image} alt={shot.label || `step ${shotIndex + 1}`}
+                                    className="rounded border border-border w-full" />
+                                  <span className="block text-[9px] font-mono text-muted-foreground mt-1 leading-tight">
+                                    {shotIndex + 1}. {shot.label}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                         {(r as any).debugScreenshot && (
                           <div className="mt-2">
                             <p className={`text-[10px] font-mono mb-1 ${r.status === "opened" ? "text-green-400/70" : "text-yellow-400/70"}`}>
