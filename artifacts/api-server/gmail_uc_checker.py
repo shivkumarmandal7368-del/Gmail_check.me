@@ -512,7 +512,9 @@ def next_fresh_totp(
         win = totp_current_window()
     else:
         secs_left = totp_window_remaining()
-        if secs_left <= 5:
+        # Google often takes 8–10s to accept the code. A code with only 8s
+        # left expires on the way and comes back as "wrong code".
+        if secs_left <= 12:
             time.sleep(secs_left + 1)
             win = totp_current_window()
 
@@ -2175,7 +2177,7 @@ def _login_pace(proxy_url: str | None) -> dict:
         "totp_after": (200, 350) if fast else (700, 1200),
         "totp_clear": (250, 450) if fast else (900, 1400),
         "signed_in": (80, 160) if fast else (400, 700),
-        "totp_wait_s": 8 if fast else 30,
+        "totp_wait_s": 12 if fast else 30,
         "totp_poll_s": 0.2 if fast else 0.5,
         "2fa_totp_wait": 1.2 if fast else 18,
         "skip_logout": fast,
@@ -7793,6 +7795,11 @@ def _do_login(
         rand_sleep(*_pace["totp_after"])
 
         log(f"{email} — Waiting for Google Account after TOTP…")
+        _wrong_totp_phrases = (
+            "wrong code", "that code didn't work", "code is incorrect",
+            "enter the code again", "code expired", "try again",
+            "didn't recognize that code",
+        )
         _totp_redirect_early = None
         deadline = time.time() + _pace["totp_wait_s"]
         while time.time() < deadline:
@@ -7827,8 +7834,32 @@ def _do_login(
                 and not _totp_next_retried
                 and (time.time() - _last_totp_submit) >= _retry_after
             ):
-                # The code is still on screen, so the first Next did not register.
-                # If the box is already gone, Google is navigating and a second tap interrupts it.
+                # The box stays visible while Google is still accepting the code
+                # (often 8–10s on this proxy). A second Next in that window
+                # resubmits a dying code. Only tap again when the box is empty,
+                # or when Google has already shown a wrong-code error.
+                _err_url, _err_text = page_state()
+                _specific_wrong = (
+                    "wrong code", "that code didn't work", "code is incorrect",
+                    "enter the code again", "code expired",
+                    "didn't recognize that code",
+                )
+                if any(x in _err_text for x in _specific_wrong):
+                    log(f"{email} — TOTP error already on screen, leaving it for a fresh code")
+                    break
+                _filled = False
+                try:
+                    for _sel in TOTP_INPUT_SELECTORS:
+                        _box = driver.find_element(By.CSS_SELECTOR, _sel)
+                        if _box.is_displayed():
+                            _val = _box.get_attribute("value") or ""
+                            _filled = sum(ch.isdigit() for ch in _val) >= 6
+                            break
+                except Exception:
+                    _filled = False
+                if _filled and (time.time() - _last_totp_submit) < 10:
+                    time.sleep(_pace["totp_poll_s"])
+                    continue
                 log(f"{email} — TOTP page still open, clicking Next again")
                 if not _click_button_text(driver, ("Next", "Verify")):
                     enter_fresh_totp_once("TOTP while waiting for redirect")
@@ -7883,36 +7914,46 @@ def _do_login(
             except Exception:
                 pass
 
-        # Wrong TOTP — auto-retry once with the next fresh 30s window
-        _wrong_totp_phrases = [
-            "wrong code", "that code didn't work", "code is incorrect",
-            "enter the code again", "code expired", "try again",
-            "didn't recognize that code",
-        ]
+        # Wrong TOTP — one retry on the next 30s window, then wait for Google's answer.
         if any(x in text for x in _wrong_totp_phrases):
             if totp_secret:
                 log(f"{email} — Wrong TOTP — waiting for next 30s window, then retry")
                 _totp_cache["code"] = None
                 _totp_cache["window"] = None
+                _text_before_retry = text
                 if enter_fresh_totp_once("TOTP wrong-code retry", force_new=True):
-                    rand_sleep(700, 1200)
+                    _retry_deadline = time.time() + max(_pace["totp_wait_s"], 12)
+                    while time.time() < _retry_deadline:
+                        url, text = page_state()
+                        if signed_in_host(url) or not is_totp_challenge_url(url):
+                            break
+                        if text != _text_before_retry and any(x in text for x in _wrong_totp_phrases):
+                            break
+                        time.sleep(_pace["totp_poll_s"])
                     url, text = page_state()
                     log(f"{email} — After TOTP retry: {url[:70]}")
                     retry_code = totp_code
-                    if any(x in text for x in _wrong_totp_phrases):
+                    _retry_still_wrong = (
+                        is_totp_challenge_url(url)
+                        and not signed_in_host(url)
+                        and any(x in text for x in _wrong_totp_phrases)
+                    )
+                    if _retry_still_wrong:
+                        shot = screenshot_b64()
                         if "v3/signin" in url and "challenge" not in url:
                             log(f"{email} — Wrong TOTP on v3/signin/TL page (2 attempts) → opened per user rule")
-                            shot = screenshot_b64()
                             return {
                                 "status": "opened",
                                 "reason": "Mailbox opened successfully ✅",
                                 "totpCode": retry_code,
                                 "debugScreenshot": shot,
                             }
+                        log(f"{email} — TOTP still wrong after fresh code — saving screenshot")
                         return {
                             "status": "wrong_password",
                             "reason": "TOTP codes wrong on 2 attempts — check 2FA secret",
                             "totpCode": retry_code,
+                            "debugScreenshot": shot,
                         }
             _cur_url_for_wrong = driver.current_url if hasattr(driver, 'current_url') else url
             if any(x in driver.page_source if hasattr(driver, 'page_source') else "" for x in _wrong_totp_phrases):
@@ -7926,10 +7967,13 @@ def _do_login(
                         "totpCode": totp_code,
                         "debugScreenshot": shot,
                     }
+                shot = screenshot_b64()
+                log(f"{email} — TOTP rejected — saving screenshot")
                 return {
                     "status": "wrong_password",
                     "reason": f"TOTP code {totp_code} was wrong or expired — check your TOTP secret",
                     "totpCode": totp_code,
+                    "debugScreenshot": shot,
                 }
 
         _pc_after_totp = complete_password_change_if_needed(url)
