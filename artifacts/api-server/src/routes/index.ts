@@ -6,6 +6,7 @@ import proxyRouter from "./proxy";
 import buildInfoRouter from "./buildInfo";
 import deviceCheckRouter from "./deviceCheck";
 import manualBrowserRouter from "./manualBrowser";
+import gmailPayRouter from "./gmailPay";
 
 const router: IRouter = Router();
 
@@ -16,5 +17,6 @@ router.use(proxyRouter);
 router.use(buildInfoRouter);
 router.use(deviceCheckRouter);
 router.use(manualBrowserRouter);
+router.use(gmailPayRouter);
 
 export default router;
