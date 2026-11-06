@@ -7906,115 +7906,94 @@ def _do_login(
             # Method-selection page — click the Google Authenticator option.
             log(f"{email} — Clicking 'Google Authenticator' option")
 
-            def _click_authenticator():
-                """Real tap on the visible Authenticator row. A hidden node throws and burns seconds."""
-                try:
-                    el = driver.execute_script("""
-                        function box(el) {
-                          if (!el || !el.getBoundingClientRect) return null;
-                          var r = el.getBoundingClientRect();
-                          if (r.width < 24 || r.height < 18) return null;
-                          return el;
-                        }
-                        var nodes = document.querySelectorAll('[data-challengetype="6"]');
-                        for (var i = 0; i < nodes.length; i++) {
-                          var n = nodes[i];
-                          var hit = box(n) || box(n.parentElement);
-                          if (hit) return hit;
-                        }
-                        nodes = document.querySelectorAll('li, [role="link"], [role="button"]');
-                        for (var j = 0; j < nodes.length; j++) {
-                          var t = (nodes[j].innerText || '').toLowerCase();
-                          if (t.indexOf('authenticator') !== -1 && t.length < 90 && box(nodes[j]))
-                            return nodes[j];
-                        }
-                        return null;
-                    """)
-                except Exception:
-                    el = None
-                if el is None:
-                    return False
-                if _cdp_click_element(driver, el):
-                    log(f"{email} — Authenticator clicked")
-                    return True
-                return False
-
-            def _click_text_contains(needles: tuple[str, ...]) -> bool:
+            def _click_visible_match(mode: str) -> bool:
+                """mode is 'other' or 'authenticator'. Walks closed shadow roots."""
                 try:
                     el = driver.execute_script(
                         """
-                        var needles = arguments[0];
+                        var mode = arguments[0];
                         function norm(node) {
                           return (node.innerText || node.textContent || '')
                             .replace(/\\s+/g, ' ').trim().toLowerCase();
                         }
-                        var nodes = document.querySelectorAll('button, a, [role="button"], [role="link"], span, div');
-                        var best = null;
-                        for (var i = 0; i < nodes.length; i++) {
-                          var t = norm(nodes[i]);
-                          if (!t || t.length > 90) continue;
-                          for (var n = 0; n < needles.length; n++) {
-                            if (t.indexOf(needles[n]) === -1) continue;
-                            var b = nodes[i].closest
-                              ? (nodes[i].closest('button, a, [role="button"], [role="link"]') || nodes[i])
-                              : nodes[i];
-                            var r = b.getBoundingClientRect();
-                            if (r.width > 8 && r.height > 8 && r.bottom > 0 && r.top < window.innerHeight) {
-                              if (!best || t.length < best.len) best = {el: b, len: t.length};
-                            }
+                        function visible(node) {
+                          if (!node || !node.getBoundingClientRect) return false;
+                          var r = node.getBoundingClientRect();
+                          return r.width > 8 && r.height > 8 && r.bottom > 0 && r.top < window.innerHeight;
+                        }
+                        var hits = [];
+                        function walk(root) {
+                          if (!root || !root.querySelectorAll) return;
+                          var nodes = root.querySelectorAll(
+                            'button, a, [role="button"], [role="link"], [data-challengetype], li, div, span'
+                          );
+                          for (var i = 0; i < nodes.length; i++) {
+                            hits.push(nodes[i]);
+                            if (nodes[i].shadowRoot) walk(nodes[i].shadowRoot);
                           }
+                        }
+                        walk(document);
+                        var best = null;
+                        for (var j = 0; j < hits.length; j++) {
+                          var node = hits[j];
+                          var t = norm(node);
+                          if (!t || t.length > 120 || !visible(node)) continue;
+                          var ok = false;
+                          if (mode === 'authenticator') {
+                            ok = node.getAttribute('data-challengetype') === '6'
+                              || t.indexOf('authenticator') !== -1
+                              || t.indexOf('google authentication') !== -1;
+                          } else {
+                            ok = t.indexOf('try another way') !== -1
+                              || t.indexOf('another way') !== -1
+                              || t.indexOf('more ways') !== -1;
+                          }
+                          if (!ok) continue;
+                          var b = node.closest
+                            ? (node.closest('button, a, [role="button"], [role="link"], li') || node)
+                            : node;
+                          if (!visible(b)) b = node;
+                          if (!best || t.length < best.len) best = {el: b, len: t.length};
                         }
                         return best ? best.el : null;
                         """,
-                        [item.lower() for item in needles],
+                        mode,
                     )
                 except Exception:
                     el = None
                 if el is None:
                     return False
-                return _cdp_click_element(driver, el)
+                clicked = _cdp_click_element(driver, el)
+                if clicked:
+                    log(f"{email} — {'Authenticator' if mode == 'authenticator' else 'Try another way'} clicked")
+                return clicked
 
             tmark("2fa start")
-            _on_sms = is_sms_code_url(driver.current_url or "")
-            _row_deadline = time.time() + (12 if _on_sms else (4 if _pace["fast"] else 8))
+            log(f"{email} — 2FA link: {challenge_kind(driver.current_url or '') or 'totp'}")
+            _row_deadline = time.time() + 14
             _auth_clicks = 0
             _other_clicks = 0
             while time.time() < _row_deadline and totp_field is None:
                 _cur = driver.current_url or ""
                 if is_totp_challenge_url(_cur):
-                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=1.2)
+                    log(f"{email} — TOTP page link open, entering the code box")
+                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2)
                     break
-                # The SMS box matches the code selectors. Do not paste into it.
-                if is_sms_code_url(_cur):
-                    if _other_clicks < 2 and _click_text_contains((
-                        "try another way", "another way", "more ways", "more options",
-                    )):
+                kind = challenge_kind(_cur)
+                # SMS page has its own code box. Open Authenticator before typing.
+                if kind in {"skotp", "ootp", "sms"} and _other_clicks < 2:
+                    if _click_visible_match("other"):
                         _other_clicks += 1
-                        log(f"{email} — Try another way clicked")
-                        time.sleep(0.7)
+                        time.sleep(1.0)
                         continue
-                    time.sleep(0.2)
-                    continue
-                if _auth_clicks < 3 and _click_authenticator():
+                if _auth_clicks < 3 and _click_visible_match("authenticator"):
                     _auth_clicks += 1
-                    time.sleep(0.45)
+                    time.sleep(0.8)
+                    if is_totp_challenge_url(driver.current_url or ""):
+                        totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=3)
+                        break
                     continue
-                time.sleep(0.2)
-
-            if totp_field is None and not is_totp_challenge_url(driver.current_url or ""):
-                log(f"{email} — authenticator row not open yet")
-                if _click_text_contains(("try another way", "another way", "more ways")):
-                    log(f"{email} — Try another way clicked")
-                    time.sleep(0.7)
-                _click_authenticator()
-                _pick_deadline = time.time() + 6
-                while time.time() < _pick_deadline and not is_totp_challenge_url(driver.current_url or ""):
-                    if _click_authenticator():
-                        time.sleep(0.45)
-                    else:
-                        time.sleep(0.25)
-                if is_totp_challenge_url(driver.current_url or ""):
-                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=4)
+                time.sleep(0.25)
 
         url, text = page_state()
         log(f"{email} — After 2FA handling: {url[:70]}, totp_field={'found' if totp_field else 'NOT found'}")
