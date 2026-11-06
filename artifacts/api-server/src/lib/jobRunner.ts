@@ -44,6 +44,7 @@ export interface StartJobParams {
   freshProfile: boolean;
   deviceIndex?: number;
   changePasswordAfterLogin?: boolean;
+  signOutSessions?: boolean;
   robotCheckOnly?: boolean;
 }
 
@@ -137,6 +138,7 @@ export function resumeJob(jobId: string): boolean {
     freshProfile: job.freshProfile,
     deviceIndex: job.deviceIndex,
     changePasswordAfterLogin: job.changePasswordAfterLogin,
+    signOutSessions: job.signOutSessions,
     robotCheckOnly: job.robotCheckOnly,
   }, false);
   return true;
@@ -149,7 +151,7 @@ async function runBackground(
   params: StartJobParams,
   signal: AbortSignal,
 ): Promise<void> {
-  const { credentials, proxy, proxies, concurrency, freshProfile, deviceIndex, changePasswordAfterLogin, robotCheckOnly } = params;
+  const { credentials, proxy, proxies, concurrency, freshProfile, deviceIndex, changePasswordAfterLogin, signOutSessions, robotCheckOnly } = params;
 
   await browserLoginCheck(
     credentials,
@@ -182,6 +184,7 @@ async function runBackground(
     deviceIndex,
     changePasswordAfterLogin === true,
     robotCheckOnly === true,
+    signOutSessions === true,
     // Python's stderr is forwarded to the browser UI terminal without
     // persisting credentials or proxy passwords.
     (email, line) => {

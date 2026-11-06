@@ -61,6 +61,8 @@ export interface Job {
   deviceIndex?: number;
   /** Demo: random password on myaccount signinoptions/password after login */
   changePasswordAfterLogin?: boolean;
+  /** After login, sign out the other devices on the device-activity page. */
+  signOutSessions?: boolean;
   /** Email-only flow: stop after robot vs password page */
   robotCheckOnly?: boolean;
 
@@ -154,6 +156,7 @@ export function createJob(params: {
   freshProfile: boolean;
   deviceIndex?: number;
   changePasswordAfterLogin?: boolean;
+  signOutSessions?: boolean;
   robotCheckOnly?: boolean;
 }): Job {
   const id = randomBytes(8).toString("hex");

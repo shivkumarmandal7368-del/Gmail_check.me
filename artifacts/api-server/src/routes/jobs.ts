@@ -93,6 +93,7 @@ router.post("/jobs", (req: Request, res: Response) => {
 
   const freshProfile = req.body.freshProfile === true;
   const changePasswordAfterLogin = req.body.changePasswordAfterLogin === true;
+  const signOutSessions = req.body.signOutSessions === true;
   const deviceIndex =
     typeof req.body.deviceIndex === "number" &&
     Number.isInteger(req.body.deviceIndex) &&
@@ -109,6 +110,7 @@ router.post("/jobs", (req: Request, res: Response) => {
     freshProfile,
     deviceIndex,
     changePasswordAfterLogin,
+    signOutSessions,
     robotCheckOnly,
   });
 

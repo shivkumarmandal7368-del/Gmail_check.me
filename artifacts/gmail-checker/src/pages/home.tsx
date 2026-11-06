@@ -23,7 +23,7 @@ import { Progress } from "@/components/ui/progress"
 import {
   Download, Terminal, CheckCircle2, XCircle, AlertTriangle,
   HelpCircle, Activity, ShieldAlert, Smartphone,
-  Lock, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle, Zap, Bot
+  Lock, LogOut, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle, Zap, Bot
 } from "lucide-react"
 import { RobotChecker } from "@/pages/RobotChecker";
 
@@ -101,7 +101,7 @@ function BrowserChecker() {
   // ── localStorage keys ────────────────────────────────────────────────────
   const LS = {
     input: "vbc_input", proxy: "vbc_proxy", proxyMode: "vbc_proxy_mode", concurrency: "vbc_conc",
-    fresh: "vbc_fresh", changePw: "vbc_change_pw", device: "vbc_device", results: "vbc_results", total: "vbc_total",
+    fresh: "vbc_fresh", changePw: "vbc_change_pw", deviceLogout: "vbc_device_logout", device: "vbc_device", results: "vbc_results", total: "vbc_total",
     active: "vbc_active", savedAt: "vbc_saved_at", jobId: "vbc_job_id",
     creds: "vbc_creds",
   } as const;
@@ -115,6 +115,7 @@ function BrowserChecker() {
   const [savedProxy,   setSavedProxy]   = useState<{ configured: boolean; label: string } | null>(null);
   const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, false));
   const [changePasswordAfterLogin, setChangePasswordAfterLogin] = useState<boolean>(() => lsGet(LS.changePw, false));
+  const [deviceLogout, setDeviceLogout] = useState<boolean>(() => lsGet(LS.deviceLogout, false));
   const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
 
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
@@ -182,6 +183,7 @@ function BrowserChecker() {
   }, []);
   useEffect(() => { try { localStorage.setItem(LS.fresh,       JSON.stringify(freshProfile)); } catch {} }, [freshProfile]);
   useEffect(() => { try { localStorage.setItem(LS.changePw, JSON.stringify(changePasswordAfterLogin)); } catch {} }, [changePasswordAfterLogin]);
+  useEffect(() => { try { localStorage.setItem(LS.deviceLogout, JSON.stringify(deviceLogout)); } catch {} }, [deviceLogout]);
   useEffect(() => { try { localStorage.setItem(LS.device,      JSON.stringify(deviceIndex));  } catch {} }, [deviceIndex]);
   useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
   useEffect(() => { try { localStorage.setItem(LS.total,       JSON.stringify(total));        } catch {} }, [total]);
@@ -516,6 +518,7 @@ function BrowserChecker() {
       ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
       concurrency: 1, freshProfile, deviceIndex,
       ...(changePasswordAfterLogin ? { changePasswordAfterLogin: true } : {}),
+      ...(deviceLogout ? { signOutSessions: true } : {}),
     });
   };
 
@@ -1030,6 +1033,24 @@ function BrowserChecker() {
                 {changePasswordAfterLogin
                   ? "Login ke baad myaccount signinoptions/password par random naya password + confirm bharega. Naya password export/table mein dikhega — sirf apne test accounts ke liye."
                   : "Off: password change page skip karke seedha account home khulega (fields khali dikhenge)."}
+              </p>
+            </button>
+
+            <button onClick={() => !isChecking && setDeviceLogout(v => !v)} disabled={isChecking}
+              className={cn("w-full rounded-lg border p-3 text-left transition-colors",
+                deviceLogout ? "border-rose-500/40 bg-rose-500/5" : "border-border bg-card/30 opacity-60")}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] font-mono uppercase tracking-widest text-rose-400/80 flex items-center gap-1">
+                  <LogOut className="w-3 h-3" /> Device logout
+                </span>
+                <div className={cn("w-8 h-4 rounded-full transition-colors relative", deviceLogout ? "bg-rose-500" : "bg-border")}>
+                  <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", deviceLogout ? "left-4" : "left-0.5")} />
+                </div>
+              </div>
+              <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
+                {deviceLogout
+                  ? "On: login ke baad, password change on ho to uske baad, device activity pe baaki devices sign out karega, phir yeh session bhi."
+                  : "Off: device list skip. Password change on ho to naya password ke baad sirf yeh session sign out karke complete."}
               </p>
             </button>
 

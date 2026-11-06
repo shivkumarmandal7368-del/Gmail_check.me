@@ -5208,6 +5208,7 @@ def _do_login(
 
     _login_t0 = time.time()
     _password_change_started = False
+    _device_logout_started = False
     _timing_marks: list[tuple[str, int]] = []
 
     def tmark(label: str) -> None:
@@ -5270,6 +5271,7 @@ def _do_login(
             return ""
 
     def classify(url: str, text: str) -> dict | None:
+        nonlocal _device_logout_started
         host = get_hostname(url)
         # Password-settings page after sign-in — demo mode fills it elsewhere.
         if (
@@ -5297,6 +5299,10 @@ def _do_login(
             changed = finish_demo_password_change(url)
             if changed:
                 return changed
+            if sign_out_sessions and not robot_check_only and not _device_logout_started:
+                _device_logout_started = True
+                log(f"{email} — Device logout: signing out the other sessions")
+                return run_device_activity_signouts(password)
             rand_sleep(*_pace["signed_in"])
             shot = screenshot_b64()
             log("Google account home loaded — login successful")
@@ -7070,9 +7076,38 @@ def _do_login(
                     "debugScreenshot": shot,
                 }
 
-            # Password changed — do NOT return Open yet; sign out all devices first.
-            log(f"{email} — Password change done — starting device activity sign-outs")
-            return run_device_activity_signouts(new_pw)
+            # Password changed. Device logout continues to the device list.
+            # Off: sign out only this browser and stop.
+            if sign_out_sessions:
+                log(f"{email} — Password change done — starting device activity sign-outs")
+                return run_device_activity_signouts(new_pw)
+            log(f"{email} — Password change done — signing out this session only")
+            signed_self = False
+            try:
+                signed_self = sign_out_via_profile_icon()
+                rand_sleep(400, 700)
+            except Exception as exc:
+                log(f"{email} — profile sign-out warning: {exc}")
+            if not signed_self:
+                try:
+                    driver.get("https://accounts.google.com/Logout?continue=https://accounts.google.com/ServiceLogin")
+                    rand_sleep(700, 1100)
+                    _tap_profile_sign_out()
+                    time.sleep(0.4)
+                except Exception as exc:
+                    log(f"{email} — Logout URL warning: {exc}")
+            handle_totp_if_prompted("Self sign-out TOTP", max_rounds=1, quick=True)
+            shot = screenshot_b64()
+            return {
+                "status": "opened",
+                "reason": (
+                    f"Demo password changed, current session signed out ✅ "
+                    f"(naya password export — {len(new_pw)} chars)"
+                ),
+                "totpCode": totp_code,
+                "newPassword": new_pw,
+                "debugScreenshot": shot,
+            }
         except Exception as exc:
             log(f"{email} — password change error: {exc}")
             shot = screenshot_b64()

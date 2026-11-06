@@ -172,6 +172,7 @@ async function checkOneAccount(
   deviceIndex?: number,     // selected PHONE_PROFILES index; shared with Device Check
   changePasswordAfterLogin = false,
   robotCheckOnly = false,
+  signOutSessions = false,
   onLog?: (email: string, line: string) => void,
 ): Promise<BrowserLoginResult> {
   let totpCode: string | null = null;
@@ -189,6 +190,7 @@ async function checkOneAccount(
     freshProfile,
     deviceIndex: Number.isInteger(deviceIndex) ? deviceIndex : null,
     changePasswordAfterLogin,
+    ...(signOutSessions ? { signOutSessions: true } : {}),
     ...(robotCheckOnly ? { robotCheckOnly: true } : {}),
   });
 
@@ -338,6 +340,7 @@ export async function browserLoginCheck(
   deviceIndex?: number,        // selected PHONE_PROFILES index — same profile as Device Check
   changePasswordAfterLogin = false,
   robotCheckOnly = false,
+  signOutSessions = false,
   onLog?: (email: string, line: string) => void, // Python progress for the browser terminal
 ): Promise<BrowserLoginResult[]> {
   // Proxy selection: rotation list takes priority over single proxy
@@ -392,6 +395,7 @@ export async function browserLoginCheck(
         deviceIndex,
         changePasswordAfterLogin,
         robotCheckOnly,
+        signOutSessions,
         onLog,
       ).catch(
         (err: unknown) => ({
