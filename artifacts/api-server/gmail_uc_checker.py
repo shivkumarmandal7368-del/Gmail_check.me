@@ -1233,9 +1233,9 @@ def _cdp_find_recaptcha(driver) -> dict:
         if content:
             walk(content, child_anchor)
         for child in node.get("children") or []:
-            walk(child, in_anchor)
+            walk(child, child_anchor)
         for shadow in node.get("shadowRoots") or []:
-            walk(shadow, in_anchor)
+            walk(shadow, child_anchor)
 
     walk(doc.get("root") or {})
     bframe = None
@@ -1448,77 +1448,201 @@ def _cdp_click_recaptcha_checkbox(driver) -> bool:
     return aria == "true"
 
 
+def _top_recaptcha_anchor_iframe(driver):
+    """Visible enterprise/anchor iframe on the sign-in page. None when it is not painted yet."""
+    driver.switch_to.default_content()
+    try:
+        return driver.execute_script(
+            """
+            var frames = document.querySelectorAll('iframe');
+            var best = null;
+            var bestArea = 0;
+            for (var i = 0; i < frames.length; i++) {
+              var f = frames[i];
+              var src = (f.src || '').toLowerCase();
+              if (src.indexOf('/recaptcha/') === -1 || src.indexOf('anchor') === -1) continue;
+              if (src.indexOf('bframe') !== -1) continue;
+              var r = f.getBoundingClientRect();
+              if (r.width < 8 || r.height < 8) continue;
+              var area = r.width * r.height;
+              if (area > bestArea) { best = f; bestArea = area; }
+            }
+            return best;
+            """
+        )
+    except Exception:
+        return None
+
+
+def _read_recaptcha_anchor(driver, frame) -> dict:
+    """Checkbox geometry inside the anchor iframe, plus loading/error flags."""
+    driver.switch_to.default_content()
+    try:
+        driver.switch_to.frame(frame)
+    except Exception as exc:
+        log(f"reCAPTCHA anchor frame switch failed: {exc}")
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        return {}
+    try:
+        state = driver.execute_script(
+            """
+            var a = document.getElementById('recaptcha-anchor')
+              || document.querySelector('[role="checkbox"]')
+              || document.querySelector('.recaptcha-checkbox-border');
+            var border = document.querySelector('.recaptcha-checkbox-border') || a;
+            var spinner = document.querySelector('.recaptcha-checkbox-spinner');
+            var err = document.querySelector('.rc-anchor-error-msg-container');
+            var reload = document.querySelector('#recaptcha-reload-button, .rc-button-reload');
+            function shown(el) {
+              if (!el) return false;
+              var s = getComputedStyle(el);
+              if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+              return el.offsetWidth > 2 || el.offsetHeight > 2;
+            }
+            var target = border || a;
+            var r = target ? target.getBoundingClientRect() : null;
+            var text = ((document.body && document.body.innerText) || '')
+              .replace(/\\s+/g, ' ').trim().slice(0, 160);
+            var href = '';
+            try { href = String(location.href || '').slice(0, 140); } catch (e) {}
+            return {
+              ready: !!a || /not a robot/i.test(text),
+              aria: a ? a.getAttribute('aria-checked') : null,
+              loading: shown(spinner) && !a,
+              err: shown(err) || shown(reload) || /could not connect/i.test(text),
+              text: text,
+              href: href,
+              x: r ? r.left : 0,
+              y: r ? r.top : 0,
+              w: r ? r.width : 0,
+              h: r ? r.height : 0
+            };
+            """
+        ) or {}
+    except Exception as exc:
+        log(f"reCAPTCHA anchor read failed: {exc}")
+        state = {}
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    return state
+
+
+def _recaptcha_checkbox_viewport_point(driver, frame, state: dict):
+    """CSS point of the checkbox. Inner rect is iframe-local; add the iframe origin."""
+    try:
+        outer = driver.execute_script(
+            """
+            var r = arguments[0].getBoundingClientRect();
+            return {x: r.left, y: r.top, w: r.width, h: r.height};
+            """,
+            frame,
+        ) or {}
+    except Exception:
+        return None
+    iw = float(state.get("w") or 0)
+    ih = float(state.get("h") or 0)
+    ox = float(outer.get("x") or 0)
+    oy = float(outer.get("y") or 0)
+    ow = float(outer.get("w") or 0)
+    oh = float(outer.get("h") or 0)
+    if iw >= 4 and ih >= 4:
+        return ox + float(state.get("x") or 0) + iw / 2, oy + float(state.get("y") or 0) + ih / 2
+    if ow >= 8 and oh >= 8:
+        return ox + 28, oy + oh / 2
+    return None
+
+
+def _poll_recaptcha_after_click(driver, seconds: float = 2.4) -> str:
+    """passed | challenge | pending after a checkbox click."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        driver.switch_to.default_content()
+        if "challenge/recaptcha" not in _live_url(driver):
+            return "passed"
+        if _recaptcha_checkbox_ticked(driver):
+            return "passed"
+        if _cdp_challenge_open(driver):
+            return "challenge"
+        time.sleep(0.25)
+    return "pending"
+
+
+def _click_recaptcha_from_frame(driver) -> str:
+    """
+    Trusted click on the real checkbox center.
+    Returns passed | challenge | notready | error | miss.
+    """
+    driver.switch_to.default_content()
+    frame = _top_recaptcha_anchor_iframe(driver)
+    if frame is None:
+        frame = _find_recaptcha_anchor_iframe(driver)
+    if frame is None:
+        return "notready"
+    state = _read_recaptcha_anchor(driver, frame)
+    if not state:
+        return "notready"
+    if state.get("aria") == "true":
+        return "passed"
+    if not state.get("ready"):
+        return "notready"
+    if state.get("loading") and float(state.get("w") or 0) < 8:
+        return "notready"
+    if state.get("err"):
+        log(f"reCAPTCHA anchor error: {(state.get('text') or '')[:120]}")
+        return "error"
+    point = _recaptcha_checkbox_viewport_point(driver, frame, state)
+    if not point:
+        return "miss"
+    x, y = point
+    log(
+        f"reCAPTCHA checkbox click at {int(x)},{int(y)} "
+        f"aria={state.get('aria')} {int(float(state.get('w') or 0))}x{int(float(state.get('h') or 0))}"
+    )
+    sx = max(12.0, x - random.randint(70, 140))
+    sy = max(12.0, y - random.randint(40, 90))
+    for step in range(1, 5):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": "mouseMoved",
+            "x": sx + (x - sx) * step / 4,
+            "y": sy + (y - sy) * step / 4,
+            "button": "none",
+            "buttons": 0,
+        })
+        time.sleep(0.04)
+    _cdp_click_xy(driver, x, y)
+    outcome = _poll_recaptcha_after_click(driver, 2.2)
+    if outcome != "pending":
+        return outcome
+    # One more press on the same box. A single miss used to fall through to a 10s empty solver.
+    _cdp_click_xy(driver, x, y)
+    outcome = _poll_recaptcha_after_click(driver, 1.6)
+    if outcome != "pending":
+        return outcome
+    log(f"reCAPTCHA checkbox click did not open a challenge aria={state.get('aria')}")
+    return "miss"
+
+
 def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
     """Click the checkbox from inside its iframe. Parent-page coordinates miss on a phone viewport."""
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.common.action_chains import ActionChains
-
     driver.switch_to.default_content()
-    if _cdp_click_recaptcha_checkbox(driver):
-        return True
     if _google_error_dialog_open(driver):
         return False
     if _cdp_challenge_open(driver):
         log("reCAPTCHA challenge popup is open — solver will run")
         return False
-    fr = _find_recaptcha_anchor_iframe(driver)
-    if fr is None:
+    outcome = _click_recaptcha_from_frame(driver)
+    if outcome == "passed":
+        return True
+    if outcome in ("challenge", "error", "notready"):
         return False
-    try:
-        driver.execute_script(
-            "arguments[0].scrollIntoView({block:'center', inline:'center'});",
-            fr,
-        )
-    except Exception:
-        pass
-    try:
-        driver.switch_to.frame(fr)
-        box = None
-        deadline = time.time() + 1.6
-        while time.time() < deadline and box is None:
-            els = driver.find_elements(By.CSS_SELECTOR, "#recaptcha-anchor")
-            if els:
-                box = els[0]
-                break
-            time.sleep(0.2)
-        if box is None:
-            src = ""
-            try:
-                driver.switch_to.default_content()
-                src = (fr.get_attribute("src") or "")[:120]
-            except Exception:
-                pass
-            log(f"reCAPTCHA anchor iframe has no #recaptcha-anchor src={src}")
-            driver.switch_to.default_content()
-            return False
-        checked_before = box.get_attribute("aria-checked")
-        try:
-            box.click()
-        except Exception as exc:
-            log(f"reCAPTCHA element.click failed: {exc}")
-            try:
-                ActionChains(driver).move_to_element(box).pause(0.05).click().perform()
-            except Exception as exc2:
-                log(f"reCAPTCHA ActionChains click failed: {exc2}")
-        time.sleep(0.4)
-        try:
-            checked_after = box.get_attribute("aria-checked")
-        except Exception:
-            checked_after = None
-        log(f"reCAPTCHA aria-checked {checked_before} → {checked_after}")
-        driver.switch_to.default_content()
-        if checked_after == "true" or _recaptcha_checkbox_ticked(driver):
-            return True
-        if _cdp_challenge_open(driver):
-            log("reCAPTCHA challenge popup is open — solver will run")
-        return False
-    except Exception as exc:
-        log(f"reCAPTCHA in-frame click error: {exc}")
-        try:
-            driver.switch_to.default_content()
-        except Exception:
-            pass
-        return False
+    if _cdp_click_recaptcha_checkbox(driver):
+        return True
+    return _cdp_challenge_open(driver) is False and _recaptcha_checkbox_ticked(driver)
 
 
 def handle_recaptcha_checkbox(
@@ -1573,7 +1697,7 @@ def handle_recaptcha_checkbox(
                 time.sleep(0.3)
             return found_now
 
-        found = _wait_widget(8 if pace.get("fast") else 12)
+        found = _wait_widget(6 if pace.get("fast") else 8)
         if not (found.get("anchor") or found.get("checkbox")):
             log(f"{email} — robot box still loading, reloading the page once")
             capture_step(driver, "Robot checkbox")
@@ -1582,7 +1706,7 @@ def handle_recaptcha_checkbox(
                 driver.refresh()
             except Exception as exc:
                 log(f"{email} — robot page reload failed: {exc}")
-            found = _wait_widget(12)
+            found = _wait_widget(8)
         if found.get("anchor") or found.get("checkbox"):
             log(
                 f"{email} — reCAPTCHA widget in DOM "
@@ -1596,10 +1720,17 @@ def handle_recaptcha_checkbox(
             capture_step(driver, "Robot checkbox")
             return "loading"
 
-        for attempt in range(1, 4):
+        reloaded_for_error = False
+        misses = 0
+        attempt = 0
+        blank_since = None
+        probed = False
+        click_deadline = time.time() + 16
+        while time.time() < click_deadline and _rc_result not in ("passed", "image"):
+            attempt += 1
             try:
                 driver.switch_to.default_content()
-                if "challenge/recaptcha" not in (driver.current_url or ""):
+                if "challenge/recaptcha" not in _live_url(driver):
                     _rc_result = "passed"
                     log(f"{email} — left the robot page")
                     break
@@ -1608,31 +1739,73 @@ def handle_recaptcha_checkbox(
             if _google_error_dialog_open(driver):
                 log(f"{email} — robot page said something went wrong")
                 _clear_google_error_dialog(driver, email)
-                _wait_widget(8)
+                _wait_widget(6)
                 continue
             if _recaptcha_checkbox_ticked(driver):
                 _rc_result = "passed"
                 log(f"{email} — reCAPTCHA already ticked (attempt {attempt})")
-                break
-            if _click_recaptcha_checkbox_once(driver):
-                _rc_result = "passed"
-                log(f"{email} — I'm not a robot checkbox clicked (attempt {attempt})")
                 break
             if _cdp_challenge_open(driver):
                 log(f"{email} — reCAPTCHA challenge is open")
                 capture_step(driver, "Robot challenge")
                 _rc_result = "image"
                 break
-            if _google_error_dialog_open(driver):
-                log(f"{email} — robot page said something went wrong")
-                _clear_google_error_dialog(driver, email)
-                _wait_widget(8)
+            outcome = _click_recaptcha_from_frame(driver)
+            if outcome == "passed" or _recaptcha_checkbox_ticked(driver):
+                _rc_result = "passed"
+                log(f"{email} — I'm not a robot checkbox clicked (attempt {attempt})")
+                break
+            if outcome == "challenge" or _cdp_challenge_open(driver):
+                log(f"{email} — reCAPTCHA challenge is open")
+                capture_step(driver, "Robot challenge")
+                _rc_result = "image"
+                break
+            if outcome == "error" and not reloaded_for_error:
+                reloaded_for_error = True
+                log(f"{email} — robot widget failed to load, reloading once")
+                try:
+                    driver.switch_to.default_content()
+                    driver.refresh()
+                except Exception as exc:
+                    log(f"{email} — robot page reload failed: {exc}")
+                _wait_widget(6)
+                click_deadline = max(click_deadline, time.time() + 8)
                 continue
-            if attempt < 3:
-                log(f"{email} — reCAPTCHA click attempt {attempt} did not tick — retry")
-                rand_sleep(200, 400)
-            else:
+            if outcome == "notready":
+                if blank_since is None:
+                    blank_since = time.time()
+                if not probed:
+                    probed = True
+                    frame = _top_recaptcha_anchor_iframe(driver) or _find_recaptcha_anchor_iframe(driver)
+                    state = _read_recaptcha_anchor(driver, frame) if frame is not None else {}
+                    log(
+                        f"{email} — robot checkbox not ready "
+                        f"href={(state.get('href') or '-')[:90]} "
+                        f"text={(state.get('text') or '-')[:80]}"
+                    )
+                if time.time() - blank_since >= 7 and not reloaded_for_error:
+                    reloaded_for_error = True
+                    blank_since = None
+                    probed = False
+                    log(f"{email} — robot checkbox never painted, reloading once")
+                    try:
+                        driver.switch_to.default_content()
+                        driver.refresh()
+                    except Exception as exc:
+                        log(f"{email} — robot page reload failed: {exc}")
+                    _wait_widget(6)
+                    click_deadline = max(click_deadline, time.time() + 12)
+                    continue
+                if attempt == 1 or attempt % 4 == 0:
+                    log(f"{email} — robot checkbox still loading")
+                time.sleep(0.4)
+                continue
+            misses += 1
+            if misses >= 2:
                 log(f"{email} — reCAPTCHA click attempts exhausted")
+                break
+            log(f"{email} — reCAPTCHA click attempt {attempt} did not tick — retry")
+            time.sleep(0.3)
 
         # Failed clicks: do not sit 12s. Solver starts almost immediately.
         _extra_wait = 1.5 if _rc_result != "passed" else max(pace.get("rc_wait_s", 6), 4)
@@ -6629,11 +6802,20 @@ def _do_login(
             driver.get("https://myaccount.google.com/?hl=en")
         except Exception as exc:
             log(f"{email} — sign-out check failed: {exc}")
+        def _left_the_account(url: str) -> bool:
+            # www.google.com/account/about is where a signed-out session lands.
+            # That page still has a "Google Account" label, so the avatar check
+            # used to call a finished sign-out a failure and try again.
+            u = (url or "").lower()
+            if _signed_out_url(u):
+                return True
+            return any(part in u for part in ("account/about", "about.google"))
+
         deadline = time.time() + 6
         last = ""
         while time.time() < deadline:
             last = _live_url(driver)
-            if _signed_out_url(last):
+            if _left_the_account(last):
                 log(f"{email} — session is signed out ({last[:70]})")
                 return True
             if "myaccount.google.com" in last and "servicelogin" not in last:
@@ -6641,12 +6823,12 @@ def _do_login(
                     log(f"{email} — session still signed in ({last[:70]})")
                     return False
             time.sleep(0.3)
+        if _left_the_account(last):
+            log(f"{email} — session is signed out ({last[:70]})")
+            return True
         if _account_avatar_visible():
             log(f"{email} — session still signed in ({(last or '')[:70]})")
             return False
-        if any(part in (last or "") for part in ("account/about", "about.google", "accounts.google.com")):
-            log(f"{email} — session is signed out ({last[:70]})")
-            return True
         log(f"{email} — session still signed in ({(last or '')[:70]})")
         return False
 

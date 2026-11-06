@@ -188,13 +188,22 @@ def try_solve_recaptcha_image_page(driver: "WebDriver", rounds: int = 4) -> bool
     ready_deadline = time.time() + 10
     instruction = ""
     tiles = []
+    missing_frame_since = None
     while time.time() < ready_deadline:
         if not _on_recaptcha():
             _log("left recaptcha page")
             return True
         if not _switch_challenge_frame(driver):
-            time.sleep(0.4)
+            # No puzzle was opened. Waiting the full 10s only burned the check.
+            if missing_frame_since is None:
+                missing_frame_since = time.time()
+            elif time.time() - missing_frame_since >= 1.5:
+                _log("no challenge frame")
+                driver.switch_to.default_content()
+                return False
+            time.sleep(0.3)
             continue
+        missing_frame_since = None
         try:
             if driver.find_elements(By.CSS_SELECTOR, "#audio-source, .rc-audiochallenge-control-panel"):
                 driver.switch_to.default_content()
