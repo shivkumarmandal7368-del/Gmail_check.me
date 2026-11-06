@@ -5594,8 +5594,29 @@ def _do_login(
             try:
                 if _pace.get("fast"):
                     fast_paste(driver, field, code)
-                    if not _click_button_text(driver, ("Next", "Verify")):
-                        field.send_keys(Keys.ENTER)
+                    nxt = wait_for_any([
+                        "#totpNext button", "#totpNext",
+                        "#idvPreregisteredPhoneNext button",
+                    ], timeout=2)
+                    if nxt and _trusted_button_click(driver, nxt):
+                        log(f"{email} — {label}: TOTP Next clicked")
+                    elif _click_button_text(driver, ("Next", "Verify")):
+                        log(f"{email} — {label}: TOTP Next clicked by label")
+                    else:
+                        log(f"{email} — {label}: TOTP Next control not found")
+                    try:
+                        field.click()
+                    except Exception:
+                        pass
+                    for typ in ("keyDown", "keyUp"):
+                        driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                            "type": typ,
+                            "key": "Enter",
+                            "code": "Enter",
+                            "windowsVirtualKeyCode": 13,
+                            "nativeVirtualKeyCode": 13,
+                        })
+                    log(f"{email} — {label}: TOTP Enter pressed")
                 else:
                     touch_click(driver, field)
                     rand_sleep(60, 120)
@@ -8001,6 +8022,16 @@ def _do_login(
         if totp_field is not None:
             tmark("totp field ready")
 
+    if totp_field is None and is_totp_challenge_url(driver.current_url or ""):
+        log(f"{email} — TOTP page open, waiting for the code box")
+        _box_deadline = time.time() + 10
+        while time.time() < _box_deadline and totp_field is None:
+            totp_field = find_totp_input(driver)
+            if totp_field is not None:
+                break
+            time.sleep(0.3)
+        log(f"{email} — TOTP code box {'found' if totp_field else 'still missing'}")
+
     if is_sms_code_url(driver.current_url or ""):
         totp_field = None
         shot = screenshot_b64()
@@ -8511,8 +8542,12 @@ def _do_login(
                     if tf:
                         if _pace.get("fast"):
                             fast_paste(driver, tf, fresh_code)
-                            if not _click_button_text(driver, ("Next", "Verify")):
+                            nxt = wait_for_any(["#totpNext button", "#totpNext"], timeout=2)
+                            if nxt and _trusted_button_click(driver, nxt):
+                                log(f"{email} — TOTP Next clicked")
+                            elif not _click_button_text(driver, ("Next", "Verify")):
                                 tf.send_keys(Keys.ENTER)
+                                log(f"{email} — TOTP Enter pressed")
                             _last_interstitial_totp = time.time()
                         else:
                             tf.clear()
@@ -8648,7 +8683,22 @@ def _do_login(
     # Google sometimes leaves the browser on the bare accounts host after a
     # successful sign-in/interstitial. Per the checker rules, this unexpected
     # page is an Open result rather than a verification failure.
-    if get_hostname(url) == "accounts.google.com":
+    if get_hostname(url) == "accounts.google.com" and challenge_kind(url):
+        kind = challenge_kind(url)
+        names = {
+            "totp": "Google Authenticator",
+            "ipp": "Google Authenticator",
+            "skotp": "phone SMS",
+            "pwd": "password",
+            "selection": "2FA choice",
+        }
+        return {
+            "status": "verification_required",
+            "reason": f"Still on the {names.get(kind, kind)} page. Login did not finish.",
+            "totpCode": totp_code,
+            "debugScreenshot": shot,
+        }
+    if get_hostname(url) == "accounts.google.com" and "/signin/" not in url:
         return {
             "status": "opened",
             "reason": "Unexpected page: https://accounts.google.com — classified as Open",
