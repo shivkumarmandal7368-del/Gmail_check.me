@@ -11,6 +11,8 @@ type Props = {
   placeholder?: string;
   className?: string;
   minHeightClass?: string;
+  /** Keep one account on one row so the gutter number stays beside that account. */
+  nowrap?: boolean;
 };
 
 export function NumberedPayloadEditor({
@@ -20,6 +22,7 @@ export function NumberedPayloadEditor({
   placeholder,
   className,
   minHeightClass = "min-h-[240px]",
+  nowrap = false,
 }: Props) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
@@ -70,6 +73,7 @@ export function NumberedPayloadEditor({
         className={cn(
           "flex-1 resize-y rounded-none border-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0",
           "bg-transparent py-2 px-3 leading-[1.625rem] min-h-0 h-full",
+          nowrap && "whitespace-nowrap overflow-x-auto",
         )}
         rows={Math.max(lineCount, 8)}
       />

@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { Textarea } from "@/components/ui/textarea"
+import { NumberedPayloadEditor } from "@/components/smtp/NumberedPayloadEditor"
 import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -148,7 +149,6 @@ function BrowserChecker() {
   const [proxyCheckError, setProxyCheckError] = useState<string>("");
   const [jobStartError, setJobStartError] = useState<string>("");
   const [browserLogs, setBrowserLogs] = useState<Array<{ email?: string; message: string }>>([]);
-  const [liveShots, setLiveShots] = useState<Array<{ label: string; image: string }>>([]);
 
   // refs
   const sseAbortRef      = useRef<AbortController | null>(null);
@@ -259,7 +259,27 @@ function BrowserChecker() {
 
   const parseCredentials = (text: string) =>
     text.split(/\n+/).map(l => l.trim()).filter(Boolean).map(line => {
-      const parts = line.split(":");
+      // Pasted list numbers ("1. email" or "1) email") are not part of the account.
+      const cleaned = line
+        .replace(/^\d+[\.\)\:\-]\s+/, "")
+        .replace(/^\d+\s+(?=\S+@)/, "")
+        .trim();
+      if (!cleaned) return null;
+
+      // email<tab or space>password<tab or space>2FA
+      // Colon form stays email:password:2FA, including a password that itself contains ":".
+      if (!cleaned.includes(":") && /\s/.test(cleaned)) {
+        const parts = cleaned.split(/\s+/).filter(Boolean);
+        const email = parts[0] ?? "";
+        if (!email.includes("@") || parts.length < 2) return null;
+        const totpRaw = parts.length >= 3 ? parts[parts.length - 1] : undefined;
+        const password = (parts.length >= 3 ? parts.slice(1, -1) : parts.slice(1)).join(" ");
+        const totp = totpRaw ? totpRaw.replace(/\s+/g, "") : undefined;
+        if (!password) return null;
+        return { email, password, ...(totp ? { totp } : {}) };
+      }
+
+      const parts = cleaned.split(":");
       if (parts.length < 2) return null;
       const email = parts[0].trim();
       const password = (parts.length > 3 ? parts.slice(1, -1).join(":") : parts[1] ?? "").trim();
@@ -450,10 +470,8 @@ function BrowserChecker() {
   };
 
   const handleJobEvent = (evt: any) => {
-    if (evt.type === "screen" && typeof evt.image === "string") {
-      const image = evt.image.startsWith("data:") ? evt.image : `data:image/jpeg;base64,${evt.image}`;
-      const label = typeof evt.label === "string" ? evt.label : "Step";
-      setLiveShots(prev => [...prev, { label, image }].slice(-18));
+    if (evt.type === "screen") {
+      return;
     } else if (evt.type === "log") {
       setBrowserLogs(prev => [
         ...prev,
@@ -597,7 +615,7 @@ function BrowserChecker() {
     sseAbortRef.current?.abort();
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     appendModeRef.current = false;
-    setResults([]); setLiveShots([]); setTotal(credentials.length); setReconnectedAt(null); setRestoredAt(null); setSelectedUnknown(new Set());
+    setResults([]); setTotal(credentials.length); setReconnectedAt(null); setRestoredAt(null); setSelectedUnknown(new Set());
     setJobStatus("running"); setPauseRequested(false); setResumeReady(false);
     setJobStartError("");
     try {
@@ -786,13 +804,13 @@ function BrowserChecker() {
   };
 
   const downloadExcel = (rows: ExtBrowserResult[], name: string) => {
-    const header = ["#", "Gmail", "New Password", "2FA"];
-    const data = rows.map((r, i) => {
+    const header = ["Gmail", "Password", "2FA"];
+    const data = rows.map(r => {
       const fresh = (r as { newPassword?: string }).newPassword;
-      return [i + 1, r.email, fresh || r.password || "", r.totpSecret ?? ""];
+      return [r.email, fresh || r.password || "", r.totpSecret ?? ""];
     });
     const worksheet = XLSX.utils.aoa_to_sheet([header, ...data]);
-    worksheet["!cols"] = [{ wch: 6 }, { wch: 36 }, { wch: 22 }, { wch: 28 }];
+    worksheet["!cols"] = [{ wch: 36 }, { wch: 22 }, { wch: 28 }];
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Gmail");
     const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
@@ -855,13 +873,35 @@ function BrowserChecker() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <Textarea
-              placeholder={"email@gmail.com:password\nemail2@gmail.com:password:2FA_SECRET"}
-              className="min-h-[180px] resize-y bg-background/50 font-mono text-sm leading-relaxed"
+            <NumberedPayloadEditor
+              placeholder={"email@gmail.com:password:2FA_SECRET\nemail@gmail.com password 2FA_SECRET"}
+              className="min-h-[180px]"
+              minHeightClass="min-h-[180px]"
+              nowrap
               value={inputText}
-              onChange={e => setInputText(e.target.value)}
+              onChange={setInputText}
               disabled={isChecking}
             />
+            <div className="flex items-center justify-between gap-2">
+              <p className="min-w-0 text-[10px] font-mono text-muted-foreground leading-relaxed">
+                {(() => {
+                  const n = parseCredentials(inputText).length;
+                  return n > 0
+                    ? `${n} account${n === 1 ? "" : "s"}`
+                    : "Har line ek account. email:password:2FA ya email password 2FA";
+                })()}
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setInputText("")}
+                disabled={!inputText}
+                className="h-7 shrink-0 px-2 font-mono text-[10px] border-border text-muted-foreground hover:text-red-300 hover:border-red-500/40"
+              >
+                <Trash2 className="w-3 h-3 mr-1" />Clear credentials
+              </Button>
+            </div>
 
             {jobStartError && (
               <div className="rounded-lg border border-red-500/50 bg-red-500/10 p-2.5 text-[11px] font-mono text-red-300">
@@ -1111,55 +1151,25 @@ function BrowserChecker() {
           </CardContent>
         </Card>
 
-        {(liveShots.length > 0 || isChecking) && (
-          <Card className="border-border bg-card/40">
-            <CardHeader className="py-2 px-4 border-b border-border">
-              <CardTitle className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">
-                Live screen
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-3 space-y-2">
-              {liveShots.length === 0 ? (
-                <p className="text-[11px] font-mono text-muted-foreground">Chrome khulte hi yahi screen update hogi, step by step.</p>
-              ) : (
-                <>
-                  <p className="text-[11px] font-mono text-primary">
-                    {liveShots.length}. {liveShots[liveShots.length - 1].label}
-                  </p>
-                  <img
-                    src={liveShots[liveShots.length - 1].image}
-                    alt={liveShots[liveShots.length - 1].label}
-                    className="rounded border border-border max-w-[320px] w-full cursor-pointer"
-                    onClick={() => window.open(liveShots[liveShots.length - 1].image)}
-                  />
-                  <div className="flex gap-2 overflow-x-auto pb-1">
-                    {liveShots.map((shot, shotIndex) => (
-                      <button
-                        key={`${shot.label}-${shotIndex}`}
-                        type="button"
-                        className="shrink-0 w-[84px] text-left"
-                        onClick={() => window.open(shot.image)}
-                      >
-                        <img src={shot.image} alt={shot.label} className="rounded border border-border w-full" />
-                        <span className="block text-[9px] font-mono text-muted-foreground mt-1 leading-tight">
-                          {shotIndex + 1}. {shot.label}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-            </CardContent>
-          </Card>
-        )}
-
         {(browserLogs.length > 0 || isChecking) && (
           <Card className="border-border bg-card/40">
             <CardHeader className="py-2 px-4 border-b border-border flex flex-row items-center justify-between">
               <CardTitle className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase flex items-center gap-1.5">
                 <Terminal className="w-3 h-3 opacity-60" /> Browser Terminal
               </CardTitle>
-              <span className="text-[10px] font-mono text-muted-foreground/50">{browserLogs.length} lines</span>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-mono text-muted-foreground/50">{browserLogs.length} lines</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setBrowserLogs([])}
+                  disabled={browserLogs.length === 0}
+                  className="h-6 px-2 font-mono text-[10px] border-border text-muted-foreground hover:text-red-300 hover:border-red-500/40"
+                >
+                  <Trash2 className="w-3 h-3 mr-1" />Clear terminal
+                </Button>
+              </div>
             </CardHeader>
             <CardContent className="p-0">
               <div className="h-[260px] overflow-y-auto bg-black/50 rounded-b-lg p-3 font-mono text-[10px] space-y-0.5">
