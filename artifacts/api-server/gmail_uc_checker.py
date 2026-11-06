@@ -6947,70 +6947,6 @@ def _do_login(
             time.sleep(0.35)
         log(f"{email} — profile sign-out page did not settle ({(last or '')[:80]})")
 
-    def sign_out_leftover_checker_sessions() -> int:
-        """Remove earlier checker logins. Those are Linux rows, not the phone.
-
-        The current session has no Sign out button on its device page.
-        That one is signed out from the profile menu afterwards.
-        """
-        use_desktop_device_list()
-        if not ensure_device_activity_list("Before profile sign-out"):
-            return 0
-        removed = 0
-        for _round in range(6):
-            if _device_url_kind() != "list":
-                if not return_to_device_list():
-                    break
-            sessions = collect_active_device_sessions(thorough=True)
-            target = None
-            names = []
-            for session in sessions:
-                label = session.get("label") or ""
-                kind = session.get("kind") or detect_session_kind(label)
-                names.append(f"{kind}:{(label.splitlines() or [''])[0][:36]}")
-                low = label.lower()
-                current = (
-                    "this device" in low
-                    or "current session" in low
-                    or "your current" in low
-                )
-                if current or kind != "linux_computer" or target is not None:
-                    continue
-                target = session
-            if target is None:
-                log(f"{email} — device rows before profile sign-out: {names}")
-                break
-            log(f"{email} — signing out leftover checker session: {(target.get('label') or '')[:80]}")
-            if not open_device_session(target):
-                log(f"{email} — could not open leftover checker session")
-                break
-            time.sleep(0.6)
-            handle_totp_if_prompted("Leftover session TOTP", max_rounds=2, quick=True)
-            clicked = _tap_sign_out_button() or click_sign_out_on_device_detail() or ""
-            if not clicked:
-                log(f"{email} — leftover session has no Sign out button")
-                return_to_device_list()
-                break
-            log(f"{email} — leftover session Sign out clicked")
-            time.sleep(0.4)
-            confirm_deadline = time.time() + 6
-            while time.time() < confirm_deadline:
-                if _device_url_kind() == "list":
-                    break
-                if _tap_sign_out_button(dialog_only=True):
-                    log(f"{email} — confirmed leftover sign-out")
-                    time.sleep(0.8)
-                    break
-                time.sleep(0.3)
-            return_to_device_list()
-            removed += 1
-        try:
-            driver.get("https://myaccount.google.com/?hl=en")
-        except Exception as exc:
-            log(f"{email} — return to account home warning: {exc}")
-        time.sleep(0.8)
-        return removed
-
     def sign_out_via_profile_icon() -> bool:
         """Profile photo → Sign out, then prove account home asks us to sign in again."""
         try:
@@ -7615,15 +7551,13 @@ def _do_login(
                     "debugScreenshot": shot,
                 }
 
-            # Password changed. Device logout continues to the device list.
-            # Off: sign out only this browser and stop.
+            # Password changed. Device activity opens only when that toggle is on.
             if sign_out_sessions:
                 log(f"{email} — Password change done — starting device activity sign-outs")
                 return run_device_activity_signouts(new_pw)
-            log(f"{email} — Password change done — signing out this session from the profile")
+            log(f"{email} — Password change done — profile sign-out, then done")
             signed_self = False
             try:
-                sign_out_leftover_checker_sessions()
                 signed_self = sign_out_via_profile_icon()
             except Exception as exc:
                 log(f"{email} — profile sign-out warning: {exc}")
