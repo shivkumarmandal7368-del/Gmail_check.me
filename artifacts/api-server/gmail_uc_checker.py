@@ -7939,42 +7939,82 @@ def _do_login(
                     return True
                 return False
 
+            def _click_text_contains(needles: tuple[str, ...]) -> bool:
+                try:
+                    el = driver.execute_script(
+                        """
+                        var needles = arguments[0];
+                        function norm(node) {
+                          return (node.innerText || node.textContent || '')
+                            .replace(/\\s+/g, ' ').trim().toLowerCase();
+                        }
+                        var nodes = document.querySelectorAll('button, a, [role="button"], [role="link"], span, div');
+                        var best = null;
+                        for (var i = 0; i < nodes.length; i++) {
+                          var t = norm(nodes[i]);
+                          if (!t || t.length > 90) continue;
+                          for (var n = 0; n < needles.length; n++) {
+                            if (t.indexOf(needles[n]) === -1) continue;
+                            var b = nodes[i].closest
+                              ? (nodes[i].closest('button, a, [role="button"], [role="link"]') || nodes[i])
+                              : nodes[i];
+                            var r = b.getBoundingClientRect();
+                            if (r.width > 8 && r.height > 8 && r.bottom > 0 && r.top < window.innerHeight) {
+                              if (!best || t.length < best.len) best = {el: b, len: t.length};
+                            }
+                          }
+                        }
+                        return best ? best.el : null;
+                        """,
+                        [item.lower() for item in needles],
+                    )
+                except Exception:
+                    el = None
+                if el is None:
+                    return False
+                return _cdp_click_element(driver, el)
+
             tmark("2fa start")
-            _row_deadline = time.time() + (4 if _pace["fast"] else 8)
+            _on_sms = is_sms_code_url(driver.current_url or "")
+            _row_deadline = time.time() + (12 if _on_sms else (4 if _pace["fast"] else 8))
             _auth_clicks = 0
+            _other_clicks = 0
             while time.time() < _row_deadline and totp_field is None:
-                if is_totp_challenge_url(driver.current_url or ""):
+                _cur = driver.current_url or ""
+                if is_totp_challenge_url(_cur):
                     totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=1.2)
                     break
-                totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=0.15)
-                if totp_field is not None:
-                    break
-                if _auth_clicks < 2 and _click_authenticator():
+                # The SMS box matches the code selectors. Do not paste into it.
+                if is_sms_code_url(_cur):
+                    if _other_clicks < 2 and _click_text_contains((
+                        "try another way", "another way", "more ways", "more options",
+                    )):
+                        _other_clicks += 1
+                        log(f"{email} — Try another way clicked")
+                        time.sleep(0.7)
+                        continue
+                    time.sleep(0.2)
+                    continue
+                if _auth_clicks < 3 and _click_authenticator():
                     _auth_clicks += 1
-                    time.sleep(0.35)
-                else:
-                    time.sleep(0.15)
+                    time.sleep(0.45)
+                    continue
+                time.sleep(0.2)
 
-            # Fallback: try "Try another way" → then click authenticator again
-            if totp_field is None:
-                log(f"{email} — TOTP not found after first click, trying 'Try another way'")
-                try:
-                    driver.execute_script("""
-                        var links = Array.from(document.querySelectorAll('a, button, [role="button"]'));
-                        var found = links.find(function(el) {
-                            var t = (el.innerText || '').toLowerCase();
-                            return t.indexOf('more ways') !== -1 || t.indexOf('another way') !== -1
-                                || t.indexOf('different') !== -1
-                                || t.indexOf('more options') !== -1 || t.indexOf('try again') !== -1;
-                        });
-                        if (found) found.click();
-                    """)
-                    rand_sleep(*_pace["medium"])
-                    _click_authenticator()
-                    rand_sleep(*_pace["medium"])
-                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2 if _pace["fast"] else 8)
-                except Exception as e:
-                    log(f"Try another way error: {e}")
+            if totp_field is None and not is_totp_challenge_url(driver.current_url or ""):
+                log(f"{email} — authenticator row not open yet")
+                if _click_text_contains(("try another way", "another way", "more ways")):
+                    log(f"{email} — Try another way clicked")
+                    time.sleep(0.7)
+                _click_authenticator()
+                _pick_deadline = time.time() + 6
+                while time.time() < _pick_deadline and not is_totp_challenge_url(driver.current_url or ""):
+                    if _click_authenticator():
+                        time.sleep(0.45)
+                    else:
+                        time.sleep(0.25)
+                if is_totp_challenge_url(driver.current_url or ""):
+                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=4)
 
         url, text = page_state()
         log(f"{email} — After 2FA handling: {url[:70]}, totp_field={'found' if totp_field else 'NOT found'}")
@@ -7982,7 +8022,8 @@ def _do_login(
         if totp_field is not None:
             tmark("totp field ready")
 
-    if is_sms_code_url(driver.current_url or "") and totp_field is None:
+    if is_sms_code_url(driver.current_url or ""):
+        totp_field = None
         shot = screenshot_b64()
         log(f"{email} — still on the phone SMS page, authenticator code not entered")
         return {
