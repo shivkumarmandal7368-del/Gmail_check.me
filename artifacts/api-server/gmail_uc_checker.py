@@ -5207,6 +5207,7 @@ def _do_login(
     from selenium.webdriver.common.keys import Keys
 
     _login_t0 = time.time()
+    _password_change_started = False
     _timing_marks: list[tuple[str, int]] = []
 
     def tmark(label: str) -> None:
@@ -5286,10 +5287,16 @@ def _do_login(
                 "debugScreenshot": shot,
             }
         if host == "myaccount.google.com" and is_google_password_change_url(url):
+            changed = finish_demo_password_change(url)
+            if changed:
+                return changed
             return None
 
         # Signed-in Google Account home is the success page. The inbox is not required.
         if signed_in_host(url):
+            changed = finish_demo_password_change(url)
+            if changed:
+                return changed
             rand_sleep(*_pace["signed_in"])
             shot = screenshot_b64()
             log("Google account home loaded — login successful")
@@ -6893,9 +6900,9 @@ def _do_login(
 
         def click_password_form_continue() -> bool:
             """Primary form button — not the post-fill 'stay signed in' dialog."""
-            return bool(driver.execute_script(
+            clicked = bool(driver.execute_script(
                 """
-                var labels = ['save password', 'save', 'next', 'continue', 'done', 'update'];
+                var labels = ['change password', 'save password', 'save', 'next', 'continue', 'done', 'update'];
                 var btns = Array.from(document.querySelectorAll('button, [role="button"], div[role="button"]'));
                 for (var label of labels) {
                     var hit = btns.find(function(b) {
@@ -6909,6 +6916,12 @@ def _do_login(
                 return false;
                 """
             ))
+            if clicked:
+                return True
+            control = _find_control_by_label(
+                driver, ("Change password", "Save password", "Save"),
+            )
+            return bool(control and _trusted_button_click(driver, control))
 
         def confirm_stay_signed_in_dialog() -> bool:
             """Dialog: 'You'll stay signed in on these devices after changing your password'."""
@@ -7007,7 +7020,7 @@ def _do_login(
                         fill_field(fields2[1], new_pw)
                         fill_field(fields2[2], new_pw)
                     elif len(fields2) >= 2:
-                        fill_field(fields2[0], password)
+                        fill_field(fields2[0], new_pw)
                         fill_field(fields2[1], new_pw)
                     else:
                         fill_field(fields2[0], new_pw)
@@ -7059,6 +7072,223 @@ def _do_login(
                 "newPassword": new_pw,
                 "debugScreenshot": shot,
             }
+
+    def finish_demo_password_change(current_url: str) -> dict | None:
+        """After a real sign-in, open the password page and fill the demo password.
+
+        The India proxy signs in on the email page and lands on account home.
+        The change form only exists at signinoptions/password, so a home URL
+        used to be reported as Open before this page was ever opened.
+        """
+        nonlocal _password_change_started, url, text
+        if (
+            not change_password_after_login
+            or robot_check_only
+            or _password_change_started
+        ):
+            return None
+        if not (
+            signed_in_host(current_url)
+            or is_google_password_change_url(current_url)
+        ):
+            return None
+        _password_change_started = True
+
+        def _landed(href: str) -> bool:
+            if is_google_password_change_url(href):
+                return True
+            kind = challenge_kind(href)
+            if kind in {
+                "pwd", "password", "totp", "ipp", "skotp", "ootp", "sms",
+                "selection", "dp",
+            }:
+                return True
+            return "signin/continue" in href
+
+        def _wait_land(timeout: float, leave: str | None = None) -> str:
+            deadline = time.time() + timeout
+            last = driver.current_url
+            while time.time() < deadline:
+                try:
+                    last = driver.execute_script("return location.href") or driver.current_url
+                except Exception:
+                    last = driver.current_url
+                if leave and last == leave:
+                    time.sleep(0.3)
+                    continue
+                if _landed(last):
+                    return last
+                time.sleep(0.3)
+            return last
+
+        def _click_challenge_choice(mode: str) -> bool:
+            try:
+                el = driver.execute_script(
+                    """
+                    var mode = arguments[0];
+                    function norm(node) {
+                      return (node.innerText || node.textContent || '')
+                        .replace(/\\s+/g, ' ').trim().toLowerCase();
+                    }
+                    function visible(node) {
+                      if (!node || !node.getBoundingClientRect) return false;
+                      var r = node.getBoundingClientRect();
+                      return r.width > 8 && r.height > 8 && r.bottom > 0 && r.top < window.innerHeight;
+                    }
+                    var hits = [];
+                    function walk(root) {
+                      if (!root || !root.querySelectorAll) return;
+                      var nodes = root.querySelectorAll(
+                        'button, a, [role="button"], [role="link"], [data-challengetype], li'
+                      );
+                      for (var i = 0; i < nodes.length; i++) {
+                        hits.push(nodes[i]);
+                        if (nodes[i].shadowRoot) walk(nodes[i].shadowRoot);
+                      }
+                    }
+                    walk(document);
+                    var best = null;
+                    for (var j = 0; j < hits.length; j++) {
+                      var node = hits[j];
+                      var t = norm(node);
+                      if (!t || t.length > 120 || !visible(node)) continue;
+                      var ok = mode === 'authenticator'
+                        ? (node.getAttribute('data-challengetype') === '6'
+                           || t.indexOf('authenticator') !== -1)
+                        : (t.indexOf('try another way') !== -1
+                           || t.indexOf('another way') !== -1);
+                      if (!ok) continue;
+                      var b = node.closest
+                        ? (node.closest('button, a, [role="button"], [role="link"], li') || node)
+                        : node;
+                      if (!visible(b)) b = node;
+                      if (!best || t.length < best.len) best = {el: b, len: t.length};
+                    }
+                    return best ? best.el : null;
+                    """,
+                    mode,
+                )
+            except Exception:
+                el = None
+            return bool(el and _cdp_click_element(driver, el))
+
+        def _submit_current_password() -> bool:
+            field = wait_for_any([
+                'input[name="Passwd"]',
+                'input[type="password"]:not([name="hiddenPassword"])',
+                'input[name="password"]',
+                '#password input',
+            ], timeout=8)
+            if not field:
+                return False
+            try:
+                driver.execute_script(
+                    "arguments[0].focus(); arguments[0].click();", field,
+                )
+            except Exception:
+                pass
+            fast_paste(driver, field, password)
+            nxt = wait_for_any(
+                ["#passwordNext button", "#passwordNext [role='button']", "#passwordNext"],
+                timeout=2,
+            )
+            if not (nxt and _trusted_button_click(driver, nxt)):
+                _click_button_text(driver, ("Next",))
+            try:
+                for typ in ("keyDown", "keyUp"):
+                    driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                        "type": typ,
+                        "key": "Enter",
+                        "code": "Enter",
+                        "windowsVirtualKeyCode": 13,
+                        "nativeVirtualKeyCode": 13,
+                    })
+            except Exception:
+                pass
+            return True
+
+        target = current_url
+        if not is_google_password_change_url(target):
+            log(f"{email} — Demo password change: opening signinoptions/password")
+            try:
+                driver.get(LOGIN_START)
+            except Exception as exc:
+                log(f"{email} — password page nav failed: {exc}")
+                shot = screenshot_b64()
+                return {
+                    "status": "unknown",
+                    "reason": "Signed in, but the password change page did not open",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
+            target = _wait_land(18)
+            log(f"{email} — password page nav: {target[:90]}")
+            snap("Password change page")
+
+        for _hop in range(4):
+            if is_google_password_change_url(target):
+                break
+            url, text = page_state()
+            if any(x in text for x in (
+                "wrong password", "didn't recognize", "incorrect password",
+                "password you entered",
+            )):
+                shot = screenshot_b64()
+                return {
+                    "status": "wrong_password",
+                    "reason": "Current password was rejected while opening the password change page",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
+            kind = challenge_kind(target)
+            if kind in {"skotp", "ootp", "sms", "selection", "dp"}:
+                log(f"{email} — password page re-check is {kind}, opening Authenticator")
+                if kind in {"skotp", "ootp", "sms"}:
+                    _click_challenge_choice("other")
+                    time.sleep(1.0)
+                _click_challenge_choice("authenticator")
+                time.sleep(0.8)
+                if is_totp_challenge_url(driver.current_url or ""):
+                    clear_totp_pages(max_rounds=2, pause_label="Password page re-auth")
+                target = _wait_land(14, leave=target)
+                continue
+            if is_totp_challenge_url(target):
+                log(f"{email} — password page re-check asked for the authenticator code")
+                clear_totp_pages(max_rounds=2, pause_label="Password page re-auth")
+                target = _wait_land(14, leave=target)
+                continue
+            if kind in {"pwd", "password"} or "challenge/pwd" in target:
+                log(f"{email} — password page asked for the current password")
+                if not _submit_current_password():
+                    break
+                target = _wait_land(16, leave=target)
+                continue
+            if "signin/continue" in target:
+                try:
+                    driver.execute_script(
+                        """
+                        var btn = document.querySelector('#confirm, button[type="submit"], button');
+                        if (btn) btn.click();
+                        """
+                    )
+                except Exception:
+                    pass
+                target = _wait_land(8, leave=target)
+                continue
+            break
+
+        url, text = page_state()
+        if is_google_password_change_url(url):
+            snap("Password change page")
+            return complete_password_change_if_needed(url)
+        snap("Password change page")
+        shot = screenshot_b64()
+        return {
+            "status": "unknown",
+            "reason": f"Signed in, but the password change form did not open ({url[:70]})",
+            "totpCode": totp_code,
+            "debugScreenshot": shot,
+        }
 
     # Phone proxy: direct identifier URL is faster than myaccount password redirect (~20s).
     _signin_entry = (
