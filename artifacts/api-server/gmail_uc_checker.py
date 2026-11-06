@@ -5584,7 +5584,9 @@ def _do_login(
             time.sleep(0.15)
         return None
 
-    def enter_fresh_totp_once(label: str, force_new: bool = False) -> bool:
+    def enter_fresh_totp_once(
+        label: str, force_new: bool = False, field_timeout: float = 14,
+    ) -> bool:
         """Submit TOTP — reuse the current 30s code unless force_new."""
         nonlocal totp_code
         if not totp_secret and not totp_code:
@@ -5601,7 +5603,7 @@ def _do_login(
         log(f"{email} — {label}: TOTP {mode} ({secs_remaining}s left in window)")
 
         for attempt in range(4):
-            deadline = time.time() + 14
+            deadline = time.time() + field_timeout
             field = None
             while time.time() < deadline:
                 field = find_totp_input(driver)
@@ -5695,7 +5697,7 @@ def _do_login(
             if not is_totp_challenge_url(driver.current_url):
                 return
             log(f"{email} — {label}: TOTP re-auth")
-            if not enter_fresh_totp_once(label):
+            if not enter_fresh_totp_once(label, field_timeout=2.5 if quick else 14):
                 return
             rand_sleep(*post_sleep)
             _deadline = time.time() + (12 if quick else 20)
@@ -6437,7 +6439,7 @@ def _do_login(
             return True
         frames = driver.find_elements(
             By.CSS_SELECTOR,
-            "iframe[name='account'], iframe[src*='SignOutOptions'], iframe[src*='accounts.google.com'], iframe",
+            "iframe[name='account'], iframe[src*='SignOutOptions'], iframe[src*='accounts.google.com']",
         )
         for frame in frames:
             try:
@@ -6610,11 +6612,6 @@ def _do_login(
                 driver.execute_script("window.scrollTo(0, 0);")
             except Exception:
                 pass
-            def _current_session(label: str) -> int:
-                t = (label or "").lower()
-                if "this device" in t or "current session" in t or "your current" in t:
-                    return 1
-                return 0
 
             out = list(merged.values())
             out.sort(
@@ -6628,14 +6625,20 @@ def _do_login(
             )
             return out
 
-        def click_sign_out_ready() -> str | None:
-            deadline = time.time() + 4.0
+        def click_sign_out_ready(timeout: float = 2.0) -> str | None:
+            deadline = time.time() + timeout
             while time.time() < deadline:
                 label = _tap_sign_out_button()
                 if label:
                     return label
                 time.sleep(0.2)
             return None
+
+        def _current_session(label: str) -> int:
+            t = (label or "").lower()
+            if "this device" in t or "current session" in t or "your current" in t:
+                return 1
+            return 0
 
         def device_key(href: str) -> str:
             marker = "/device-activity/id/"
@@ -6645,10 +6648,10 @@ def _do_login(
                 return path
             return path[idx:].rstrip("/")
 
-        def wait_auto_back_to_list() -> bool:
+        def wait_auto_back_to_list(timeout: float = 7.0) -> bool:
             """Confirm the Sign out dialog, then wait. Back() cancels an open dialog."""
             confirmed = False
-            deadline = time.time() + 7.0
+            deadline = time.time() + timeout
             while time.time() < deadline:
                 if _device_url_kind() == "list":
                     return True
@@ -6733,6 +6736,10 @@ def _do_login(
             href = target.get("href") or ""
             key = device_key(href)
             kind = target.get("kind") or "session"
+            if _current_session(target.get("label") or ""):
+                log(f"{email} — current session stays on the list; profile sign-out is last")
+                done_hrefs.add(key)
+                continue
             attempts[key] = attempts.get(key, 0) + 1
             device_label = open_device_session(target)
             if not device_label:
@@ -6765,17 +6772,22 @@ def _do_login(
                 log(f"{email} — detail buttons: {labels}")
             except Exception:
                 pass
-            sign_out_label = click_sign_out_ready()
+            sign_out_label = click_sign_out_ready(2.0)
             if not sign_out_label:
                 try:
                     driver.execute_script("window.scrollTo(0, 700);")
                 except Exception:
                     pass
-                time.sleep(0.3)
-                sign_out_label = click_sign_out_ready()
+                time.sleep(0.2)
+                sign_out_label = click_sign_out_ready(1.5)
             if not sign_out_label:
                 log(f"{email} — Sign out not found — yeh device page nahi, skip")
-                wait_auto_back_to_list()
+                if _device_url_kind() == "detail":
+                    try:
+                        driver.back()
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
                 done_hrefs.add(key)
                 continue
 
@@ -6953,13 +6965,19 @@ def _do_login(
 
         def submit_password_change_form() -> None:
             click_password_form_continue()
-            rand_sleep(700, 1100)
-            for _ in range(4):
-                if confirm_stay_signed_in_dialog():
+            deadline = time.time() + 6.0
+            confirmed = False
+            while time.time() < deadline:
+                try:
+                    if not is_google_password_change_url(driver.current_url):
+                        return
+                except Exception:
+                    pass
+                if not confirmed and confirm_stay_signed_in_dialog():
+                    confirmed = True
                     log(f"{email} — clicked 'Change password' on stay-signed-in dialog")
-                    rand_sleep(2200, 3500)
-                else:
-                    break
+                    deadline = max(deadline, time.time() + 4.0)
+                time.sleep(0.3)
 
         def wait_fields(timeout: float = 18.0) -> list:
             deadline = time.time() + timeout
@@ -6972,7 +6990,7 @@ def _do_login(
             return fields
 
         try:
-            rand_sleep(800, 1400)
+            rand_sleep(200, 400)
             fields = wait_fields()
             log(f"{email} — password change: found {len(fields)} input(s) on page")
 
@@ -7000,19 +7018,17 @@ def _do_login(
             else:
                 fill_field(fields[0], new_pw)
 
-            rand_sleep(200, 400)
+            rand_sleep(150, 250)
             try:
                 fields[-1].send_keys(Keys.ENTER)
             except Exception:
                 pass
-            rand_sleep(400, 700)
             submit_password_change_form()
-            rand_sleep(1500, 2500)
-            clear_totp_pages(max_rounds=2, pause_label="After password change")
+            clear_totp_pages(max_rounds=1, pause_label="After password change")
 
             url_after, text_after = page_state()
             if is_google_password_change_url(url_after):
-                fields2 = wait_fields(10.0)
+                fields2 = wait_fields(3.5)
                 log(f"{email} — password change retry: {len(fields2)} input(s)")
                 if fields2:
                     if len(fields2) >= 3:
@@ -7024,30 +7040,25 @@ def _do_login(
                         fill_field(fields2[1], new_pw)
                     else:
                         fill_field(fields2[0], new_pw)
-                    rand_sleep(200, 400)
+                    rand_sleep(150, 250)
                     submit_password_change_form()
-                    rand_sleep(1500, 2500)
-                    clear_totp_pages(max_rounds=2, pause_label="After password change retry")
+                    clear_totp_pages(max_rounds=1, pause_label="After password change retry")
                     url_after, text_after = page_state()
 
             if is_google_password_change_url(url_after):
-                for _dlg in range(4):
+                for _dlg in range(3):
                     if confirm_stay_signed_in_dialog():
                         log(f"{email} — dialog confirm pass {_dlg + 1}")
-                        rand_sleep(2200, 3500)
-                        url_after, text_after = page_state()
+                        _left = time.time() + 4.0
+                        while time.time() < _left:
+                            url_after, text_after = page_state()
+                            if not is_google_password_change_url(url_after):
+                                break
+                            time.sleep(0.3)
                         if not is_google_password_change_url(url_after):
                             break
                     else:
                         break
-
-            if not is_google_password_change_url(url_after):
-                try:
-                    driver.get(ACCOUNT_HOME)
-                    rand_sleep(1500, 2500)
-                    url_after, text_after = page_state()
-                except Exception:
-                    pass
 
             if is_google_password_change_url(url_after):
                 shot = screenshot_b64()
@@ -7207,6 +7218,17 @@ def _do_login(
                 pass
             return True
 
+        _reauth_totp_attempts = 0
+
+        def _submit_reauth_totp(leave_url: str) -> str:
+            nonlocal _reauth_totp_attempts
+            _reauth_totp_attempts += 1
+            enter_fresh_totp_once(
+                "Password page re-auth",
+                force_new=_reauth_totp_attempts > 1 or totp_window_remaining() <= 12,
+            )
+            return _wait_land(8, leave=leave_url)
+
         target = current_url
         if not is_google_password_change_url(target):
             log(f"{email} — Demo password change: opening signinoptions/password")
@@ -7249,13 +7271,15 @@ def _do_login(
                 _click_challenge_choice("authenticator")
                 time.sleep(0.8)
                 if is_totp_challenge_url(driver.current_url or ""):
-                    clear_totp_pages(max_rounds=2, pause_label="Password page re-auth")
-                target = _wait_land(14, leave=target)
+                    target = _submit_reauth_totp(target)
+                else:
+                    target = _wait_land(8, leave=target)
                 continue
             if is_totp_challenge_url(target):
+                if _reauth_totp_attempts >= 2:
+                    break
                 log(f"{email} — password page re-check asked for the authenticator code")
-                clear_totp_pages(max_rounds=2, pause_label="Password page re-auth")
-                target = _wait_land(14, leave=target)
+                target = _submit_reauth_totp(target)
                 continue
             if kind in {"pwd", "password"} or "challenge/pwd" in target:
                 log(f"{email} — password page asked for the current password")
