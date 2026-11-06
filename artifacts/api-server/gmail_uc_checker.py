@@ -10,6 +10,7 @@ Logs   (stderr): progress lines prefixed with [UC]
 import sys
 import json
 import os
+import re
 import time
 import random
 import secrets
@@ -478,10 +479,23 @@ def find_totp_input(driver) -> object | None:
     return None
 
 
+def challenge_kind(url: str) -> str:
+    """The challenge path segment, so skotp is not treated as sk."""
+    match = re.search(r"challenge/([a-z0-9]+)", (url or "").lower())
+    return match.group(1) if match else ""
+
+
+def is_sms_code_url(url: str) -> bool:
+    """Phone text-message code. Not the Google Authenticator page."""
+    return challenge_kind(url) in {"skotp", "ootp", "sms"}
+
+
 def is_totp_challenge_url(url: str) -> bool:
     """True when the browser is on a Google Authenticator code entry page."""
+    if is_sms_code_url(url):
+        return False
     u = url.lower()
-    if "challenge/totp" in u or "challenge/ipp" in u:
+    if challenge_kind(url) in {"totp", "ipp"}:
         return True
     if "v3/signin" in u and "v3/signin/identifier" not in u and "challenge" not in u:
         return True
@@ -7849,6 +7863,9 @@ def _do_login(
     # challenge/totp / challenge/ipp = already on TOTP input page (handle separately below).
     # Text: "verify that it's you" is the page heading for the Google Authenticator
     # challenge page — distinct from "verify it's you" (method-selection heading).
+    if is_sms_code_url(url):
+        log(f"{email} — Phone SMS code page, not Google Authenticator ({url[:70]})")
+        totp_field = None
     is_2fa_select = (
         any(x in text for x in [
             "2-step verification",
@@ -7859,6 +7876,7 @@ def _do_login(
         ])
         or "challenge/dp" in url
         or "challenge/selection" in url
+        or is_sms_code_url(url)
         or _on_totp_url  # already on TOTP input page — treat as 2FA page
     )
 
@@ -7963,6 +7981,19 @@ def _do_login(
         snap("2FA page")
         if totp_field is not None:
             tmark("totp field ready")
+
+    if is_sms_code_url(driver.current_url or "") and totp_field is None:
+        shot = screenshot_b64()
+        log(f"{email} — still on the phone SMS page, authenticator code not entered")
+        return {
+            "status": "verification_required",
+            "reason": (
+                "Google opened the phone SMS code page, not Google Authenticator. "
+                "The authenticator code was not entered."
+            ),
+            "totpCode": totp_code,
+            "debugScreenshot": shot,
+        }
 
     # ── Enter TOTP code (whether we just navigated here or were already here) ─
     if totp_field is not None:
@@ -8164,7 +8195,7 @@ def _do_login(
                 log(f"{email} — TOTP rejected — saving screenshot")
                 return {
                     "status": "wrong_password",
-                    "reason": f"TOTP code {totp_code} was wrong or expired — check your TOTP secret",
+                    "reason": "Authenticator code was rejected. Check the 2FA secret.",
                     "totpCode": totp_code,
                     "debugScreenshot": shot,
                 }
