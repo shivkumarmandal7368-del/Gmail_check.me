@@ -6719,8 +6719,28 @@ def _do_login(
         if not isinstance(info, dict):
             return False
         href = str(info.get("href") or "")
+        el = info.get("el")
         x = origin_x + float(info["x"]) + float(info["w"]) / 2
         y = origin_y + float(info["y"]) + float(info["h"]) / 2
+        log_href = ""
+        if href:
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(href)
+                log_href = f"{parsed.netloc}{parsed.path}"[:80]
+            except Exception:
+                log_href = "logout-link"
+        # Click the profile Sign out control itself. driver.get() of the href
+        # alone cleared this browser and opened the about page, but the other
+        # phone still showed the session.
+        before = _live_url(driver)
+        if el is not None and (_trusted_tap(el) or _cdp_click_element(driver, el)):
+            log(f"{email} — profile Sign out clicked ({log_href or 'menu item'})")
+            deadline = time.time() + 2.5
+            while time.time() < deadline:
+                if _live_url(driver) != before:
+                    return True
+                time.sleep(0.2)
         # The menu link carries the real logout token. A coordinate past the
         # window edge hits nothing, which is what left the session signed in.
         if "logout" in href.lower() and "signoutoptions" not in href.lower():
@@ -6728,9 +6748,9 @@ def _do_login(
                 driver.switch_to.default_content()
             except Exception:
                 pass
-            log(f"{email} — opening the menu Sign out link")
+            log(f"{email} — opening the menu Sign out link {log_href}")
             try:
-                driver.set_page_load_timeout(6)
+                driver.set_page_load_timeout(15)
                 driver.get(href)
             except Exception as exc:
                 log(f"{email} — Sign out link warning: {exc}")
@@ -6884,6 +6904,49 @@ def _do_login(
                 return
             time.sleep(0.3)
 
+    def _settle_profile_sign_out() -> None:
+        """Stay on the profile Sign out page until Google finishes it.
+
+        Opening myaccount immediately cancels the sign-out, so this browser
+        looks logged out while the other phone still lists the session.
+        """
+        deadline = time.time() + 10
+        last = ""
+        while time.time() < deadline:
+            here = _live_url(driver)
+            low = (here or "").lower()
+            try:
+                text = (
+                    driver.execute_script(
+                        "return ((document.body && document.body.innerText) || '').slice(0, 500);"
+                    )
+                    or ""
+                ).lower()
+            except Exception:
+                text = ""
+            if here != last:
+                log(f"{email} — profile sign-out page: {(here or '')[:90]}")
+                last = here
+            if "/logout" in low or "signout" in low:
+                hit = _tap_sign_out_button(dialog_only=True)
+                if not hit and "sign out" in text:
+                    hit = _tap_sign_out_button(dialog_only=False)
+                if hit:
+                    log(f"{email} — profile sign-out confirmed ({hit})")
+                    time.sleep(1.2)
+                    continue
+            if (
+                _signed_out_url(here)
+                or "account/about" in low
+                or "about.google" in low
+                or "signed out" in text
+            ):
+                time.sleep(2.0)
+                log(f"{email} — profile sign-out settled")
+                return
+            time.sleep(0.35)
+        log(f"{email} — profile sign-out page did not settle ({(last or '')[:80]})")
+
     def sign_out_via_profile_icon() -> bool:
         """Profile photo → Sign out, then prove account home asks us to sign in again."""
         try:
@@ -6934,12 +6997,13 @@ def _do_login(
             while time.time() < deadline:
                 if _tap_profile_sign_out():
                     log(f"{email} — profile menu: Sign out")
-                    time.sleep(0.8)
-                    _tap_profile_sign_out()
+                    _settle_profile_sign_out()
                     break
                 time.sleep(0.3)
         else:
             log(f"{email} — profile icon not found")
+            _logout_url_and_confirm()
+            _settle_profile_sign_out()
         if _prove_signed_out():
             return True
         _logout_url_and_confirm()
@@ -7487,12 +7551,11 @@ def _do_login(
                     "debugScreenshot": shot,
                 }
 
-            # Password changed. Device logout continues to the device list.
-            # Off: sign out only this browser and stop.
+            # Password changed. Device activity opens only when that toggle is on.
             if sign_out_sessions:
                 log(f"{email} — Password change done — starting device activity sign-outs")
                 return run_device_activity_signouts(new_pw)
-            log(f"{email} — Password change done — signing out this session only")
+            log(f"{email} — Password change done — profile sign-out, then done")
             signed_self = False
             try:
                 signed_self = sign_out_via_profile_icon()
