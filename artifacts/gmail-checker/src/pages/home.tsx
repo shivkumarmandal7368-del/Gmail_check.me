@@ -883,7 +883,7 @@ function BrowserChecker() {
               disabled={isChecking}
             />
             <div className="flex items-center justify-between gap-2">
-              <p className="text-[10px] font-mono text-muted-foreground">
+              <p className="min-w-0 text-[10px] font-mono text-muted-foreground leading-relaxed">
                 {(() => {
                   const n = parseCredentials(inputText).length;
                   return n > 0
@@ -897,7 +897,7 @@ function BrowserChecker() {
                 size="sm"
                 onClick={() => setInputText("")}
                 disabled={!inputText}
-                className="h-7 px-2 font-mono text-[10px] border-border text-muted-foreground hover:text-red-300 hover:border-red-500/40"
+                className="h-7 shrink-0 px-2 font-mono text-[10px] border-border text-muted-foreground hover:text-red-300 hover:border-red-500/40"
               >
                 <Trash2 className="w-3 h-3 mr-1" />Clear credentials
               </Button>
