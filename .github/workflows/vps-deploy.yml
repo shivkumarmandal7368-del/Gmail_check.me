@@ -1,0 +1,26 @@
+name: Deploy VPS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "artifacts/**"
+      - "scripts/vps-update.sh"
+      - "package.json"
+      - "pnpm-lock.yaml"
+
+jobs:
+  deploy:
+    if: github.repository == 'shivkumarmandal7368-del/Gmail_check.me'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /home/vanguard/vanguard-mx
+            sudo bash scripts/vps-update.sh

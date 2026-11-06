@@ -10,9 +10,25 @@
  * Accounts already in-flight will run to completion (or TIMEOUT_MS).
  */
 
-import { createJob, emitJobEvent, getJob, cancelJob, pauseJob as markJobPaused, resumeJob as markJobResumed } from "./jobStore.js";
+import { execSync } from "node:child_process";
+import { createJob, emitJobEvent, getJob, getActiveJob, cancelJob, pauseJob as markJobPaused, resumeJob as markJobResumed } from "./jobStore.js";
 import type { Job } from "./jobStore.js";
 import { browserLoginCheck } from "./browserLoginChecker.js";
+
+/** Kill leftover Python checkers from a paused/crashed job so flock slots unblock. */
+function reapStaleGmailCheckerProcesses(): void {
+  try {
+    const out = execSync("pgrep -f gmail_uc_checker.py 2>/dev/null || true", {
+      encoding: "utf8",
+    }).trim();
+    if (!out) return;
+    const pids = out.split("\n").filter(Boolean);
+    console.log(`[JobRunner] Reaping ${pids.length} stale gmail_uc_checker process(es): ${pids.join(", ")}`);
+    execSync("pkill -TERM -f gmail_uc_checker.py || true");
+  } catch {
+    /* pgrep/pkill optional */
+  }
+}
 
 // In-memory abort controllers — lost on server restart, but that's OK because
 // restarted jobs are marked "interrupted" by initJobStore().
@@ -28,6 +44,8 @@ export interface StartJobParams {
   freshProfile: boolean;
   deviceIndex?: number;
   changePasswordAfterLogin?: boolean;
+  signOutSessions?: boolean;
+  robotCheckOnly?: boolean;
 }
 
 /**
@@ -36,6 +54,13 @@ export interface StartJobParams {
  * client without waiting for completion.
  */
 export function startJob(params: StartJobParams): string {
+  const active = getActiveJob();
+  if (active) {
+    console.log(`[JobRunner] Stopping previous running job ${active.id} before starting a new one`);
+    abortJob(active.id);
+  }
+  reapStaleGmailCheckerProcesses();
+
   const job = createJob(params);
   const jobId = job.id;
   launchJob(jobId, params, true);
@@ -113,6 +138,8 @@ export function resumeJob(jobId: string): boolean {
     freshProfile: job.freshProfile,
     deviceIndex: job.deviceIndex,
     changePasswordAfterLogin: job.changePasswordAfterLogin,
+    signOutSessions: job.signOutSessions,
+    robotCheckOnly: job.robotCheckOnly,
   }, false);
   return true;
 }
@@ -124,7 +151,7 @@ async function runBackground(
   params: StartJobParams,
   signal: AbortSignal,
 ): Promise<void> {
-  const { credentials, proxy, proxies, concurrency, freshProfile, deviceIndex, changePasswordAfterLogin } = params;
+  const { credentials, proxy, proxies, concurrency, freshProfile, deviceIndex, changePasswordAfterLogin, signOutSessions, robotCheckOnly } = params;
 
   await browserLoginCheck(
     credentials,
@@ -156,9 +183,24 @@ async function runBackground(
     signal,
     deviceIndex,
     changePasswordAfterLogin === true,
+    robotCheckOnly === true,
+    signOutSessions === true,
     // Python's stderr is forwarded to the browser UI terminal without
     // persisting credentials or proxy passwords.
     (email, line) => {
+      if (line.startsWith("STEP_SHOT\t")) {
+        const [, label, b64] = line.split("\t");
+        if (label && b64) {
+          emitJobEvent(jobId, {
+            type: "screen",
+            timestamp: Date.now(),
+            email,
+            label,
+            image: `data:image/jpeg;base64,${b64}`,
+          });
+        }
+        return;
+      }
       emitJobEvent(jobId, {
         type: "log",
         timestamp: Date.now(),

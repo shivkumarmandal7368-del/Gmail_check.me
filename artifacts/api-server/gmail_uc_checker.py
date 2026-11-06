@@ -10,6 +10,7 @@ Logs   (stderr): progress lines prefixed with [UC]
 import sys
 import json
 import os
+import re
 import time
 import random
 import secrets
@@ -68,6 +69,62 @@ _CHROME_LAUNCH_LOCK_PATH = "/tmp/gmail_checker_chrome_launch.lock"
 # Prevents OOM kill when multiple accounts are checked concurrently.
 # The launch lock above only covers startup (~3s); this one wraps the full login flow.
 _CHROME_SESSION_LOCK_PATH = "/tmp/gmail_checker_chrome_session.lock"
+_CHROME_SESSION_HOLDER_PATH = "/tmp/gmail_checker_chrome_session.holder"
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _read_session_holder_pid() -> int | None:
+    try:
+        with open(_CHROME_SESSION_HOLDER_PATH, encoding="utf-8") as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def _write_session_holder_pid(pid: int) -> None:
+    try:
+        with open(_CHROME_SESSION_HOLDER_PATH, "w", encoding="utf-8") as f:
+            f.write(str(pid))
+    except Exception:
+        pass
+
+
+def _clear_session_holder_pid() -> None:
+    try:
+        os.remove(_CHROME_SESSION_HOLDER_PATH)
+    except Exception:
+        pass
+
+
+def _flock_exclusive_wait(fd, log, *, label: str, heartbeat_sec: float = 4.0) -> None:
+    """Blocking flock with periodic stderr logs so the UI does not look frozen."""
+    import errno
+
+    start = time.monotonic()
+    last_log = -heartbeat_sec
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as e:
+            if e.errno not in (errno.EAGAIN, errno.EACCES):
+                raise
+        elapsed = time.monotonic() - start
+        if elapsed - last_log >= heartbeat_sec:
+            last_log = elapsed
+            extra = ""
+            if "session" in label.lower():
+                holder = _read_session_holder_pid()
+                if holder is not None:
+                    extra = f" — holder pid {holder} ({'alive' if _pid_alive(holder) else 'dead'})"
+            log(f"{label} ({int(elapsed)}s{extra})…")
 
 
 def _find_free_port() -> int:
@@ -230,6 +287,14 @@ def _find_free_display() -> int:
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
+def _preload_whisper_bg() -> None:
+    try:
+        from recaptcha_audio_solver import preload_whisper
+        preload_whisper()
+    except Exception as exc:
+        log(f"Whisper preload skipped: {exc}")
+
+
 def log(msg: str):
     print(f"[UC] {msg}", file=sys.stderr, flush=True)
 
@@ -245,6 +310,12 @@ DEVICE_ACTIVITY_URL = (
 LOGIN_START = (
     "https://myaccount.google.com/signinoptions/password"
     "?continue=https://myaccount.google.com/"
+)
+# Normal browser + robot check: start on the email identifier (not password-change page).
+GOOGLE_EMAIL_SIGNIN = (
+    "https://accounts.google.com/v3/signin/identifier"
+    "?continue=https%3A%2F%2Fmyaccount.google.com%2F"
+    "&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
 )
 
 
@@ -408,10 +479,23 @@ def find_totp_input(driver) -> object | None:
     return None
 
 
+def challenge_kind(url: str) -> str:
+    """The challenge path segment, so skotp is not treated as sk."""
+    match = re.search(r"challenge/([a-z0-9]+)", (url or "").lower())
+    return match.group(1) if match else ""
+
+
+def is_sms_code_url(url: str) -> bool:
+    """Phone text-message code. Not the Google Authenticator page."""
+    return challenge_kind(url) in {"skotp", "ootp", "sms"}
+
+
 def is_totp_challenge_url(url: str) -> bool:
     """True when the browser is on a Google Authenticator code entry page."""
+    if is_sms_code_url(url):
+        return False
     u = url.lower()
-    if "challenge/totp" in u or "challenge/ipp" in u:
+    if challenge_kind(url) in {"totp", "ipp"}:
         return True
     if "v3/signin" in u and "v3/signin/identifier" not in u and "challenge" not in u:
         return True
@@ -450,7 +534,9 @@ def next_fresh_totp(
         win = totp_current_window()
     else:
         secs_left = totp_window_remaining()
-        if secs_left <= 5:
+        # Google often takes 8–10s to accept the code. A code with only 8s
+        # left expires on the way and comes back as "wrong code".
+        if secs_left <= 12:
             time.sleep(secs_left + 1)
             win = totp_current_window()
 
@@ -548,6 +634,65 @@ def _get_chrome_win_id() -> str | None:
         except Exception:
             continue
     return None
+
+
+def fast_paste(driver, element, text: str) -> None:
+    """One-shot paste (CDP insertText). Target: under 1 second for email or password."""
+    t0 = time.time()
+    try:
+        driver.execute_script(
+            "arguments[0].focus(); arguments[0].click();",
+            element,
+        )
+    except Exception:
+        try:
+            element.click()
+        except Exception:
+            pass
+    try:
+        for key, code, vk in (("a", "KeyA", 65), ("Backspace", "Backspace", 8)):
+            mods = 2 if key == "a" else 0
+            driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                "type": "keyDown",
+                "modifiers": mods,
+                "key": key,
+                "code": code,
+                "windowsVirtualKeyCode": vk,
+            })
+            driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                "type": "keyUp",
+                "modifiers": mods,
+                "key": key,
+                "code": code,
+                "windowsVirtualKeyCode": vk,
+            })
+        driver.execute_cdp_cmd("Input.insertText", {"text": text})
+        driver.execute_script(
+            """
+            var el = arguments[0];
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            """,
+            element,
+        )
+    except Exception as exc:
+        log(f"fast paste CDP failed ({exc}) — send_keys whole string")
+        try:
+            element.send_keys(text)
+        except Exception:
+            clipboard_type(driver, element, text)
+    try:
+        val = driver.execute_script("return arguments[0].value || ''", element) or ""
+        if text and len(val) < max(1, len(text) - 1):
+            log(f"fast paste missed the field ({len(val)}/{len(text)}) — send_keys")
+            try:
+                element.clear()
+            except Exception:
+                pass
+            element.send_keys(text)
+    except Exception:
+        pass
+    log(f"fast paste {len(text)} chars in {int((time.time() - t0) * 1000)}ms")
 
 
 def clipboard_type(driver, element, text: str):
@@ -702,6 +847,1062 @@ def touch_click(driver, element):
             element.click()
         except Exception:
             pass
+
+
+def _page_iframes(driver):
+    """Iframes in the current document, including open shadow roots."""
+    try:
+        return driver.execute_script("""
+            const out = [];
+            function walk(root) {
+              if (!root || !root.querySelectorAll) return;
+              root.querySelectorAll('iframe').forEach(f => out.push(f));
+              root.querySelectorAll('*').forEach(n => { if (n.shadowRoot) walk(n.shadowRoot); });
+            }
+            walk(document);
+            return out;
+        """) or []
+    except Exception:
+        return []
+
+
+def _find_recaptcha_anchor_iframe(driver, log_miss: bool = False):
+    """Anchor checkbox iframe, including one nested inside another same-origin frame."""
+    driver.switch_to.default_content()
+    frames = list(_page_iframes(driver))
+    parents = list(frames)
+    for parent in parents:
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(parent)
+            frames.extend(_page_iframes(driver))
+        except Exception:
+            pass
+    driver.switch_to.default_content()
+    best = None
+    best_score = -1.0
+    notes = []
+    for fr in frames:
+        try:
+            driver.switch_to.default_content()
+            meta = driver.execute_script("""
+                const f = arguments[0];
+                const r = f.getBoundingClientRect();
+                return {src: (f.src||'').slice(0,160), title: f.title||'', x:r.left, y:r.top, w:r.width, h:r.height};
+            """, fr) or {}
+            src = (meta.get("src") or "").lower()
+            title = (meta.get("title") or "").lower()
+            w = float(meta.get("w") or 0)
+            h = float(meta.get("h") or 0)
+            notes.append(f"{int(w)}x{int(h)} {(src or title)[:80]}")
+            if "bframe" in src:
+                continue
+            is_anchor = "/recaptcha/" in src and "anchor" in src
+            is_robot_title = "not a robot" in title or "i'm not a robot" in title
+            if not is_anchor and not is_robot_title:
+                continue
+            if w < 8 or h < 8:
+                continue
+            score = (5 if is_anchor else 0) + (4 if is_robot_title else 0) + min(w, 300) / 100
+            if score > best_score:
+                best_score = score
+                best = fr
+        except Exception:
+            continue
+    driver.switch_to.default_content()
+    if best is None and log_miss:
+        try:
+            snippet = driver.execute_script(
+                "return ((document.body && document.body.innerText) || '').replace(/\\s+/g,' ').slice(0,160)"
+            ) or ""
+        except Exception:
+            snippet = ""
+        log("reCAPTCHA iframes seen: " + (" | ".join(notes[:8]) if notes else "none"))
+        if snippet:
+            log(f"reCAPTCHA page text: {snippet}")
+    return best
+
+
+def _recaptcha_checkbox_ticked(driver) -> bool:
+    from selenium.webdriver.common.by import By
+
+    driver.switch_to.default_content()
+    found = _cdp_find_recaptcha(driver)
+    aria = (found.get("checkbox") or {}).get("aria")
+    if aria == "true":
+        return True
+    if found.get("checkbox"):
+        return False
+    fr = _find_recaptcha_anchor_iframe(driver)
+    if fr is None:
+        return False
+    try:
+        driver.switch_to.frame(fr)
+        for sel in ("#recaptcha-anchor", ".recaptcha-checkbox"):
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            if els and els[0].get_attribute("aria-checked") == "true":
+                driver.switch_to.default_content()
+                return True
+        checked = driver.execute_script("""
+            var a = document.getElementById('recaptcha-anchor');
+            return a && a.getAttribute('aria-checked') === 'true';
+        """)
+        driver.switch_to.default_content()
+        return bool(checked)
+    except Exception:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        return False
+
+
+def _live_url(driver) -> str:
+    """Current URL without waiting for the page load. current_url blocks on slow navigations."""
+    try:
+        res = driver.execute_cdp_cmd(
+            "Runtime.evaluate",
+            {"expression": "location.href", "returnByValue": True},
+        )
+        value = ((res or {}).get("result") or {}).get("value")
+        if isinstance(value, str) and value:
+            return value
+    except Exception:
+        pass
+    try:
+        return driver.current_url or ""
+    except Exception:
+        return ""
+
+
+def _cdp_click_xy(driver, x: float, y: float) -> None:
+    """Trusted press on the phone viewport. A 0ms touchEnd was ignored by reCAPTCHA."""
+    x, y = float(x), float(y)
+    for typ, buttons in (("mouseMoved", 0), ("mousePressed", 1)):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": typ,
+            "x": x,
+            "y": y,
+            "button": "left",
+            "buttons": buttons,
+            "clickCount": 1,
+        })
+    time.sleep(0.08)
+    driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+        "type": "mouseReleased",
+        "x": x,
+        "y": y,
+        "button": "left",
+        "buttons": 0,
+        "clickCount": 1,
+    })
+
+
+def _cdp_touch_xy(driver, x: float, y: float) -> None:
+    x, y = float(x), float(y)
+    point = {"x": x, "y": y, "radiusX": 6, "radiusY": 6, "force": 0.7, "id": 1}
+    try:
+        driver.execute_cdp_cmd("Input.dispatchTouchEvent", {
+            "type": "touchStart",
+            "touchPoints": [point],
+        })
+        time.sleep(0.09)
+        driver.execute_cdp_cmd("Input.dispatchTouchEvent", {
+            "type": "touchEnd",
+            "touchPoints": [],
+        })
+    except Exception as exc:
+        log(f"reCAPTCHA touch click skipped: {exc}")
+
+
+def _cdp_click_element(driver, element) -> bool:
+    """Click the visible center of a control. ActionChains misses overlay buttons."""
+    try:
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block:'center', inline:'center'});",
+            element,
+        )
+    except Exception:
+        pass
+    try:
+        rect = driver.execute_script(
+            "var r = arguments[0].getBoundingClientRect();"
+            "return {x: r.left, y: r.top, w: r.width, h: r.height};",
+            element,
+        ) or {}
+        w = float(rect.get("w") or 0)
+        h = float(rect.get("h") or 0)
+        if w < 4 or h < 4:
+            return False
+        _cdp_click_xy(driver, float(rect["x"]) + w / 2, float(rect["y"]) + h / 2)
+        return True
+    except Exception as exc:
+        log(f"CDP element click failed: {exc}")
+        return False
+
+
+def _find_control_by_label(driver, labels: tuple[str, ...]):
+    """Button whose own text is one of the labels, including inside a shadow root."""
+    try:
+        return driver.execute_script(
+            """
+            var want = arguments[0];
+            function norm(el) {
+              return (el.innerText || el.textContent || '')
+                .replace(/\\s+/g, ' ').trim().toLowerCase();
+            }
+            function walk(root, hits) {
+              if (!root || !root.querySelectorAll) return;
+              var nodes = root.querySelectorAll('button, [role="button"], a, span, div');
+              for (var i = 0; i < nodes.length; i++) {
+                var el = nodes[i];
+                var t = norm(el);
+                if (t && want.indexOf(t) !== -1 && t.length < 28) hits.push(el);
+                if (el.shadowRoot) walk(el.shadowRoot, hits);
+              }
+            }
+            var hits = [];
+            walk(document, hits);
+            for (var j = 0; j < hits.length; j++) {
+              var n = hits[j];
+              var b = n.closest ? (n.closest('button, [role="button"], a') || n) : n;
+              var r = b.getBoundingClientRect();
+              if (r.width > 8 && r.height > 8) return b;
+            }
+            return null;
+            """,
+            [x.lower() for x in labels],
+        )
+    except Exception:
+        return None
+
+
+def _trusted_button_click(driver, element) -> bool:
+    """Real pointer click. Google ignores the synthetic touch events on Next."""
+    if _cdp_click_element(driver, element):
+        return True
+    from selenium.webdriver.common.action_chains import ActionChains
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+    except Exception:
+        pass
+    try:
+        ActionChains(driver).move_to_element(element).pause(0.04).click().perform()
+        return True
+    except Exception:
+        try:
+            element.click()
+            return True
+        except Exception:
+            return False
+
+
+def _page_visible_text(driver) -> str:
+    try:
+        return (
+            driver.execute_script(
+                "return ((document.body && document.body.innerText) || '')"
+            )
+            or ""
+        ).lower()
+    except Exception:
+        return ""
+
+
+def _google_error_dialog_open(driver) -> bool:
+    return "something went wrong" in _page_visible_text(driver)
+
+
+def _clear_google_error_dialog(driver, email: str) -> bool:
+    """Dismiss Google's sign-in error. The page Next does nothing while that dialog is up."""
+    if not _google_error_dialog_open(driver):
+        return False
+    log(f"{email} — Google error dialog, clicking its Next")
+    try:
+        el = driver.execute_script(
+            """
+            var labels = ['next', 'restart', 'try again'];
+            var roots = document.querySelectorAll(
+              '[role="dialog"], [role="alertdialog"], [aria-modal="true"], div');
+            for (var i = 0; i < roots.length; i++) {
+              var root = roots[i];
+              var t = (root.innerText || '').toLowerCase();
+              if (t.indexOf('something went wrong') === -1) continue;
+              if (t.length > 500) continue;
+              var btns = root.querySelectorAll('button, [role="button"]');
+              for (var j = 0; j < btns.length; j++) {
+                var label = (btns[j].innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                if (labels.indexOf(label) === -1) continue;
+                var r = btns[j].getBoundingClientRect();
+                if (r.width < 8 || r.height < 8) continue;
+                return btns[j];
+              }
+            }
+            return null;
+            """
+        )
+    except Exception:
+        el = None
+    clicked = bool(el is not None and _cdp_click_element(driver, el))
+    if not clicked:
+        el = _find_control_by_label(driver, ("Restart", "Try again"))
+        clicked = bool(el is not None and _cdp_click_element(driver, el))
+    if not clicked:
+        clicked = _click_button_text(driver, ("Restart", "Try again"))
+    time.sleep(1.1)
+    if not _google_error_dialog_open(driver):
+        log(f"{email} — error dialog closed")
+        return True
+    log(f"{email} — Restart did not close the dialog, reloading the sign-in page")
+    try:
+        driver.get(GOOGLE_EMAIL_SIGNIN)
+    except Exception as exc:
+        log(f"{email} — sign-in reload failed: {exc}")
+    return True
+
+
+def _click_button_text(driver, labels: tuple[str, ...]) -> bool:
+    from selenium.webdriver.common.by import By
+    for label in labels:
+        xpath = (
+            f"//button[normalize-space()='{label}']"
+            f"|//div[@role='button'][normalize-space()='{label}']"
+            f"|//*[@id='identifierNext' or @id='passwordNext']//*[normalize-space()='{label}']"
+        )
+        try:
+            els = driver.find_elements(By.XPATH, xpath)
+        except Exception:
+            continue
+        for el in els:
+            try:
+                if el.is_displayed() and _trusted_button_click(driver, el):
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def _cdp_node_attrs(node: dict) -> dict:
+    raw = node.get("attributes") or []
+    return {raw[i]: raw[i + 1] for i in range(0, len(raw) - 1, 2)}
+
+
+def _cdp_find_recaptcha(driver) -> dict:
+    """Anchor iframe, its checkbox, and the challenge bframe. Pierce closed shadow."""
+    try:
+        doc = driver.execute_cdp_cmd("DOM.getDocument", {"depth": -1, "pierce": True})
+    except Exception as exc:
+        log(f"reCAPTCHA DOM pierce failed: {exc}")
+        return {}
+    anchor = None
+    checkbox = None
+    bframes: list[dict] = []
+
+    def walk(node, in_anchor: bool = False):
+        nonlocal anchor, checkbox
+        if not isinstance(node, dict):
+            return
+        attr = _cdp_node_attrs(node)
+        name = (node.get("nodeName") or "").lower()
+        src = attr.get("src") or ""
+        low = src.lower()
+        node_id = attr.get("id") or ""
+        child_anchor = in_anchor
+        if name == "iframe" and "/recaptcha/" in low and "anchor" in low and "bframe" not in low:
+            anchor = {
+                "backendNodeId": node.get("backendNodeId"),
+                "src": src[:160],
+                "id": node_id,
+            }
+            child_anchor = True
+        elif name == "iframe" and "bframe" in low:
+            bframes.append({"backendNodeId": node.get("backendNodeId"), "src": src[:160]})
+        if child_anchor and node_id == "recaptcha-anchor":
+            checkbox = {
+                "backendNodeId": node.get("backendNodeId"),
+                "id": node_id,
+                "aria": attr.get("aria-checked"),
+            }
+        elif child_anchor and checkbox is None and attr.get("role") == "checkbox":
+            checkbox = {
+                "backendNodeId": node.get("backendNodeId"),
+                "id": node_id,
+                "aria": attr.get("aria-checked"),
+            }
+        content = node.get("contentDocument")
+        if content:
+            walk(content, child_anchor)
+        for child in node.get("children") or []:
+            walk(child, child_anchor)
+        for shadow in node.get("shadowRoots") or []:
+            walk(shadow, child_anchor)
+
+    walk(doc.get("root") or {})
+    bframe = None
+    for candidate in bframes:
+        if _quad_visible(driver, _cdp_content_quad(driver, candidate.get("backendNodeId"))):
+            bframe = candidate
+            break
+    return {"anchor": anchor, "checkbox": checkbox, "bframe": bframe}
+
+
+def _cdp_log_frame_srcs(driver) -> None:
+    try:
+        doc = driver.execute_cdp_cmd("DOM.getDocument", {"depth": -1, "pierce": True})
+    except Exception as exc:
+        log(f"reCAPTCHA frame list failed: {exc}")
+        return
+    notes: list[str] = []
+
+    def walk(node):
+        if not isinstance(node, dict) or len(notes) >= 8:
+            return
+        attr = _cdp_node_attrs(node)
+        name = (node.get("nodeName") or "").lower()
+        if name == "iframe":
+            src = (attr.get("src") or attr.get("title") or attr.get("id") or "")[:90]
+            notes.append(src or "(blank iframe)")
+        for child in node.get("children") or []:
+            walk(child)
+        for shadow in node.get("shadowRoots") or []:
+            walk(shadow)
+        content = node.get("contentDocument")
+        if content:
+            walk(content)
+
+    walk(doc.get("root") or {})
+    log("reCAPTCHA pierced iframes: " + (" | ".join(notes) if notes else "none"))
+
+
+def _cdp_content_quad(driver, backend_id):
+    if not backend_id:
+        return None
+    try:
+        res = driver.execute_cdp_cmd("DOM.getContentQuads", {"backendNodeId": int(backend_id)})
+        quads = res.get("quads") or []
+        return quads[0] if quads else None
+    except Exception as exc:
+        log(f"reCAPTCHA quad skipped: {str(exc).splitlines()[0][:140]}")
+        return None
+
+
+def _quad_bounds(quad):
+    xs, ys = quad[0::2], quad[1::2]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _quad_visible(driver, quad) -> bool:
+    """A parked reCAPTCHA bframe sits near y=-10000 and is not a real popup."""
+    if not quad:
+        return False
+    left, top, right, bottom = _quad_bounds(quad)
+    vw, vh, dpr = _viewport_css(driver)
+    rects = [(left, top, right, bottom)]
+    if dpr > 1.05:
+        rects.append(tuple(v / dpr for v in (left, top, right, bottom)))
+    for l, t, r, b in rects:
+        w, h = r - l, b - t
+        if w > 180 and h > 140 and t < vh - 8 and b > 24 and l < vw - 8 and r > 8:
+            return True
+    return False
+
+
+def _viewport_css(driver):
+    try:
+        w, h, dpr = driver.execute_script(
+            "return [window.innerWidth||412, window.innerHeight||868, window.devicePixelRatio||1]"
+        )
+        return float(w), float(h), float(dpr or 1)
+    except Exception:
+        return 412.0, 868.0, 1.0
+
+
+def _point_inside(x: float, y: float, rect, pad: float = 6) -> bool:
+    if rect is None:
+        return False
+    left, top, right, bottom = rect
+    return left - pad <= x <= right + pad and top - pad <= y <= bottom + pad
+
+
+def _recaptcha_click_point(driver, found: dict):
+    """CSS viewport point of the checkbox. Quads may be CSS, device px, or iframe-local."""
+    anchor = found.get("anchor") or {}
+    checkbox = found.get("checkbox") or {}
+    vw, vh, dpr = _viewport_css(driver)
+    iq = _cdp_content_quad(driver, anchor.get("backendNodeId"))
+    cq = _cdp_content_quad(driver, checkbox.get("backendNodeId"))
+    if iq is None and cq is None:
+        return None
+
+    def fits(rect) -> bool:
+        if rect is None:
+            return False
+        left, top, right, bottom = rect
+        w, h = right - left, bottom - top
+        return w > 20 and h > 20 and right <= vw + 60 and bottom <= vh + 120 and left >= -30 and top >= -40
+
+    def scale(rect, factor: float):
+        return tuple(v * factor for v in rect)
+
+    raw_i = _quad_bounds(iq) if iq else None
+    iframe_css = None
+    if raw_i and fits(raw_i):
+        iframe_css = raw_i
+    elif raw_i and dpr > 1.15 and fits(scale(raw_i, 1 / dpr)):
+        iframe_css = scale(raw_i, 1 / dpr)
+    elif raw_i:
+        iframe_css = raw_i
+
+    if cq is None:
+        if not iframe_css:
+            return None
+        left, top, right, bottom = iframe_css
+        return left + 28, (top + bottom) / 2, "iframe-left"
+
+    cl, ct, cr, cb = _quad_bounds(cq)
+    cx, cy = (cl + cr) / 2, (ct + cb) / 2
+    candidates = [
+        (cx, cy, "checkbox"),
+        (cx / dpr, cy / dpr, "checkbox/dpr") if dpr > 1.15 else None,
+    ]
+    if iframe_css:
+        il, it, ir, ib = iframe_css
+        candidates.append((il + cx, it + cy, "iframe+local"))
+        if dpr > 1.15:
+            candidates.append((il + cx / dpr, it + cy / dpr, "iframe+local/dpr"))
+        candidates.append((il + 28, (it + ib) / 2, "iframe-left"))
+    for item in candidates:
+        if not item:
+            continue
+        x, y, how = item
+        if iframe_css and _point_inside(x, y, iframe_css, pad=12):
+            log(
+                f"reCAPTCHA target {how} click={int(x)},{int(y)} "
+                f"iframe={int(iframe_css[0])},{int(iframe_css[1])} "
+                f"{int(iframe_css[2]-iframe_css[0])}x{int(iframe_css[3]-iframe_css[1])} "
+                f"dpr={dpr:.2f} aria={checkbox.get('aria')}"
+            )
+            return x, y, how
+    if iframe_css:
+        il, it, ir, ib = iframe_css
+        x, y = il + 28, (it + ib) / 2
+        log(f"reCAPTCHA target fallback click={int(x)},{int(y)} dpr={dpr:.2f}")
+        return x, y, "fallback"
+    return None
+
+
+def _cdp_challenge_open(driver) -> bool:
+    """True only when the image/audio challenge popup is actually on screen."""
+    found = _cdp_find_recaptcha(driver)
+    bf = found.get("bframe") or {}
+    quad = _cdp_content_quad(driver, bf.get("backendNodeId"))
+    if not quad:
+        return False
+    return _quad_visible(driver, quad)
+
+
+def _cdp_click_recaptcha_checkbox(driver) -> bool:
+    found = _cdp_find_recaptcha(driver)
+    anchor = found.get("anchor")
+    checkbox = found.get("checkbox")
+    if not anchor and not checkbox:
+        return False
+    src = (anchor or {}).get("src") or ""
+    log(
+        f"reCAPTCHA anchor {(src[:90] or '-')}"
+        f" checkbox={bool(checkbox)} aria={(checkbox or {}).get('aria')}"
+    )
+    point = _recaptcha_click_point(driver, found)
+    if not point:
+        return False
+    x, y, _how = point
+    # A real finger travels onto the box. One teleport is scored as a bot.
+    sx = max(12.0, x - random.randint(80, 160))
+    sy = max(12.0, y - random.randint(50, 120))
+    for step in range(1, 5):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": "mouseMoved",
+            "x": sx + (x - sx) * step / 4,
+            "y": sy + (y - sy) * step / 4,
+            "button": "none",
+            "buttons": 0,
+        })
+        time.sleep(0.045)
+    time.sleep(0.12)
+    _cdp_click_xy(driver, x, y)
+    time.sleep(0.45)
+    if _google_error_dialog_open(driver):
+        log("reCAPTCHA click opened an error dialog")
+        return False
+    aria = (_cdp_find_recaptcha(driver).get("checkbox") or {}).get("aria")
+    log(f"reCAPTCHA aria after mouse click: {aria}")
+    if aria == "true":
+        return True
+    if _cdp_challenge_open(driver):
+        log("reCAPTCHA challenge popup opened on mouse click")
+        return False
+    _cdp_touch_xy(driver, x, y)
+    time.sleep(0.45)
+    aria = (_cdp_find_recaptcha(driver).get("checkbox") or {}).get("aria")
+    log(f"reCAPTCHA aria after touch click: {aria}")
+    return aria == "true"
+
+
+def _top_recaptcha_anchor_iframe(driver):
+    """Visible enterprise/anchor iframe on the sign-in page. None when it is not painted yet."""
+    driver.switch_to.default_content()
+    try:
+        return driver.execute_script(
+            """
+            var frames = document.querySelectorAll('iframe');
+            var best = null;
+            var bestArea = 0;
+            for (var i = 0; i < frames.length; i++) {
+              var f = frames[i];
+              var src = (f.src || '').toLowerCase();
+              if (src.indexOf('/recaptcha/') === -1 || src.indexOf('anchor') === -1) continue;
+              if (src.indexOf('bframe') !== -1) continue;
+              var r = f.getBoundingClientRect();
+              if (r.width < 8 || r.height < 8) continue;
+              var area = r.width * r.height;
+              if (area > bestArea) { best = f; bestArea = area; }
+            }
+            return best;
+            """
+        )
+    except Exception:
+        return None
+
+
+def _read_recaptcha_anchor(driver, frame) -> dict:
+    """Checkbox geometry inside the anchor iframe, plus loading/error flags."""
+    driver.switch_to.default_content()
+    try:
+        driver.switch_to.frame(frame)
+    except Exception as exc:
+        log(f"reCAPTCHA anchor frame switch failed: {exc}")
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        return {}
+    try:
+        state = driver.execute_script(
+            """
+            var a = document.getElementById('recaptcha-anchor')
+              || document.querySelector('[role="checkbox"]')
+              || document.querySelector('.recaptcha-checkbox-border');
+            var border = document.querySelector('.recaptcha-checkbox-border') || a;
+            var spinner = document.querySelector('.recaptcha-checkbox-spinner');
+            var err = document.querySelector('.rc-anchor-error-msg-container');
+            var reload = document.querySelector('#recaptcha-reload-button, .rc-button-reload');
+            function shown(el) {
+              if (!el) return false;
+              var s = getComputedStyle(el);
+              if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+              return el.offsetWidth > 2 || el.offsetHeight > 2;
+            }
+            var target = border || a;
+            var r = target ? target.getBoundingClientRect() : null;
+            var text = ((document.body && document.body.innerText) || '')
+              .replace(/\\s+/g, ' ').trim().slice(0, 160);
+            var href = '';
+            try { href = String(location.href || '').slice(0, 140); } catch (e) {}
+            return {
+              ready: !!a || /not a robot/i.test(text),
+              aria: a ? a.getAttribute('aria-checked') : null,
+              loading: shown(spinner) && !a,
+              err: shown(err) || shown(reload) || /could not connect/i.test(text),
+              text: text,
+              href: href,
+              x: r ? r.left : 0,
+              y: r ? r.top : 0,
+              w: r ? r.width : 0,
+              h: r ? r.height : 0
+            };
+            """
+        ) or {}
+    except Exception as exc:
+        log(f"reCAPTCHA anchor read failed: {exc}")
+        state = {}
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    return state
+
+
+def _recaptcha_checkbox_viewport_point(driver, frame, state: dict):
+    """CSS point of the checkbox. Inner rect is iframe-local; add the iframe origin."""
+    try:
+        outer = driver.execute_script(
+            """
+            var r = arguments[0].getBoundingClientRect();
+            return {x: r.left, y: r.top, w: r.width, h: r.height};
+            """,
+            frame,
+        ) or {}
+    except Exception:
+        return None
+    iw = float(state.get("w") or 0)
+    ih = float(state.get("h") or 0)
+    ox = float(outer.get("x") or 0)
+    oy = float(outer.get("y") or 0)
+    ow = float(outer.get("w") or 0)
+    oh = float(outer.get("h") or 0)
+    if iw >= 4 and ih >= 4:
+        return ox + float(state.get("x") or 0) + iw / 2, oy + float(state.get("y") or 0) + ih / 2
+    if ow >= 8 and oh >= 8:
+        return ox + 28, oy + oh / 2
+    return None
+
+
+def _poll_recaptcha_after_click(driver, seconds: float = 2.4) -> str:
+    """passed | challenge | pending after a checkbox click."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        driver.switch_to.default_content()
+        if "challenge/recaptcha" not in _live_url(driver):
+            return "passed"
+        if _recaptcha_checkbox_ticked(driver):
+            return "passed"
+        if _cdp_challenge_open(driver):
+            return "challenge"
+        time.sleep(0.25)
+    return "pending"
+
+
+def _click_recaptcha_from_frame(driver) -> str:
+    """
+    Trusted click on the real checkbox center.
+    Returns passed | challenge | notready | error | miss.
+    """
+    driver.switch_to.default_content()
+    frame = _top_recaptcha_anchor_iframe(driver)
+    if frame is None:
+        frame = _find_recaptcha_anchor_iframe(driver)
+    if frame is None:
+        return "notready"
+    state = _read_recaptcha_anchor(driver, frame)
+    if not state:
+        return "notready"
+    if state.get("aria") == "true":
+        return "passed"
+    if not state.get("ready"):
+        return "notready"
+    if state.get("loading") and float(state.get("w") or 0) < 8:
+        return "notready"
+    if state.get("err"):
+        log(f"reCAPTCHA anchor error: {(state.get('text') or '')[:120]}")
+        return "error"
+    point = _recaptcha_checkbox_viewport_point(driver, frame, state)
+    if not point:
+        return "miss"
+    x, y = point
+    log(
+        f"reCAPTCHA checkbox click at {int(x)},{int(y)} "
+        f"aria={state.get('aria')} {int(float(state.get('w') or 0))}x{int(float(state.get('h') or 0))}"
+    )
+    sx = max(12.0, x - random.randint(70, 140))
+    sy = max(12.0, y - random.randint(40, 90))
+    for step in range(1, 5):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": "mouseMoved",
+            "x": sx + (x - sx) * step / 4,
+            "y": sy + (y - sy) * step / 4,
+            "button": "none",
+            "buttons": 0,
+        })
+        time.sleep(0.04)
+    _cdp_click_xy(driver, x, y)
+    outcome = _poll_recaptcha_after_click(driver, 4.0)
+    if outcome != "pending":
+        return outcome
+    # A second press only when the box is still painted. A 0-size box means the
+    # first click already started navigation, and another click was restarting it.
+    state_after = _read_recaptcha_anchor(driver, frame)
+    if float(state_after.get("w") or 0) < 8:
+        outcome = _poll_recaptcha_after_click(driver, 4.0)
+        if outcome != "pending":
+            return outcome
+        log(f"reCAPTCHA checkbox click did not open a challenge aria={state.get('aria')}")
+        return "miss"
+    point_again = _recaptcha_checkbox_viewport_point(driver, frame, state_after)
+    if point_again:
+        _cdp_click_xy(driver, point_again[0], point_again[1])
+    outcome = _poll_recaptcha_after_click(driver, 2.5)
+    if outcome != "pending":
+        return outcome
+    log(f"reCAPTCHA checkbox click did not open a challenge aria={state.get('aria')}")
+    return "miss"
+
+
+def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
+    """Click the checkbox from inside its iframe. Parent-page coordinates miss on a phone viewport."""
+    driver.switch_to.default_content()
+    if _google_error_dialog_open(driver):
+        return False
+    if _cdp_challenge_open(driver):
+        log("reCAPTCHA challenge popup is open — solver will run")
+        return False
+    outcome = _click_recaptcha_from_frame(driver)
+    if outcome == "passed":
+        return True
+    if outcome in ("challenge", "error", "notready"):
+        return False
+    if _cdp_click_recaptcha_checkbox(driver):
+        return True
+    return _cdp_challenge_open(driver) is False and _recaptcha_checkbox_ticked(driver)
+
+
+def handle_recaptcha_checkbox(
+    driver,
+    email: str,
+    *,
+    pace: dict,
+    proxy_url: str | None,
+    page_state,
+) -> str:
+    """
+    Click I'm-not-a-robot like a phone user. Returns:
+      passed | image | timeout | missed
+    """
+    url, _ = page_state()
+    if "challenge/recaptcha" not in url:
+        return "passed"
+
+    log(f"{email} — I'm not a robot checkbox — clicking it")
+    _rc_result = "missed"
+
+    try:
+        # A person waits a few seconds. If the box is still "Loading", they
+        # reload once. Sitting there 20s and then solving an empty page does not.
+        def _wait_widget(seconds: float) -> dict:
+            deadline = time.time() + seconds
+            started = time.time()
+            anchor_since = None
+            found_now = {}
+            last_log = -5.0
+            while time.time() < deadline:
+                if _google_error_dialog_open(driver):
+                    _clear_google_error_dialog(driver, email)
+                    deadline = max(deadline, time.time() + 8)
+                    anchor_since = None
+                    time.sleep(0.4)
+                    continue
+                found_now = _cdp_find_recaptcha(driver)
+                if found_now.get("checkbox"):
+                    return found_now
+                if found_now.get("anchor"):
+                    if anchor_since is None:
+                        anchor_since = time.time()
+                    elif time.time() - anchor_since >= 0.6:
+                        return found_now
+                else:
+                    anchor_since = None
+                waited = time.time() - started
+                if waited - last_log >= 4:
+                    last_log = waited
+                    log(f"{email} — waiting for the robot checkbox ({int(waited)}s)")
+                time.sleep(0.3)
+            return found_now
+
+        found = _wait_widget(6 if pace.get("fast") else 8)
+        if not (found.get("anchor") or found.get("checkbox")):
+            log(f"{email} — robot box still loading, reloading the page once")
+            capture_step(driver, "Robot checkbox")
+            try:
+                driver.switch_to.default_content()
+                driver.refresh()
+            except Exception as exc:
+                log(f"{email} — robot page reload failed: {exc}")
+            found = _wait_widget(8)
+        if found.get("anchor") or found.get("checkbox"):
+            log(
+                f"{email} — reCAPTCHA widget in DOM "
+                f"aria={(found.get('checkbox') or {}).get('aria')}"
+            )
+            capture_step(driver, "Robot checkbox")
+        else:
+            log(f"{email} — reCAPTCHA widget not in DOM")
+            _cdp_log_frame_srcs(driver)
+            _find_recaptcha_anchor_iframe(driver, log_miss=True)
+            capture_step(driver, "Robot checkbox")
+            return "loading"
+
+        reloaded_for_error = False
+        misses = 0
+        attempt = 0
+        blank_since = None
+        probed = False
+        click_deadline = time.time() + 16
+        while time.time() < click_deadline and _rc_result not in ("passed", "image"):
+            attempt += 1
+            try:
+                driver.switch_to.default_content()
+                if "challenge/recaptcha" not in _live_url(driver):
+                    _rc_result = "passed"
+                    log(f"{email} — left the robot page")
+                    break
+            except Exception:
+                pass
+            if _google_error_dialog_open(driver):
+                log(f"{email} — robot page said something went wrong")
+                _clear_google_error_dialog(driver, email)
+                _wait_widget(6)
+                continue
+            if _recaptcha_checkbox_ticked(driver):
+                _rc_result = "passed"
+                log(f"{email} — reCAPTCHA already ticked (attempt {attempt})")
+                break
+            if _cdp_challenge_open(driver):
+                log(f"{email} — reCAPTCHA challenge is open")
+                capture_step(driver, "Robot challenge")
+                _rc_result = "image"
+                break
+            outcome = _click_recaptcha_from_frame(driver)
+            if outcome == "passed" or _recaptcha_checkbox_ticked(driver):
+                _rc_result = "passed"
+                log(f"{email} — I'm not a robot checkbox clicked (attempt {attempt})")
+                break
+            if outcome == "challenge" or _cdp_challenge_open(driver):
+                log(f"{email} — reCAPTCHA challenge is open")
+                capture_step(driver, "Robot challenge")
+                _rc_result = "image"
+                break
+            if outcome == "error" and not reloaded_for_error:
+                reloaded_for_error = True
+                log(f"{email} — robot widget failed to load, reloading once")
+                try:
+                    driver.switch_to.default_content()
+                    driver.refresh()
+                except Exception as exc:
+                    log(f"{email} — robot page reload failed: {exc}")
+                _wait_widget(6)
+                click_deadline = max(click_deadline, time.time() + 8)
+                continue
+            if outcome == "notready":
+                if blank_since is None:
+                    blank_since = time.time()
+                if not probed:
+                    probed = True
+                    frame = _top_recaptcha_anchor_iframe(driver) or _find_recaptcha_anchor_iframe(driver)
+                    state = _read_recaptcha_anchor(driver, frame) if frame is not None else {}
+                    log(
+                        f"{email} — robot checkbox not ready "
+                        f"href={(state.get('href') or '-')[:90]} "
+                        f"text={(state.get('text') or '-')[:80]}"
+                    )
+                if time.time() - blank_since >= 7 and not reloaded_for_error:
+                    reloaded_for_error = True
+                    blank_since = None
+                    probed = False
+                    log(f"{email} — robot checkbox never painted, reloading once")
+                    try:
+                        driver.switch_to.default_content()
+                        driver.refresh()
+                    except Exception as exc:
+                        log(f"{email} — robot page reload failed: {exc}")
+                    _wait_widget(6)
+                    click_deadline = max(click_deadline, time.time() + 12)
+                    continue
+                if attempt == 1 or attempt % 4 == 0:
+                    log(f"{email} — robot checkbox still loading")
+                time.sleep(0.4)
+                continue
+            misses += 1
+            if misses >= 2:
+                log(f"{email} — reCAPTCHA click attempts exhausted")
+                break
+            log(f"{email} — reCAPTCHA click attempt {attempt} did not tick — retry")
+            time.sleep(0.3)
+
+        # Failed clicks: do not sit 12s. Solver starts almost immediately.
+        _extra_wait = 1.5 if _rc_result != "passed" else max(pace.get("rc_wait_s", 6), 4)
+        wait_deadline = time.time() + _extra_wait
+        while time.time() < wait_deadline and _rc_result != "passed":
+            driver.switch_to.default_content()
+            if "challenge/recaptcha" not in _live_url(driver):
+                _rc_result = "passed"
+                break
+            if _recaptcha_checkbox_ticked(driver):
+                _rc_result = "passed"
+                break
+            time.sleep(pace.get("rc_poll_s", 0.25))
+
+        if _rc_result == "passed":
+            # Leave only when Google actually drops the recaptcha URL.
+            # The recaptcha URL itself does not contain "identifier", so that
+            # check used to break immediately and the password step ran too early.
+            nav_deadline = time.time() + (5 if pace.get("fast") else 12)
+            while time.time() < nav_deadline:
+                driver.switch_to.default_content()
+                cur = _live_url(driver)
+                if "challenge/recaptcha" not in cur:
+                    break
+                time.sleep(pace.get("rc_poll_s", 0.25))
+            driver.switch_to.default_content()
+            if "challenge/recaptcha" in _live_url(driver):
+                log(f"{email} — still on recaptcha URL after checkbox")
+                _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
+        else:
+            driver.switch_to.default_content()
+            _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
+
+        if _rc_result != "passed":
+            try:
+                driver.switch_to.default_content()
+                if "challenge/recaptcha" not in _live_url(driver):
+                    _rc_result = "passed"
+                    log(f"{email} — left the robot page before the solver")
+            except Exception:
+                pass
+        if (
+            _rc_result != "passed"
+            and _google_error_dialog_open(driver)
+            and not _cdp_challenge_open(driver)
+        ):
+            log(f"{email} — error dialog is not a puzzle, skipping the captcha solver")
+            _rc_result = "timeout"
+        elif _rc_result != "passed":
+            try:
+                from recaptcha_free_solver import run_free_captcha_pipeline
+                from recaptcha_solver import captcha_solver_configured, try_solve_recaptcha_on_page
+
+                if _rc_result in ("image", "timeout", "missed"):
+                    log(f"{email} — free captcha pipeline (audio first, then vision)…")
+                    if run_free_captcha_pipeline(driver, _recaptcha_checkbox_ticked, max_cycles=1):
+                        _rc_result = "passed"
+                        log(f"{email} — free captcha pipeline OK")
+
+                if _rc_result != "passed" and captcha_solver_configured():
+                    log(f"{email} — image/timeout captcha — sending to solver API…")
+                    if try_solve_recaptcha_on_page(driver, proxy_url):
+                        _solve_deadline = time.time() + 35
+                        while time.time() < _solve_deadline:
+                            driver.switch_to.default_content()
+                            if "challenge/recaptcha" not in driver.current_url:
+                                _rc_result = "passed"
+                                break
+                            if _recaptcha_checkbox_ticked(driver):
+                                _rc_result = "passed"
+                                break
+                            time.sleep(0.35)
+            except Exception as _solver_err:
+                log(f"{email} — captcha solver error: {_solver_err}")
+
+    except Exception as _rc_err:
+        log(f"{email} — recaptcha checkbox error: {_rc_err}")
+        _rc_result = "missed"
+    finally:
+        try:
+            driver.switch_to.default_content()
+            if "challenge/recaptcha" not in (driver.current_url or ""):
+                _rc_result = "passed"
+        except Exception:
+            pass
+
+    return _rc_result
 
 
 # ── Phone device profiles — each account gets one assigned randomly ───────────
@@ -1187,10 +2388,166 @@ _RANDOM_TIMEZONES = [
     "America/Denver", "America/Toronto", "America/Vancouver",
     "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Madrid",
     "Europe/Rome", "Europe/Amsterdam", "Europe/Warsaw",
-    "Asia/Calcutta", "Asia/Tokyo", "Asia/Seoul", "Asia/Singapore",
+    "Asia/Kolkata", "Asia/Tokyo", "Asia/Seoul", "Asia/Singapore",
     "Asia/Dubai", "Asia/Bangkok", "Asia/Jakarta", "Asia/Hong_Kong",
     "Australia/Sydney", "Australia/Melbourne",
 ]
+
+def _normalize_timezone(tz: str | None) -> str | None:
+    if not tz:
+        return tz
+    if tz == "Asia/Calcutta":
+        return "Asia/Kolkata"
+    return tz
+
+
+def _proxy_implies_india(proxy_url: str) -> bool:
+    if _proxy_country_hint(proxy_url) == "IN":
+        return True
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(proxy_url).hostname or "").lower()
+        if "localtonet" in host:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _india_geo_fallback(ip: str | None = None) -> dict:
+    return {
+        "timezone": "Asia/Kolkata",
+        "language": "en-IN",
+        "countryCode": "IN",
+        "lat": 28.6139,
+        "lon": 77.2090,
+        "ip": ip,
+        "geoLocked": True,
+        "keyboard": "in",
+    }
+
+
+def _us_geo_fallback(ip: str | None = None) -> dict:
+    tz = random.choice([
+        "America/New_York", "America/Chicago", "America/Los_Angeles",
+        "America/Denver", "America/Phoenix",
+    ])
+    return {
+        "timezone": tz,
+        "language": "en-US",
+        "countryCode": "US",
+        "lat": 40.7128,
+        "lon": -74.0060,
+        "ip": ip,
+        "geoLocked": True,
+        "keyboard": "us",
+    }
+
+
+def _merge_geo_into_fingerprint(fp: dict, geo: dict) -> None:
+    for key in (
+        "timezone", "language", "countryCode", "lat", "lon", "ip",
+        "city", "district", "zip", "region", "country", "continent",
+        "continentCode", "isp", "org", "as", "asname", "reverse",
+        "currency", "offset", "mobile", "proxy", "hosting", "keyboard",
+    ):
+        if geo.get(key) is not None:
+            fp[key] = geo[key]
+    if fp.get("timezone"):
+        fp["timezone"] = _normalize_timezone(fp["timezone"])
+    if geo.get("geoLocked") is not None:
+        fp["geoLocked"] = geo["geoLocked"]
+    elif geo.get("timezone"):
+        fp["geoLocked"] = True
+
+
+def proxy_fetch_exit_ip(proxy_url: str, timeout: int = 15) -> str | None:
+    """Read the proxy's current exit IP (ipify). Works when ip-api via proxy JSON fails."""
+    import requests as req
+    try:
+        _safe_proxy = requests_proxy_url(proxy_url)
+        proxies = {"http": _safe_proxy, "https": _safe_proxy}
+    except Exception as exc:
+        log(f"[geo ipify] proxy URL parse failed: {exc}")
+        return None
+    for url in ("http://api.ipify.org?format=json", "https://api.ipify.org?format=json"):
+        try:
+            r = req.get(url, proxies=proxies, timeout=timeout)
+            data = r.json()
+            ip = (data.get("ip") or "").strip()
+            if ip and ip[0].isdigit():
+                return ip
+        except Exception:
+            continue
+    log("[geo ipify] could not read exit IP through proxy")
+    return None
+
+
+_GEO_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _geo_cache_key(proxy_url: str) -> str:
+    from urllib.parse import urlparse
+    import re as _re_geo
+    parsed = urlparse(proxy_url if "://" in proxy_url else f"http://{proxy_url}")
+    user = _re_geo.sub(r"(?:-session-[A-Za-z0-9]+)+$", "", parsed.username or "")
+    return f"{parsed.hostname}:{parsed.port or 0}:{user}"
+
+
+def _tailscale_proxy(proxy_url: str) -> bool:
+    """Phone proxy on the Tailscale net (100.64.0.0/10). No country tag in the URL."""
+    try:
+        from urllib.parse import urlparse
+        import ipaddress
+        host = (urlparse(proxy_url if "://" in proxy_url else f"http://{proxy_url}").hostname or "")
+        return ipaddress.ip_address(host) in ipaddress.ip_network("100.64.0.0/10")
+    except Exception:
+        return False
+
+
+def _phone_proxy_fast(proxy_url: str | None) -> bool:
+    """LocalToNet / phone exit: skip slow in-proxy geo loops (saves 20–40s per account)."""
+    if not proxy_url:
+        return False
+    mode = os.environ.get("PROXY_PHONE_MODE", "1").strip().lower()
+    if mode in ("0", "false", "no", "off"):
+        return False
+    low = proxy_url.lower()
+    return "localtonet" in low or _proxy_implies_india(proxy_url) or _tailscale_proxy(proxy_url)
+
+
+def _login_fast_mode(proxy_url: str | None) -> bool:
+    """Shorter human-like delays on phone proxy (CHECK_FAST_LOGIN=1 default)."""
+    if not _phone_proxy_fast(proxy_url):
+        return False
+    mode = os.environ.get("CHECK_FAST_LOGIN", "1").strip().lower()
+    return mode not in ("0", "false", "no", "off")
+
+
+def _login_pace(proxy_url: str | None) -> dict:
+    fast = _login_fast_mode(proxy_url)
+    return {
+        "fast": fast,
+        "post_nav": (120, 280) if fast else (600, 1000),
+        "medium": (200, 400) if fast else (700, 1200),
+        "totp_after": (200, 350) if fast else (700, 1200),
+        "totp_clear": (250, 450) if fast else (900, 1400),
+        "signed_in": (80, 160) if fast else (400, 700),
+        "totp_wait_s": 12 if fast else 30,
+        "totp_poll_s": 0.2 if fast else 0.5,
+        "2fa_totp_wait": 1.2 if fast else 18,
+        "skip_logout": fast,
+        "rc_pre_click": (250, 500) if fast else (1200, 2200),
+        "rc_poll_s": 0.2 if fast else 0.4,
+        "rc_wait_s": 6 if fast else 10,
+    }
+
+
+def _geo_cache_ttl() -> int:
+    try:
+        return max(30, min(600, int(os.environ.get("GEO_CACHE_SECONDS", "180"))))
+    except ValueError:
+        return 180
 
 
 def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dict | None:
@@ -1205,6 +2562,13 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
     import requests as req
 
     tag = f"[geo{(' ' + _label) if _label else ''}]"
+
+    if _phone_proxy_fast(proxy_url):
+        _ck = _geo_cache_key(proxy_url)
+        _hit = _GEO_CACHE.get(_ck)
+        if _hit and (time.time() - _hit[0]) < _geo_cache_ttl():
+            log(f"{tag} phone-proxy geo cache hit ({int(time.time() - _hit[0])}s old)")
+            return dict(_hit[1])
 
     # Parse + re-encode proxy URL once — proxy usernames can contain + and other special
     # chars that Python's urllib mis-handles. We parse manually and re-encode each part.
@@ -1221,10 +2585,12 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
                       continent=None, continentCode=None, isp=None, org=None,
                       asn=None, zip_=None, district=None, reverse=None,
                       currency=None, offset=None, mobile=None, proxy_flag=None, hosting=None):
+        cc = cc or "US"
+        tz = _normalize_timezone(tz) or random.choice(_RANDOM_TIMEZONES)
         lg = _COUNTRY_LANG.get(cc, "en-US")
-        log(f"{tag} Got IP {ip} — {city}, {cc} / {isp or org or 'unknown ISP'}")
+        log(f"{tag} Got IP {ip} — {city}, {cc} / {isp or org or 'unknown ISP'} tz={tz} lang={lg}")
         return {
-            "timezone": tz or random.choice(_RANDOM_TIMEZONES),
+            "timezone": tz,
             "language": lg, "countryCode": cc,
             "lat": float(lat or 39.8283), "lon": float(lon or -98.5795),
             "ip": ip, "city": city, "district": district, "zip": zip_,
@@ -1233,9 +2599,45 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
             "isp": isp, "org": org, "as": asn,
             "reverse": reverse, "currency": currency, "offset": offset,
             "mobile": mobile, "proxy": proxy_flag, "hosting": hosting,
+            "keyboard": keyboard_layout_for_language(lg),
         }
 
-    for _attempt in range(1, _retries + 1):
+    # ── Fast path: ipify (through proxy) + ip-api (direct on that IP) ────────
+    # LocalToNet and similar gateways often break long ip-api JSON via proxy;
+    # ipify is reliable and the IP lookup is direct so rotation cannot mismatch.
+    _ipify_ip = proxy_fetch_exit_ip(proxy_url)
+    _live = geo_lookup_ip(_ipify_ip) if _ipify_ip else None
+    if not _ipify_ip:
+        log(f"{tag} [0/3] ipify: no exit IP (proxy auth or network)")
+    elif not _live:
+        log(f"{tag} [0/3] ipify got {_ipify_ip} but direct ip-api lookup failed")
+    if _live:
+        log(f"{tag} [0/3] ipify+ip-api → {_ipify_ip}")
+        _res = _build_result(
+            ip=_live.get("ip") or _ipify_ip,
+            tz=_live.get("timezone"),
+            cc=_live.get("countryCode", "US"),
+            lat=_live.get("lat"),
+            lon=_live.get("lon"),
+            city=_live.get("city"),
+            region=_live.get("region"),
+            country=_live.get("country"),
+            isp=_live.get("isp"),
+            org=_live.get("org"),
+            asn=_live.get("as"),
+            mobile=_live.get("mobile"),
+            proxy_flag=_live.get("proxy"),
+            hosting=_live.get("hosting"),
+        )
+        _store_geo_cache(proxy_url, _res)
+        return _res
+
+    _effective_retries = _retries
+    if _phone_proxy_fast(proxy_url):
+        # Phone tunnels are slow for fat JSON through the proxy; ipify path is enough.
+        _effective_retries = 0
+
+    for _attempt in range(1, _effective_retries + 1):
         # ── Service 1: ip-api.com (HTTP, most comprehensive) ─────────────────
         try:
             log(f"{tag} [1/3] ip-api.com attempt {_attempt}/{_retries}")
@@ -1305,12 +2707,70 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
         except Exception as _e3:
             log(f"{tag} ipinfo.io failed: {_e3}")
 
-        if _attempt < _retries:
-            log(f"{tag} All 3 services failed on attempt {_attempt}/{_retries}, retrying in 3s…")
+        if _attempt < _effective_retries:
+            log(f"{tag} All 3 services failed on attempt {_attempt}/{_effective_retries}, retrying in 3s…")
             _time.sleep(3)
 
-    log(f"{tag} ⚠️ GEO LOCK FAILED after {_retries} attempts (all 3 services) — timezone/language mismatch risk!")
+    if _effective_retries:
+        log(f"{tag} ⚠️ GEO LOCK FAILED after {_effective_retries} attempts (all 3 services) — timezone/language mismatch risk!")
+    _fallback_ip = _ipify_ip or proxy_fetch_exit_ip(proxy_url)
+    _hint = _proxy_country_hint(proxy_url)
+    if _hint == "IN" or _proxy_implies_india(proxy_url):
+        fb = _india_geo_fallback(_fallback_ip)
+        log(f"{tag} Using India locale fallback (proxy/localtonet) ip={_fallback_ip}")
+        _store_geo_cache(proxy_url, fb)
+        return fb
+    if _hint == "US":
+        fb = _us_geo_fallback(_fallback_ip)
+        log(f"{tag} Using US locale fallback ip={_fallback_ip}")
+        return fb
+    if _fallback_ip:
+        _live2 = geo_lookup_ip(_fallback_ip)
+        if _live2:
+            log(f"{tag} Last-chance ip-api on ipify IP {_fallback_ip}")
+            return _build_result(
+                ip=_live2.get("ip") or _fallback_ip,
+                tz=_live2.get("timezone"),
+                cc=_live2.get("countryCode", "US"),
+                lat=_live2.get("lat"),
+                lon=_live2.get("lon"),
+                city=_live2.get("city"),
+                region=_live2.get("region"),
+                country=_live2.get("country"),
+                isp=_live2.get("isp"),
+                org=_live2.get("org"),
+                asn=_live2.get("as"),
+            )
     return None
+
+
+def _store_geo_cache(proxy_url: str, geo: dict | None) -> None:
+    if not geo or not _phone_proxy_fast(proxy_url):
+        return
+    try:
+        _GEO_CACHE[_geo_cache_key(proxy_url)] = (time.time(), dict(geo))
+    except Exception:
+        pass
+
+
+def _sync_fingerprint_geo_from_proxy(fp: dict, proxy: str, fp_path: str | None = None) -> dict:
+    """Always align timezone/language with the proxy exit IP before Chrome starts."""
+    geo = geo_lookup_proxy(proxy, _label="session-preflight", _retries=1)
+    _store_geo_cache(proxy, geo)
+    if geo:
+        _merge_geo_into_fingerprint(fp, geo)
+        fp["keyboard"] = fp.get("keyboard") or keyboard_layout_for_language(fp.get("language") or "en-US")
+    elif _proxy_implies_india(proxy):
+        _merge_geo_into_fingerprint(fp, _india_geo_fallback(proxy_fetch_exit_ip(proxy)))
+    elif _proxy_country_hint(proxy) == "US":
+        _merge_geo_into_fingerprint(fp, _us_geo_fallback(proxy_fetch_exit_ip(proxy)))
+    if fp_path and fp.get("geoLocked"):
+        try:
+            with open(fp_path, "w") as handle:
+                json.dump(fp, handle, indent=2)
+        except Exception:
+            pass
+    return fp
 
 
 def _proxy_country_hint(proxy_url: str) -> str:
@@ -1397,7 +2857,7 @@ def geo_lookup_ip(ip: str) -> dict | None:
         cc = d.get("countryCode") or "US"
         language = _COUNTRY_LANG.get(cc, "en-US")
         return {
-            "timezone": d.get("timezone"),
+            "timezone": _normalize_timezone(d.get("timezone")),
             "language": language,
             "countryCode": cc,
             "lat": float(d.get("lat") or 0),
@@ -1446,14 +2906,32 @@ def apply_keyboard_layout(layout: str, display: str | None = None) -> bool:
 
 def read_browser_exit_ip(driver) -> str | None:
     """Read the IP Chrome itself is using. A separate requests call can rotate."""
+    urls = (
+        "http://api.ipify.org?format=json",
+        "https://api.ipify.org?format=json",
+        "http://ip-api.com/json/?fields=query",
+    )
     try:
         driver.set_page_load_timeout(25)
-        driver.get("https://api.ipify.org?format=json")
-        body = driver.execute_script("return document.body && document.body.innerText || ''") or ""
-        ip = json.loads(body).get("ip")
-        return ip or None
-    except Exception as e:
-        log(f"Chrome exit IP read failed: {e}")
+        last_err: Exception | None = None
+        for target in urls:
+            try:
+                driver.get(target)
+                body = driver.execute_script(
+                    "return document.body && document.body.innerText || ''"
+                ) or ""
+                body = body.strip()
+                if not body:
+                    continue
+                data = json.loads(body)
+                ip = data.get("ip") or data.get("query")
+                if ip:
+                    return str(ip)
+            except Exception as exc:
+                last_err = exc
+                continue
+        if last_err:
+            log(f"Chrome exit IP read failed: {last_err}")
         return None
     finally:
         try:
@@ -1523,6 +3001,10 @@ def get_or_create_fingerprint(
                     f"[fingerprint] Reusing exact Device Check snapshot → "
                     f"{device_snapshot['model']} | canvas={device_snapshot['canvasSeed']}"
                 )
+                if proxy:
+                    device_snapshot = _sync_fingerprint_geo_from_proxy(
+                        device_snapshot, proxy, fp_path
+                    )
                 return device_snapshot
         except (FileNotFoundError, ValueError, OSError):
             pass
@@ -1560,37 +3042,8 @@ def get_or_create_fingerprint(
                     ):
                         existing[key] = selected_profile[key]
                     existing["deviceIndex"] = device_index
-                # Detect proxy country mismatch — user switched from e.g. India proxy
-                # to US proxy but cached fingerprint still has Indian timezone.
-                _hint   = _proxy_country_hint(proxy) if proxy else ""
-                _cached = existing.get("countryCode", "")
-                _country_mismatch = bool(_hint and _cached and _hint != _cached)
-                if _country_mismatch:
-                    log(f"[fingerprint] Proxy country hint ({_hint}) ≠ cached countryCode ({_cached}) — forcing geo re-lock")
-
-                # If proxy is provided and geo hasn't been locked yet — OR geo was locked
-                # but ip field is missing (old fingerprint from before Session 29) —
-                # OR proxy country changed → re-lock now
-                _needs_geo = proxy and (
-                    not existing.get("geoLocked")
-                    or (existing.get("geoLocked") and not existing.get("ip"))
-                    or _country_mismatch
-                )
-                if _needs_geo:
-                    geo = geo_lookup_proxy(proxy, _label="fingerprint-update")
-                    if geo:
-                        existing["timezone"]    = geo["timezone"]
-                        existing["language"]    = geo["language"]
-                        existing["countryCode"] = geo["countryCode"]
-                        existing["geoLocked"]   = True
-                        for _k in ("ip","city","district","zip","region","country","continent","continentCode","isp","org","as","asname","reverse","currency","offset","mobile","proxy","hosting"):
-                            if geo.get(_k) is not None:
-                                existing[_k] = geo[_k]
-                        try:
-                            with open(fp_path, "w") as f:
-                                json.dump(existing, f, indent=2)
-                        except Exception:
-                            pass
+                if proxy:
+                    existing = _sync_fingerprint_geo_from_proxy(existing, proxy, fp_path)
                 if reuse_device_snapshot:
                     _remember_shared_fingerprint(existing, device_index)
                 return existing
@@ -1603,7 +3056,9 @@ def get_or_create_fingerprint(
     fp["audioNoise"]  = round(random.uniform(0.00001, 0.00009), 7)  # unique audio shift
     # Timezone + language — from proxy exit IP if available, else random
     if proxy:
-        geo = geo_lookup_proxy(proxy)
+        log("[geo] preflight v2 (ipify-first, localtonet India fallback)")
+        geo = geo_lookup_proxy(proxy, _label="new-profile", _retries=1)
+        _store_geo_cache(proxy, geo)
     else:
         geo = None
     if geo:
@@ -1620,20 +3075,15 @@ def get_or_create_fingerprint(
         fp["geoLocked"] = False
         fp["lat"]       = 37.7749   # San Francisco fallback
         fp["lon"]       = -122.4194
-        # Session 46: If proxy has a US country hint, restrict fallback to US timezones
-        # so geo-lock failures don't produce obviously wrong non-American timestamps.
         _hint_cc = _proxy_country_hint(proxy) if proxy else ""
         if _hint_cc == "US":
-            fp["timezone"] = random.choice([
-                "America/New_York", "America/Chicago", "America/Los_Angeles",
-                "America/Denver", "America/Phoenix", "America/Anchorage",
-                "America/Toronto", "America/Vancouver",
-            ])
-            fp["language"] = random.choice(["en-US", "en-US", "en-US", "en-CA"])
+            _merge_geo_into_fingerprint(fp, _us_geo_fallback(None))
+        elif _proxy_implies_india(proxy):
+            _merge_geo_into_fingerprint(fp, _india_geo_fallback(None))
         else:
             fp["timezone"] = random.choice(_RANDOM_TIMEZONES)
             fp["language"] = random.choice([
-                "en-US", "en-US", "en-US", "en-US",  # weighted — most users are en-US
+                "en-US", "en-US", "en-US", "en-US",
                 "en-GB", "en-CA", "en-AU", "en-IN",
             ])
     # Timezone + language come from geo_lookup_proxy (if proxy provided) or random fallback above.
@@ -2926,6 +4376,20 @@ def get_chrome_version(chrome_path: str | None) -> str | None:
         return None
 
 
+def _proxy_host_prefer_ipv4(hostname: str) -> str:
+    """VPS often has no IPv6 route; LocalToNet AAAA breaks requests otherwise."""
+    if not hostname or "localtonet" not in hostname.lower():
+        return hostname
+    try:
+        import socket
+        infos = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM)
+        if infos:
+            return infos[0][4][0]
+    except Exception:
+        pass
+    return hostname
+
+
 def requests_proxy_url(proxy_url: str) -> str:
     """Proxy URL safe for requests/urllib3.
 
@@ -2934,7 +4398,7 @@ def requests_proxy_url(proxy_url: str) -> str:
     """
     from urllib.parse import urlparse, quote
     parsed = urlparse(proxy_url)
-    host = parsed.hostname or ""
+    host = _proxy_host_prefer_ipv4(parsed.hostname or "")
     port = parsed.port or 80
     user = quote(parsed.username or "", safe="")
     password = quote(parsed.password or "", safe="")
@@ -3149,6 +4613,8 @@ def main():
     proxy_for_ip_check = data.get("proxyForIpCheck") or proxy  # original URL without sticky suffix
     fresh_profile     = bool(data.get("freshProfile", False))
     change_password   = bool(data.get("changePasswordAfterLogin", False))
+    sign_out_sessions = bool(data.get("signOutSessions", False))
+    robot_check_only  = bool(data.get("robotCheckOnly", False))
     raw_device_index  = data.get("deviceIndex")
     device_index      = (
         int(raw_device_index)
@@ -3157,9 +4623,11 @@ def main():
     )
 
     _t0 = time.time()
+    threading.Thread(target=_preload_whisper_bg, daemon=True).start()
     result = check_gmail(
         email, password, totp_secret, proxy, fresh_profile,
         proxy_for_ip_check, device_index, change_password,
+        sign_out_sessions, robot_check_only,
     )
 
     # Auto-retry up to 3 times if Google blocked automation detection.
@@ -3174,6 +4642,8 @@ def main():
         """
         if not proxy_url or "@" not in proxy_url:
             return proxy_url
+        if "localtonet" in proxy_url.lower():
+            return _proxy_without_unsupported_sticky(proxy_url)
         new_id = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=8))
         matched = _re.match(r'^(https?://)([^:@]+)(.*)$', proxy_url)
         if not matched:
@@ -3211,6 +4681,11 @@ def main():
     result["category"] = browser_result_category(result)
     result["durationMs"] = int((time.time() - _t0) * 1000)
     log(f"{email} — Total duration: {result['durationMs']}ms ({result['durationMs']//1000}s)")
+    if result["durationMs"] >= 45000:
+        log(
+            f"{email} — Slow check tip: sign-in nav + LocalToNet proxy dominate; "
+            "google.com warmup stays on so the checkbox is not a cold profile"
+        )
     print(json.dumps(result), flush=True)
 
 
@@ -3359,6 +4834,61 @@ def _ensure_chromedriver_patched(version_main: int | None = None) -> None:
             log(f"[patch] chrome major stamp skipped: {_stamp_err}")
 
 
+def _proxy_without_unsupported_sticky(proxy_url: str | None) -> str | None:
+    """LocalToNet returns 407 when the username gains a ProxyScrape -session- id.
+
+    Chrome and geo lookups must use the saved username exactly. Other gateways
+    keep their sticky session token.
+    """
+    if not proxy_url or "localtonet" not in proxy_url.lower():
+        return proxy_url
+    import re as _re_sticky
+    matched = _re_sticky.match(r'^(https?://)([^:@]+)(.*)$', proxy_url)
+    if not matched:
+        return proxy_url
+    scheme, user, rest = matched.group(1), matched.group(2), matched.group(3)
+    cleaned = _re_sticky.sub(r'(?:-session-[A-Za-z0-9]+)+$', '', user)
+    if cleaned == user:
+        return proxy_url
+    log("LocalToNet proxy — removed -session- suffix (that username gets HTTP 407)")
+    return f"{scheme}{cleaned}{rest}"
+
+
+def _compact_screenshot(driver) -> str | None:
+    """Small JPEG so a full step strip still fits in the job result."""
+    try:
+        png = driver.get_screenshot_as_png()
+    except Exception:
+        return None
+    try:
+        import io as _io
+        from PIL import Image
+
+        im = Image.open(_io.BytesIO(png)).convert("RGB")
+        if im.width > 420:
+            im = im.resize((420, max(1, int(im.height * 420 / im.width))), Image.Resampling.LANCZOS)
+        buf = _io.BytesIO()
+        im.save(buf, format="JPEG", quality=40, optimize=True)
+        raw = buf.getvalue()
+    except Exception:
+        raw = png
+    return "data:image/jpeg;base64," + base64.b64encode(raw).decode()
+
+
+def capture_step(driver, label: str) -> None:
+    shots = getattr(driver, "_step_shots", None)
+    if not isinstance(shots, list) or len(shots) >= 18:
+        return
+    image = _compact_screenshot(driver)
+    if not image:
+        return
+    shots.append({"label": label, "image": image})
+    b64 = image.split(",", 1)[1] if "," in image else image
+    safe = label.replace("\t", " ").replace("\n", " ")
+    print(f"STEP_SHOT\t{safe}\t{b64}", file=sys.stderr, flush=True)
+    log(f"step shot: {label}")
+
+
 def check_gmail(
     email: str,
     password: str,
@@ -3368,8 +4898,13 @@ def check_gmail(
     proxy_for_ip_check: str | None = None,
     device_index: int | None = None,
     change_password_after_login: bool = False,
+    sign_out_sessions: bool = False,
+    robot_check_only: bool = False,
 ) -> dict:
     totp_code = generate_totp(totp_secret) if totp_secret else None
+    proxy = _proxy_without_unsupported_sticky(proxy)
+    proxy_for_ip_check = _proxy_without_unsupported_sticky(proxy_for_ip_check) or proxy
+    geo_proxy = proxy_for_ip_check or proxy
 
     try:
         import undetected_chromedriver as uc
@@ -3397,31 +4932,69 @@ def check_gmail(
 
     # Profile directory — wiped on fresh_profile=True so Google sees a brand-new device
     safe_email = email.replace("@", "_at_").replace(".", "_")
-    profile_dir = os.path.join(tempfile.gettempdir(), "gmail_checker_profiles", safe_email)
+    profile_base = os.path.join(tempfile.gettempdir(), "gmail_checker_profiles", safe_email)
 
-    if fresh_profile and os.path.exists(profile_dir):
+    def _profile_dir_writable(path: str) -> bool:
+        try:
+            os.makedirs(path, exist_ok=True)
+            probe = os.path.join(path, ".write_probe")
+            with open(probe, "w", encoding="utf-8") as fh:
+                fh.write("1")
+            os.remove(probe)
+            return True
+        except OSError:
+            return False
+
+    profile_dir = profile_base
+    if fresh_profile and os.path.exists(profile_base):
         import shutil
         try:
-            shutil.rmtree(profile_dir)
-            log(f"Fresh profile mode — wiped {profile_dir}")
+            shutil.rmtree(profile_base)
+            log(f"Fresh profile mode — wiped {profile_base}")
         except Exception as e:
             log(f"Warning: could not wipe profile dir: {e}")
 
-    os.makedirs(profile_dir, exist_ok=True)
+    if not _profile_dir_writable(profile_dir):
+        profile_dir = f"{profile_base}_run_{secrets.token_hex(4)}"
+        os.makedirs(profile_dir, exist_ok=True)
+        log(f"Profile not writable at {profile_base} — using {profile_dir}")
+    else:
+        os.makedirs(profile_dir, exist_ok=True)
 
     log(f"Chrome profile: {profile_dir} (fresh={fresh_profile})")
 
     # ── Load or generate unique fingerprint (fresh_profile → always new) ──────
     fp = get_or_create_fingerprint(
         profile_dir,
-        proxy=proxy,
+        proxy=geo_proxy,
         device_index=device_index,
         reuse_device_snapshot=not fresh_profile,
     )
+    if geo_proxy and not fp.get("geoLocked"):
+        fp = _sync_fingerprint_geo_from_proxy(
+            fp, geo_proxy, os.path.join(profile_dir, "fingerprint.json")
+        )
     if chrome_version_full:
         # Keep the emulated Android UA/client hints aligned with the actual
         # Chrome binary used by undetected-chromedriver.
         fp["chromeVersion"] = chrome_version_full
+    # A real new phone passes the checkbox because the browser matches the device.
+    # This host is Linux Chrome. Claiming a Pixel (Android UA, touch, Mali GPU)
+    # while the TLS fingerprint stays Linux is what makes Google open the puzzle.
+    consistent_browser = os.environ.get("CONSISTENT_BROWSER", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+    if consistent_browser:
+        fp["screenW"] = 1366
+        fp["screenH"] = 768
+        fp["availH"] = 728
+        fp["dpr"] = 1
+        fp["platform"] = "Linux x86_64"
+        fp["maxTouchPoints"] = 0
+        log(
+            "CONSISTENT_BROWSER — real Linux Chrome, fake Android off. "
+            "Phone model stays in the profile only; the sign-in browser matches this machine."
+        )
     fp_summary = (f"{fp['model']} | {fp['webglRenderer']} | "
                   f"{fp['screenW']}x{fp['screenH']} dpr={fp['dpr']} | canvas={fp['canvasSeed']}")
     geo_info = (f"tz={fp.get('timezone','?')} lang={fp.get('language','?')} "
@@ -3435,6 +5008,8 @@ def check_gmail(
     )
 
     options = uc.ChromeOptions()
+    # Return after DOMContentLoaded — full load through phone proxy can cost 20–40s.
+    options.page_load_strategy = "eager"
     options.add_argument(f"--user-data-dir={profile_dir}")
     # TCP forwarder replaces MV2 extension — Chrome for Testing 151 crashes when
     # an MV2 extension is loaded under Xvfb.  A local socketserver proxy has no
@@ -3481,15 +5056,13 @@ def check_gmail(
     # Do not pass the usual Selenium flag bundle (--disable-component-update,
     # --disable-default-apps, --disable-background-networking, etc.). Google's
     # sign-in page treats that set as an insecure/automated browser.
-    options.add_argument(f"--user-agent={MOBILE_UA}")
-    options.add_argument("--touch-events=enabled")
+    if not consistent_browser:
+        options.add_argument(f"--user-agent={MOBILE_UA}")
+        options.add_argument("--touch-events=enabled")
+        options.add_argument(f"--force-device-memory={fp['deviceMemory']}")
     # DPR comes from Emulation.setDeviceMetricsOverride only. Combining it with
     # --force-device-scale-factor double-scales innerWidth vs outerWidth, which
     # fingerprint.com scores as Developer Tools + Tampering.
-    # Chrome 151 removed Emulation.setDeviceMemoryOverride CDP command.
-    # Use the Chrome flag instead so navigator.deviceMemory reports the correct
-    # spoofed value (instead of undefined which is a strong automation signal).
-    options.add_argument(f"--force-device-memory={fp['deviceMemory']}")
     # VM detection fix: SwiftShader renders via GPU-like pipeline instead of --disable-gpu
     # which exposes software rendering signals. These flags make WebGL work and match
     # what real Android Chrome reports (device_check.py uses the same set).
@@ -3509,11 +5082,18 @@ def check_gmail(
 
     log(f"Launching Chrome (UC)…")
 
-    # ── Start private Xvfb display OUTSIDE the Chrome lock ─────────────────
-    # A separate short-lived display-allocation lock ensures no two accounts
-    # pick the same Xvfb display number.  The 0.5s Xvfb startup wait happens
-    # OUTSIDE the Chrome lock, so all accounts can initialise their displays
-    # in parallel rather than one at a time.
+    # ── Session slot FIRST — only one Chrome login at a time (OOM guard) ───
+    # Must be before Xvfb so a queued account does not start a display then hang.
+    _session_lock_fd = open(_CHROME_SESSION_LOCK_PATH, "w")
+    _flock_exclusive_wait(
+        _session_lock_fd,
+        log,
+        label="Waiting for Chrome session slot (OOM guard)",
+    )
+    _write_session_holder_pid(os.getpid())
+    log("Chrome session slot acquired")
+
+    # ── Private Xvfb display (short display-allocation lock) ───────────────
     _DISPLAY_ALLOC_LOCK = "/tmp/gmail_checker_display_alloc.lock"
     _xvfb_proc = None
     _disp_num = 99
@@ -3535,23 +5115,12 @@ def check_gmail(
     finally:
         fcntl.flock(_disp_lock_fd, fcntl.LOCK_UN)
         _disp_lock_fd.close()
-    time.sleep(0.5)  # Xvfb startup wait — runs in parallel while other accounts wait for Chrome lock
+    time.sleep(0.25 if _phone_proxy_fast(proxy) else 0.5)  # Xvfb startup wait
 
-    # ── Step B.5: Chrome session slot — held for ENTIRE login session ────────
-    # Prevents OOM kill: only ONE full Chrome instance runs at a time.
-    # Other concurrent accounts queue here and start after current one finishes.
-    _session_lock_fd = open(_CHROME_SESSION_LOCK_PATH, "w")
-    log("Waiting for Chrome session slot (OOM guard)…")
-    fcntl.flock(_session_lock_fd, fcntl.LOCK_EX)
-    log("Chrome session slot acquired")
-
-    # ── Step C: Chrome launch lock — now only covers the fast Chrome start ──
-    # With chromedriver pre-patched and Xvfb already running, this lock holds
-    # for only ~2-4s (Chrome process start + brief CDP settle) instead of ~13s.
+    # ── Chrome launch lock — serializes chromedriver bind (~2–4s) ───────────
     _lock_fd = open(_CHROME_LAUNCH_LOCK_PATH, "w")
-    log("Waiting for Chrome launch slot…")
-    fcntl.flock(_lock_fd, fcntl.LOCK_EX)
-    log("Chrome launch slot acquired — starting Chrome")
+    _flock_exclusive_wait(_lock_fd, log, label="Waiting for Chrome launch slot")
+    log("Chrome launch slot acquired — starting Chrome (LocalToNet slow ho to 30–60s lag sakta hai)")
     _cd_port = _find_free_port()
     log(f"ChromeDriver port: {_cd_port}")
     try:
@@ -3571,15 +5140,19 @@ def check_gmail(
         _active_driver = driver
         _active_xvfb   = _xvfb_proc
         _active_locks  = [_session_lock_fd]
+        driver._step_shots = []
+        driver.capture_step = lambda label: capture_step(driver, label)
         # Reduced from 2.5s → 1.0s: Chrome process is already running, just
         # letting CDP settle.  Lock is released sooner so next account can start.
-        time.sleep(1.0)
+        time.sleep(0.35 if _phone_proxy_fast(proxy) else 1.0)
     except Exception as e:
         fcntl.flock(_lock_fd, fcntl.LOCK_UN)
         _lock_fd.close()
         try:
             fcntl.flock(_session_lock_fd, fcntl.LOCK_UN)
             _session_lock_fd.close()
+            if _read_session_holder_pid() == os.getpid():
+                _clear_session_holder_pid()
         except Exception:
             pass
         _cleanup(None, _xvfb_proc)
@@ -3601,20 +5174,55 @@ def check_gmail(
 
     log("Chrome launched")
 
+    _phone_fast = _phone_proxy_fast(proxy or geo_proxy)
+
     # Locale follows the IP Chrome is actually using, not the preflight request.
-    # A rotating gateway can hand those two calls different exits.
-    exit_ip = read_browser_exit_ip(driver)
-    if exit_ip:
-        lock_fingerprint_to_exit_ip(fp, exit_ip)
-        apply_keyboard_layout(fp.get("keyboard") or "us", os.environ.get("DISPLAY"))
-        try:
-            with open(os.path.join(profile_dir, "fingerprint.json"), "w") as _locale_fp:
-                json.dump(fp, _locale_fp, indent=2)
-        except Exception as _locale_save_err:
-            log(f"Locale fingerprint save skipped: {_locale_save_err}")
+    # Phone/LocalToNet: preflight already locked geo + IP — skip 3–8s ipify tab loads.
+    if _phone_fast and fp.get("geoLocked") and fp.get("ip"):
+        exit_ip = str(fp["ip"])
+        if not fp.get("keyboard"):
+            fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-IN")
+        apply_keyboard_layout(fp.get("keyboard") or "in", os.environ.get("DISPLAY"))
+        log(
+            f"LOCALE_LOCK ip={exit_ip} tz={fp.get('timezone')} lang={fp.get('language')} "
+            f"keyboard={fp.get('keyboard')} cc={fp.get('countryCode')} (preflight, skipped ipify)"
+        )
     else:
-        fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-US")
-        log("Chrome exit IP unread — keeping the preflight locale")
+        exit_ip = read_browser_exit_ip(driver)
+        if exit_ip:
+            lock_fingerprint_to_exit_ip(fp, exit_ip)
+            apply_keyboard_layout(fp.get("keyboard") or "us", os.environ.get("DISPLAY"))
+            try:
+                with open(os.path.join(profile_dir, "fingerprint.json"), "w") as _locale_fp:
+                    json.dump(fp, _locale_fp, indent=2)
+            except Exception as _locale_save_err:
+                log(f"Locale fingerprint save skipped: {_locale_save_err}")
+        else:
+            _pre_ip = proxy_fetch_exit_ip(proxy) if proxy else None
+            if _pre_ip:
+                lock_fingerprint_to_exit_ip(fp, _pre_ip)
+                apply_keyboard_layout(fp.get("keyboard") or "us", os.environ.get("DISPLAY"))
+                try:
+                    driver.execute_cdp_cmd("Emulation.setTimezoneOverride",
+                                           {"timezoneId": fp.get("timezone", "Asia/Kolkata")})
+                    driver.execute_cdp_cmd("Emulation.setLocaleOverride",
+                                           {"locale": fp.get("language", "en-IN")})
+                    log(f"Chrome exit IP unread — applied ipify locale → {fp.get('timezone')} / {fp.get('language')}")
+                except Exception as _ipify_cdp:
+                    log(f"Chrome exit IP unread — ipify locale CDP skipped: {_ipify_cdp}")
+            elif proxy and _proxy_implies_india(proxy):
+                _merge_geo_into_fingerprint(fp, _india_geo_fallback(None))
+                fp["keyboard"] = "in"
+                apply_keyboard_layout("in", os.environ.get("DISPLAY"))
+                try:
+                    driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": "Asia/Kolkata"})
+                    driver.execute_cdp_cmd("Emulation.setLocaleOverride", {"locale": "en-IN"})
+                except Exception:
+                    pass
+                log("Chrome exit IP unread — LocalToNet India fallback applied")
+            else:
+                fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-US")
+                log("Chrome exit IP unread — keeping the preflight locale")
     if fresh_profile:
         log(
             f"FRESH_DEVICE canvas={fp.get('canvasSeed')} profile={profile_dir} "
@@ -3646,99 +5254,105 @@ def check_gmail(
     except Exception as e:
         log(f"CDP timezone/locale warning (non-fatal): {e}")
 
-    # VM detection fix: override hardware concurrency at the CDP level so it matches
-    # the JS patch. Without this CDP override, browser internals still report real
-    # Replit VM thread count (16-32) which fingerprinters detect via timing attacks.
-    try:
-        driver.execute_cdp_cmd("Emulation.setHardwareConcurrencyOverride",
-                               {"hardwareConcurrency": fp["hwConcurrency"]})
-        log(f"CDP hwConcurrency set → {fp['hwConcurrency']}")
-    except Exception as e:
-        log(f"CDP hwConcurrency warning (non-fatal): {e}")
+    if consistent_browser:
+        log("CDP phone emulation skipped — real Chrome UA, window, and touch")
+    else:
+        # VM detection fix: override hardware concurrency at the CDP level so it matches
+        # the JS patch. Without this CDP override, browser internals still report real
+        # Replit VM thread count (16-32) which fingerprinters detect via timing attacks.
+        try:
+            driver.execute_cdp_cmd("Emulation.setHardwareConcurrencyOverride",
+                                   {"hardwareConcurrency": fp["hwConcurrency"]})
+            log(f"CDP hwConcurrency set → {fp['hwConcurrency']}")
+        except Exception as e:
+            log(f"CDP hwConcurrency warning (non-fatal): {e}")
 
-    # Touch BEFORE device metrics so the viewport is a phone, not a desktop
-    # window with a mobile UA (Google rejects that mix as an insecure browser).
-    try:
-        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
-            "enabled":        True,
-            "maxTouchPoints": fp["maxTouchPoints"],
-            "configuration":  "mobile",
-        })
-        log(f"CDP touch emulation set → maxTouchPoints={fp['maxTouchPoints']}")
-    except Exception as e:
-        log(f"CDP touch emulation warning (non-fatal): {e}")
+        # Touch BEFORE device metrics so the viewport is a phone, not a desktop
+        # window with a mobile UA (Google rejects that mix as an insecure browser).
+        try:
+            driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
+                "enabled":        True,
+                "maxTouchPoints": fp["maxTouchPoints"],
+                "configuration":  "mobile",
+            })
+            log(f"CDP touch emulation set → maxTouchPoints={fp['maxTouchPoints']}")
+        except Exception as e:
+            log(f"CDP touch emulation warning (non-fatal): {e}")
 
-    # Viewport height is the usable screen (availH), not the full panel height.
-    # Using screenH here makes innerHeight larger than a real phone and is scored
-    # as DevTools / tampering.
-    _view_h = int(fp.get("availH") or fp["screenH"])
-    try:
-        driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
-            "width":             fp["screenW"],
-            "height":            _view_h,
-            "deviceScaleFactor": fp["dpr"],
-            "mobile":            True,
-            "hasTouch":          True,
-            "screenWidth":       fp["screenW"],
-            "screenHeight":      fp["screenH"],
-        })
-        log(f"CDP deviceMetrics set → {fp['screenW']}x{_view_h} dpr={fp['dpr']}")
-    except Exception as e:
-        log(f"CDP deviceMetrics warning (non-fatal): {e}")
+        # Viewport height is the usable screen (availH), not the full panel height.
+        # Using screenH here makes innerHeight larger than a real phone and is scored
+        # as DevTools / tampering.
+        _view_h = int(fp.get("availH") or fp["screenH"])
+        try:
+            driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                "width":             fp["screenW"],
+                "height":            _view_h,
+                "deviceScaleFactor": fp["dpr"],
+                "mobile":            True,
+                "hasTouch":          True,
+                "screenWidth":       fp["screenW"],
+                "screenHeight":      fp["screenH"],
+            })
+            log(f"CDP deviceMetrics set → {fp['screenW']}x{_view_h} dpr={fp['dpr']}")
+        except Exception as e:
+            log(f"CDP deviceMetrics warning (non-fatal): {e}")
 
-    # deviceMemory override at C++ level — the JS prototype patch alone can be
-    # bypassed by fingerprint.com reading the CDP-reported value directly.
-    try:
-        driver.execute_cdp_cmd("Emulation.setDeviceMemoryOverride",
-                               {"memory": fp["deviceMemory"]})
-        log(f"CDP deviceMemory set → {fp['deviceMemory']} GiB")
-    except Exception as e:
-        log(f"CDP deviceMemory skipped: {str(e).splitlines()[0][:160]}")
+        # deviceMemory override at C++ level — the JS prototype patch alone can be
+        # bypassed by fingerprint.com reading the CDP-reported value directly.
+        try:
+            driver.execute_cdp_cmd("Emulation.setDeviceMemoryOverride",
+                                   {"memory": fp["deviceMemory"]})
+            log(f"CDP deviceMemory set → {fp['deviceMemory']} GiB")
+        except Exception as e:
+            log(f"CDP deviceMemory skipped: {str(e).splitlines()[0][:160]}")
 
-    # VM detection fix: Emulation.setUserAgentOverride sets navigator.userAgent and
-    # navigator.platform at the CDP emulation layer — deeper than Network.setUserAgentOverride.
-    # fingerprint.com compares the CDP-emulation-reported platform against the JS-reported
-    # platform; both must agree on "Linux armv8l" to avoid a VM mismatch signal.
-    # CRITICAL: Must include userAgentMetadata here too — calling Emulation.setUserAgentOverride
-    # WITHOUT userAgentMetadata causes Chrome 151 to clear navigator.userAgentData.brands to [],
-    # mobile to false, and platform to '' — a major Tampering signal that overrides both
-    # Network.setUserAgentOverride metadata AND our JS-level Navigator.prototype.userAgentData fix.
-    try:
-        driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
-            "userAgent":      MOBILE_UA,
-            "acceptLanguage": f"{fp['language']},en;q=0.9",
-            "platform":       fp["platform"],
-            "userAgentMetadata": {
-                "brands": [
-                    {"brand": "Not(A;Brand",   "version": "8"},
-                    {"brand": "Chromium",      "version": fp["chromeVersion"].split(".")[0]},
-                    {"brand": "Google Chrome", "version": fp["chromeVersion"].split(".")[0]},
-                ],
-                "fullVersionList": [
-                    {"brand": "Not(A;Brand",   "version": "8.0.0.0"},
-                    {"brand": "Chromium",      "version": fp["chromeVersion"]},
-                    {"brand": "Google Chrome", "version": fp["chromeVersion"]},
-                ],
-                "fullVersion": fp["chromeVersion"],
-                "platform": "Android",
-                "platformVersion": str(fp["androidVersion"]) + ".0.0",
-                "architecture": "",
-                "model": fp["model"],
-                "mobile": True,
-                "bitness": "",
-                "wow64": False,
-                "formFactors": ["Mobile"],
-            },
-        })
-        log(f"CDP Emulation UA override set → platform={fp['platform']} (with userAgentMetadata)")
-    except Exception as e:
-        log(f"CDP Emulation UA override warning (non-fatal): {e}")
+        # VM detection fix: Emulation.setUserAgentOverride sets navigator.userAgent and
+        # navigator.platform at the CDP emulation layer — deeper than Network.setUserAgentOverride.
+        # fingerprint.com compares the CDP-emulation-reported platform against the JS-reported
+        # platform; both must agree on "Linux armv8l" to avoid a VM mismatch signal.
+        # CRITICAL: Must include userAgentMetadata here too — calling Emulation.setUserAgentOverride
+        # WITHOUT userAgentMetadata causes Chrome 151 to clear navigator.userAgentData.brands to [],
+        # mobile to false, and platform to '' — a major Tampering signal that overrides both
+        # Network.setUserAgentOverride metadata AND our JS-level Navigator.prototype.userAgentData fix.
+        try:
+            driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
+                "userAgent":      MOBILE_UA,
+                "acceptLanguage": f"{fp['language']},en;q=0.9",
+                "platform":       fp["platform"],
+                "userAgentMetadata": {
+                    "brands": [
+                        {"brand": "Not(A;Brand",   "version": "8"},
+                        {"brand": "Chromium",      "version": fp["chromeVersion"].split(".")[0]},
+                        {"brand": "Google Chrome", "version": fp["chromeVersion"].split(".")[0]},
+                    ],
+                    "fullVersionList": [
+                        {"brand": "Not(A;Brand",   "version": "8.0.0.0"},
+                        {"brand": "Chromium",      "version": fp["chromeVersion"]},
+                        {"brand": "Google Chrome", "version": fp["chromeVersion"]},
+                    ],
+                    "fullVersion": fp["chromeVersion"],
+                    "platform": "Android",
+                    "platformVersion": str(fp["androidVersion"]) + ".0.0",
+                    "architecture": "",
+                    "model": fp["model"],
+                    "mobile": True,
+                    "bitness": "",
+                    "wow64": False,
+                    "formFactors": ["Mobile"],
+                },
+            })
+            log(f"CDP Emulation UA override set → platform={fp['platform']} (with userAgentMetadata)")
+        except Exception as e:
+            log(f"CDP Emulation UA override warning (non-fatal): {e}")
 
     _login_result: dict = {}
     try:
         _login_result = _do_login(
             driver, email, password, totp_code, totp_secret, fresh_profile,
             change_password_after_login,
+            sign_out_sessions,
+            robot_check_only,
+            proxy_url=proxy_for_ip_check or proxy,
         )
 
         # ── Post-login geo fallback (driver still open here!) ──────────────────
@@ -3780,6 +5394,13 @@ def check_gmail(
         _login_result = {"status": "unknown", "reason": f"Login error: {str(e)[:300]}", "totpCode": totp_code}
     finally:
         try:
+            capture_step(driver, "Last page")
+        except Exception:
+            pass
+        shots = getattr(driver, "_step_shots", None)
+        if isinstance(_login_result, dict) and isinstance(shots, list) and shots:
+            _login_result["stepScreenshots"] = list(shots)
+        try:
             driver.quit()
         except Exception:
             pass
@@ -3793,6 +5414,8 @@ def check_gmail(
         try:
             fcntl.flock(_session_lock_fd, fcntl.LOCK_UN)
             _session_lock_fd.close()
+            if _read_session_holder_pid() == os.getpid():
+                _clear_session_holder_pid()
             log("Chrome session slot released")
         except Exception:
             pass
@@ -3852,9 +5475,42 @@ def _do_login(
     totp_secret: str | None = None,
     fresh_profile: bool = False,
     change_password_after_login: bool = False,
+    sign_out_sessions: bool = False,
+    robot_check_only: bool = False,
+    proxy_url: str | None = None,
 ) -> dict:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
+
+    _login_t0 = time.time()
+    _password_change_started = False
+    _device_logout_started = False
+    _timing_marks: list[tuple[str, int]] = []
+
+    def tmark(label: str) -> None:
+        ms = int((time.time() - _login_t0) * 1000)
+        _timing_marks.append((label, ms))
+        log(f"[timing +{ms}ms] {label}")
+
+    def _log_login_timing_summary() -> None:
+        if len(_timing_marks) < 2:
+            return
+        parts = []
+        prev = 0
+        for label, ms in _timing_marks:
+            parts.append(f"{label}={ms - prev}ms")
+            prev = ms
+        log(f"[timing summary login] " + " | ".join(parts))
+
+    _pace = _login_pace(proxy_url)
+    _phone_fast = _pace["fast"]
+    _post_nav_sleep = _pace["post_nav"]
+    # A new phone opens Google once before the sign-in form and already has
+    # cookies. A cold profile that lands straight on the email page is what
+    # makes the checkbox open a puzzle. PHONE_WARMUP=0 turns this off.
+    _use_warmup = os.environ.get("PHONE_WARMUP", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
 
     # One TOTP code per 30s window — reuse across multiple prompts in the same window.
     _totp_cache: dict = {
@@ -3864,7 +5520,9 @@ def _do_login(
     }
 
     def page_state():
-        url = driver.current_url
+        # current_url waits for onload. On this proxy that sat 8–10s after the
+        # next page was already on screen.
+        url = _live_url(driver)
         try:
             text = driver.find_element(By.TAG_NAME, "body").text.lower()
         except Exception:
@@ -3872,10 +5530,15 @@ def _do_login(
         return url, text
 
     def screenshot_b64() -> str | None:
-        try:
-            return f"data:image/jpeg;base64,{base64.b64encode(driver.get_screenshot_as_png()).decode()}"
-        except Exception:
-            return None
+        return _compact_screenshot(driver)
+
+    def snap(label: str) -> None:
+        fn = getattr(driver, "capture_step", None)
+        if callable(fn):
+            try:
+                fn(label)
+            except Exception:
+                pass
 
     def get_hostname(url: str) -> str:
         """Return the actual hostname from the URL (not query string)."""
@@ -3886,6 +5549,7 @@ def _do_login(
             return ""
 
     def classify(url: str, text: str) -> dict | None:
+        nonlocal _device_logout_started
         host = get_hostname(url)
         # Password-settings page after sign-in — demo mode fills it elsewhere.
         if (
@@ -3903,20 +5567,32 @@ def _do_login(
                 "debugScreenshot": shot,
             }
         if host == "myaccount.google.com" and is_google_password_change_url(url):
+            changed = finish_demo_password_change(url)
+            if changed:
+                return changed
             return None
 
         # Signed-in Google Account home is the success page. The inbox is not required.
         if signed_in_host(url):
-            rand_sleep(400, 700)
+            changed = finish_demo_password_change(url)
+            if changed:
+                return changed
+            if sign_out_sessions and not robot_check_only and not _device_logout_started:
+                _device_logout_started = True
+                log(f"{email} — Device logout: signing out the other sessions")
+                return run_device_activity_signouts(password)
+            rand_sleep(*_pace["signed_in"])
             shot = screenshot_b64()
             log("Google account home loaded — login successful")
-            if fresh_profile:
+            if fresh_profile and not _pace["skip_logout"]:
                 try:
                     log("Logging out (fresh profile mode)")
                     driver.get("https://accounts.google.com/Logout?continue=https://myaccount.google.com/")
-                    rand_sleep(700, 1200)
+                    rand_sleep(*_pace["medium"])
                 except Exception as _le:
                     log(f"Logout warning (non-fatal): {_le}")
+            elif fresh_profile:
+                log("Fast login: skip logout (~10s saved; profile wiped on next fresh check anyway)")
             else:
                 log("Account home open — keeping session (same-device mode, no logout)")
             return {
@@ -3952,14 +5628,16 @@ def _do_login(
             # When fresh_profile=False we keep the session alive so Google sees a
             # returning known device on the next check — immediate login+logout on a
             # "new" device every run is what triggers account flags after 2-3 days.
-            if fresh_profile:
+            if fresh_profile and not _pace["skip_logout"]:
                 try:
                     log("Mailbox opened — logging out (fresh profile mode)")
                     driver.get("https://accounts.google.com/Logout?continue=https://mail.google.com")
-                    rand_sleep(700, 1200)
+                    rand_sleep(*_pace["medium"])
                     log("Logout complete")
                 except Exception as _le:
                     log(f"Logout warning (non-fatal): {_le}")
+            elif fresh_profile:
+                log("Fast login: skip mailbox logout")
             else:
                 log("Mailbox opened — keeping session (same-device mode, no logout)")
             return {
@@ -4190,7 +5868,9 @@ def _do_login(
             time.sleep(0.15)
         return None
 
-    def enter_fresh_totp_once(label: str, force_new: bool = False) -> bool:
+    def enter_fresh_totp_once(
+        label: str, force_new: bool = False, field_timeout: float = 14,
+    ) -> bool:
         """Submit TOTP — reuse the current 30s code unless force_new."""
         nonlocal totp_code
         if not totp_secret and not totp_code:
@@ -4207,9 +5887,15 @@ def _do_login(
         log(f"{email} — {label}: TOTP {mode} ({secs_remaining}s left in window)")
 
         for attempt in range(4):
-            deadline = time.time() + 14
+            deadline = time.time() + field_timeout
             field = None
             while time.time() < deadline:
+                try:
+                    if not is_totp_challenge_url(_live_url(driver)):
+                        log(f"{email} — {label}: left the authenticator page")
+                        return True
+                except Exception:
+                    pass
                 field = find_totp_input(driver)
                 if field:
                     break
@@ -4221,29 +5907,53 @@ def _do_login(
                 log(f"{email} — {label}: TOTP field not found")
                 return False
             try:
-                touch_click(driver, field)
-                rand_sleep(60, 120)
-                try:
-                    field.clear()
-                except Exception:
-                    pass
-                rand_sleep(40, 80)
-                clipboard_type(driver, field, code)
-                rand_sleep(100, 200)
-                try:
-                    field.send_keys(Keys.ENTER)
-                except Exception:
-                    pass
-                driver.execute_script(
-                    """
-                    var btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-                    var next = btns.find(function(b) {
-                      var t = (b.innerText || b.textContent || '').trim().toLowerCase();
-                      return t === 'next' || t === 'verify' || t === 'continue';
-                    });
-                    if (next && !next.disabled) next.click();
-                    """
-                )
+                if _pace.get("fast"):
+                    fast_paste(driver, field, code)
+                    nxt = wait_for_any([
+                        "#totpNext button", "#totpNext",
+                        "#idvPreregisteredPhoneNext button",
+                    ], timeout=2)
+                    if nxt and _trusted_button_click(driver, nxt):
+                        log(f"{email} — {label}: TOTP Next clicked")
+                    elif _click_button_text(driver, ("Next", "Verify")):
+                        log(f"{email} — {label}: TOTP Next clicked by label")
+                    else:
+                        log(f"{email} — {label}: TOTP Next control not found")
+                    # Do not click the field again. That call waits for the
+                    # navigation Next already started, and sat here for ~56s.
+                    for typ in ("keyDown", "keyUp"):
+                        driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                            "type": typ,
+                            "key": "Enter",
+                            "code": "Enter",
+                            "windowsVirtualKeyCode": 13,
+                            "nativeVirtualKeyCode": 13,
+                        })
+                    log(f"{email} — {label}: TOTP Enter pressed")
+                else:
+                    touch_click(driver, field)
+                    rand_sleep(60, 120)
+                    try:
+                        field.clear()
+                    except Exception:
+                        pass
+                    rand_sleep(40, 80)
+                    clipboard_type(driver, field, code)
+                    rand_sleep(100, 200)
+                    try:
+                        field.send_keys(Keys.ENTER)
+                    except Exception:
+                        pass
+                    driver.execute_script(
+                        """
+                        var btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+                        var next = btns.find(function(b) {
+                          var t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                          return t === 'next' || t === 'verify' || t === 'continue';
+                        });
+                        if (next && !next.disabled) next.click();
+                        """
+                    )
                 totp_code = code
                 log(f"{email} — {label}: TOTP submitted")
                 return True
@@ -4258,13 +5968,15 @@ def _do_login(
     def clear_totp_pages(max_rounds: int = 3, pause_label: str = "TOTP") -> None:
         """Google may show the TOTP page once or twice — same 30s code until window ends."""
         for round_i in range(max_rounds):
-            url_now = driver.current_url
+            # current_url waits for the page load and was re-submitting a code
+            # Google had already accepted.
+            url_now = _live_url(driver)
             if not is_totp_challenge_url(url_now):
                 return
             log(f"{email} — {pause_label} page round {round_i + 1}/{max_rounds}")
             if not enter_fresh_totp_once(f"{pause_label} round {round_i + 1}"):
                 return
-            rand_sleep(900, 1400)
+            rand_sleep(*_pace["totp_clear"])
 
     def handle_totp_if_prompted(
         label: str, max_rounds: int = 4, *, quick: bool = False
@@ -4275,7 +5987,7 @@ def _do_login(
             if not is_totp_challenge_url(driver.current_url):
                 return
             log(f"{email} — {label}: TOTP re-auth")
-            if not enter_fresh_totp_once(label):
+            if not enter_fresh_totp_once(label, field_timeout=2.5 if quick else 14):
                 return
             rand_sleep(*post_sleep)
             _deadline = time.time() + (12 if quick else 20)
@@ -4366,55 +6078,152 @@ def _do_login(
     }
     """
 
+    def _trusted_tap(el) -> bool:
+        """WebDriver click first. A coordinate tap was missing Google's Sign out button."""
+        if el is None:
+            return False
+        try:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center', inline:'center'});", el
+            )
+        except Exception:
+            pass
+        try:
+            el.click()
+            return True
+        except Exception:
+            pass
+        try:
+            rect = driver.execute_script(
+                """
+                var r = arguments[0].getBoundingClientRect();
+                return {x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height};
+                """,
+                el,
+            )
+            x, y = float(rect["x"]), float(rect["y"])
+            if rect.get("w", 0) > 2 and rect.get("h", 0) > 2:
+                driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                    "type": "mousePressed", "x": x, "y": y,
+                    "button": "left", "clickCount": 1,
+                })
+                driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                    "type": "mouseReleased", "x": x, "y": y,
+                    "button": "left", "clickCount": 1,
+                })
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _find_labeled_control(kind: str):
+        """Return {el, t} for More ways or Authenticator. el is a WebElement."""
+        return driver.execute_script(
+            """
+            var kind = arguments[0];
+            function norm(raw) {
+              return (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+            }
+            function matches(t) {
+              if (!t || t.length > 80) return false;
+              if (kind === 'more') {
+                return t.indexOf('more ways') !== -1 || t.indexOf('another way') !== -1
+                  || t.indexOf('try again') !== -1;
+              }
+              return t.indexOf('authenticator') !== -1 || t.indexOf('verification code') !== -1
+                || t.indexOf('enter a code') !== -1 || t.indexOf('get a code') !== -1;
+            }
+            function walk(root) {
+              var best = null;
+              if (kind !== 'more') {
+                var byType = root.querySelector && root.querySelector('[data-challengetype="6"]');
+                if (byType) best = {el: byType, len: 1, t: 'Google Authenticator'};
+              }
+              var nodes = root.querySelectorAll(
+                'a, button, [role="button"], [role="link"], [data-challengetype], li, span');
+              for (var i = 0; i < nodes.length; i++) {
+                var node = nodes[i];
+                var t = norm(node.innerText || node.textContent || '');
+                if (!matches(t)) continue;
+                var clickable = node.closest('button, a, [role="button"], [role="link"], li, [data-challengetype]') || node;
+                if (!best || t.length < best.len) best = {el: clickable, len: t.length, t: t.slice(0, 50)};
+              }
+              var kids = root.querySelectorAll('*');
+              for (var k = 0; k < kids.length; k++) {
+                if (!kids[k].shadowRoot) continue;
+                var sub = walk(kids[k].shadowRoot);
+                if (sub && (!best || sub.len < best.len)) best = sub;
+              }
+              return best;
+            }
+            var hit = walk(document);
+            if (!hit) return null;
+            try { hit.el.scrollIntoView({block: 'center'}); } catch (e) {}
+            return hit;
+            """,
+            kind,
+        )
+
+    def _tap_labeled(kind: str) -> str:
+        hit = _find_labeled_control(kind)
+        if not isinstance(hit, dict) or hit.get("el") is None:
+            return ""
+        label = str(hit.get("t") or kind)
+        if not _trusted_tap(hit["el"]):
+            return ""
+        return label
+
+    def _click_authenticator_option() -> None:
+        _tap_labeled("auth")
+
+    def _click_try_another_way() -> str:
+        """Phone prompt ('Check your Pixel') → More ways to verify."""
+        return _tap_labeled("more")
+
+    def _totp_ready() -> bool:
+        return is_totp_challenge_url(driver.current_url) or find_totp_input(driver) is not None
+
+    def _poll_until(pred, seconds: float) -> bool:
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            try:
+                if pred():
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.2)
+        return False
+
     def pass_signin_challenge(label: str) -> bool:
-        """challenge/dp or TOTP during device activity — finish it, stay in flow."""
+        """Finish challenge/dp or TOTP in place. Do not reload the page."""
         url = driver.current_url.lower()
         on_picker = "challenge/dp" in url or "challenge/selection" in url
-        on_totp = is_totp_challenge_url(driver.current_url)
-        if not on_picker and not on_totp:
+        if not on_picker and not _totp_ready():
             return False
         log(f"{email} — {label}: Google re-auth ({url[:70]})")
-        if on_picker:
+        if on_picker and not _totp_ready():
+            # "Check your Pixel / tap 83" is a phone prompt. More ways → TOTP.
             try:
-                driver.execute_script("""
-                    var byType = document.querySelector('[data-challengetype="6"]');
-                    if (byType) { byType.click(); return; }
-                    var allEls = Array.from(document.querySelectorAll(
-                        'li, div[role="listitem"], [data-challengetype], button, [role="link"]'));
-                    var found = allEls.find(function(el) {
-                        return (el.innerText || '').toLowerCase().indexOf('authenticator') !== -1;
-                    });
-                    if (found) found.click();
-                """)
+                more = _click_try_another_way()
             except Exception as exc:
-                log(f"{email} — authenticator click: {exc}")
-            rand_sleep(600, 900)
-            if find_totp_input() is None:
-                try:
-                    driver.execute_script("""
-                        var links = Array.from(document.querySelectorAll('a, button, [role="button"]'));
-                        var found = links.find(function(el) {
-                            var t = (el.innerText || '').toLowerCase();
-                            return t.indexOf('another way') !== -1 || t.indexOf('try again') !== -1;
-                        });
-                        if (found) found.click();
-                    """)
-                    rand_sleep(500, 800)
-                    driver.execute_script("""
-                        var byType = document.querySelector('[data-challengetype="6"]');
-                        if (byType) byType.click();
-                    """)
-                except Exception:
-                    pass
-                rand_sleep(500, 800)
-        if is_totp_challenge_url(driver.current_url) or find_totp_input() is not None:
+                more = ""
+                log(f"{email} — more-ways click: {exc}")
+            if more:
+                log(f"{email} — clicked '{more}'")
+            else:
+                log(f"{email} — More ways to verify button not found")
+            time.sleep(0.6)
+            if not _poll_until(_totp_ready, 3.0):
+                auth = _tap_labeled("auth")
+                if auth:
+                    log(f"{email} — clicked '{auth}'")
+                _poll_until(_totp_ready, 4.0)
+        if _totp_ready():
             enter_fresh_totp_once(label)
-            deadline = time.time() + 12
-            while time.time() < deadline:
-                if not is_totp_challenge_url(driver.current_url):
-                    break
-                time.sleep(0.3)
-        return True
+            _poll_until(lambda: not is_totp_challenge_url(driver.current_url), 8.0)
+            return True
+        log(f"{email} — {label}: re-auth still on {driver.current_url[:70]}")
+        return False
 
     def _device_url_kind() -> str:
         """list | detail | other — without full page reload."""
@@ -4448,23 +6257,43 @@ def _do_login(
             break
         return _device_url_kind() == "list"
 
-    def ensure_device_activity_list(label: str) -> bool:
-        """Land on the device list. Reload only when we are not already there."""
-        for attempt in range(3):
-            pass_signin_challenge(label)
-            if return_to_device_list():
+    def _wait_on_device_list(timeout: float = 12.0) -> bool:
+        """Poll for the list. Solve a challenge in place — never reload from here."""
+        deadline = time.time() + timeout
+        solved = 0
+        while time.time() < deadline:
+            if _device_url_kind() == "list":
+                log(f"{email} — device activity page loaded")
                 return True
-            log(
-                f"{email} — {label}: opening device activity "
-                f"(attempt {attempt + 1}, was {driver.current_url[:70]})"
-            )
+            url = driver.current_url.lower()
+            if "challenge" in url and solved < 2:
+                solved += 1
+                pass_signin_challenge("Device activity")
+                continue
+            time.sleep(0.25)
+        return _device_url_kind() == "list"
+
+    def ensure_device_activity_list(label: str) -> bool:
+        """Land on the device list. Reload only if we are not already on a challenge."""
+        if _device_url_kind() == "list":
+            return True
+        url = driver.current_url.lower()
+        on_challenge = "challenge" in url
+        if not on_challenge and _device_url_kind() != "detail":
+            log(f"{email} — {label}: opening device activity")
             try:
                 driver.get(DEVICE_ACTIVITY_URL)
             except Exception as exc:
                 log(f"{email} — device list navigation warning: {exc}")
-            rand_sleep(900, 1400)
-            pass_signin_challenge(label)
-            if wait_for_device_activity_loaded(16.0):
+        if _wait_on_device_list(12.0):
+            return True
+        if "challenge" not in driver.current_url.lower():
+            log(f"{email} — {label}: one reload (was {driver.current_url[:70]})")
+            try:
+                driver.get(DEVICE_ACTIVITY_URL)
+            except Exception as exc:
+                log(f"{email} — device list navigation warning: {exc}")
+            if _wait_on_device_list(8.0):
                 return True
         log(f"{email} — could not open device list (url={driver.current_url[:90]})")
         return False
@@ -4518,8 +6347,8 @@ def _do_login(
     _SESSION_KIND_ORDER = (
         "android_phone",
         "chrome_device",
-        "windows_computer",
         "linux_computer",
+        "windows_computer",
         "ios",
         "mac",
         "session",
@@ -4578,9 +6407,9 @@ def _do_login(
                 var href = (L.href || '').split('#')[0];
                 if (!href || seen[href]) return;
                 if (!isDetailPath(new URL(href).pathname)) return;
-                var block = L.closest('[role="listitem"], li, tr, c-wiz, [data-device-id]')
-                  || L.parentElement || L;
+                var block = L.closest('[role="listitem"], li, tr') || L.parentElement || L;
                 var label = (block.innerText || L.innerText || '').trim();
+                if (label.length > 220) label = (L.innerText || '').trim() || label.slice(0, 180);
                 if (!rowStillSignedIn(label)) return;
                 seen[href] = true;
                 out.push({
@@ -4741,12 +6570,390 @@ def _do_login(
         return_to_device_list()
         return True
 
+    def _tap_sign_out_button(dialog_only: bool = False) -> str:
+        """Trusted tap on Sign out. Dialog confirm is separate from the page button."""
+        hit = driver.execute_script(
+            """
+            var dialogOnly = arguments[0] === true;
+            function norm(raw) {
+              return (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+            }
+            function ok(t) {
+              if (!t || t.length > 48) return false;
+              if (t.indexOf('find device') !== -1 || t.indexOf('signed out') !== -1) return false;
+              if (t.indexOf('sign out of other') !== -1) return false;
+              return t === 'sign out' || t === 'sign out device' || t.indexOf('sign out') === 0;
+            }
+            function walk(root) {
+              var best = null;
+              var nodes = root.querySelectorAll(
+                'button, a, [role="button"], [role="link"], [role="menuitem"], [jsaction], span, div');
+              for (var i = 0; i < nodes.length; i++) {
+                var node = nodes[i];
+                var t = norm(node.innerText || node.textContent || '');
+                if (!ok(t)) continue;
+                var clickable = node.closest(
+                  'button, a, [role="button"], [role="link"], [role="menuitem"], [jsaction]') || node;
+                var r = clickable.getBoundingClientRect();
+                if (r.width < 2 || r.height < 2) continue;
+                if (!best || t.length < best.len) best = {el: clickable, len: t.length, t: t};
+              }
+              var kids = root.querySelectorAll('*');
+              for (var k = 0; k < kids.length; k++) {
+                if (!kids[k].shadowRoot) continue;
+                var sub = walk(kids[k].shadowRoot);
+                if (sub && (!best || sub.len < best.len)) best = sub;
+              }
+              return best;
+            }
+            var roots = [];
+            if (dialogOnly) {
+              roots = Array.from(document.querySelectorAll(
+                '[role="dialog"], [role="alertdialog"], [aria-modal="true"]'));
+              if (!roots.length) return null;
+            } else {
+              roots = [document];
+            }
+            var hit = null;
+            for (var i = 0; i < roots.length; i++) {
+              hit = walk(roots[i]);
+              if (hit) break;
+            }
+            if (hit) { try { hit.el.scrollIntoView({block:'center'}); } catch (e) {} }
+            return hit;
+            """,
+            dialog_only,
+        )
+        if not isinstance(hit, dict) or hit.get("el") is None:
+            return ""
+        if not _trusted_tap(hit["el"]):
+            return ""
+        return str(hit.get("t") or "sign out")
+
+    def use_desktop_device_list() -> None:
+        """Wide layout so every device row is on screen, not cut off by the phone viewport."""
+        try:
+            driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        except Exception:
+            pass
+        try:
+            driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        except Exception:
+            pass
+        try:
+            driver.set_window_size(1440, 900)
+        except Exception:
+            pass
+        try:
+            driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                "width": 1440,
+                "height": 900,
+                "deviceScaleFactor": 1,
+                "mobile": False,
+                "screenWidth": 1440,
+                "screenHeight": 900,
+            })
+            log(f"{email} — device list layout: desktop 1440x900")
+        except Exception as exc:
+            log(f"{email} — desktop layout warning: {exc}")
+
+    def _signed_out_url(url: str) -> bool:
+        """True only on a real sign-in wall. SignOutOptions still has the session."""
+        u = (url or "").lower()
+        if "signoutoptions" in u or "/logout" in u:
+            return False
+        if "myaccount.google.com" in u or "mail.google.com" in u:
+            return False
+        return any(
+            part in u
+            for part in (
+                "servicelogin",
+                "/signin/identifier",
+                "signin/accountchooser",
+                "signin/confirmidentifier",
+                "/challenge/pwd",
+                "accounts.google.com/v3/signin",
+            )
+        )
+
+    def _click_sign_out_here(origin_x: float = 0.0, origin_y: float = 0.0) -> bool:
+        """Pointer-click a visible Sign out control. iframe-local coords need the iframe origin."""
+        info = driver.execute_script(
+            """
+            function norm(raw) {
+              return (raw || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+            }
+            function walk(root) {
+              var nodes = root.querySelectorAll(
+                'a, button, [role="button"], [role="menuitem"], [role="link"]');
+              for (var i = 0; i < nodes.length; i++) {
+                var el = nodes[i];
+                var t = norm(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+                if (t.indexOf('sign out') !== 0) continue;
+                if (t.indexOf('all') !== -1 || t.indexOf('signed out') !== -1) continue;
+                if (t.length > 22) continue;
+                var r = el.getBoundingClientRect();
+                if (r.width < 8 || r.height < 8) continue;
+                if (r.bottom < 4 || r.right < 4) continue;
+                if (r.top > window.innerHeight - 4 || r.left > window.innerWidth - 4) continue;
+                try { el.scrollIntoView({block:'center', inline:'center'}); } catch (e) {}
+                r = el.getBoundingClientRect();
+                var link = el.closest ? el.closest('a') : null;
+                return {
+                  el: el,
+                  x: r.left, y: r.top, w: r.width, h: r.height, t: t,
+                  href: (link && link.href) || el.href || el.getAttribute('href') || ''
+                };
+              }
+              var kids = root.querySelectorAll('*');
+              for (var k = 0; k < kids.length; k++) {
+                if (!kids[k].shadowRoot) continue;
+                var sub = walk(kids[k].shadowRoot);
+                if (sub) return sub;
+              }
+              return null;
+            }
+            return walk(document);
+            """
+        )
+        if not isinstance(info, dict):
+            return False
+        href = str(info.get("href") or "")
+        x = origin_x + float(info["x"]) + float(info["w"]) / 2
+        y = origin_y + float(info["y"]) + float(info["h"]) / 2
+        # The menu link carries the real logout token. A coordinate past the
+        # window edge hits nothing, which is what left the session signed in.
+        if "logout" in href.lower() and "signoutoptions" not in href.lower():
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+            log(f"{email} — opening the menu Sign out link")
+            try:
+                driver.set_page_load_timeout(6)
+                driver.get(href)
+            except Exception as exc:
+                log(f"{email} — Sign out link warning: {exc}")
+            return True
+        clicked = False
+        try:
+            driver.set_page_load_timeout(8)
+            info["el"].click()
+            clicked = True
+        except Exception:
+            clicked = False
+        if clicked:
+            log(f"{email} — Sign out button clicked")
+            return True
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        try:
+            view = driver.execute_script(
+                "return {w: window.innerWidth, h: window.innerHeight};"
+            ) or {}
+            vw = float(view.get("w") or 0)
+            vh = float(view.get("h") or 0)
+        except Exception:
+            vw, vh = 0.0, 0.0
+        if vw and (x < 0 or y < 0 or x >= vw or y >= vh):
+            log(f"{email} — Sign out control is off screen at {int(x)},{int(y)}")
+            return False
+        log(f"{email} — Sign out click at {int(x)},{int(y)}")
+        try:
+            _cdp_click_xy(driver, x, y)
+        except Exception as exc:
+            log(f"{email} — Sign out click failed: {exc}")
+            return False
+        return True
+
+    def _tap_profile_sign_out() -> bool:
+        """Click the on-screen Sign out control, including the account-menu iframe."""
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        if _click_sign_out_here():
+            return True
+        frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+        for frame in frames[:12]:
+            try:
+                driver.switch_to.default_content()
+                box = driver.execute_script(
+                    """
+                    var r = arguments[0].getBoundingClientRect();
+                    return {x: r.left, y: r.top, w: r.width, h: r.height};
+                    """,
+                    frame,
+                ) or {}
+                if float(box.get("w") or 0) < 40 or float(box.get("h") or 0) < 40:
+                    continue
+                driver.switch_to.frame(frame)
+                if _click_sign_out_here(float(box.get("x") or 0), float(box.get("y") or 0)):
+                    return True
+            except Exception:
+                pass
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+        return False
+
+    def _account_avatar_visible() -> bool:
+        try:
+            return bool(driver.execute_script(
+                """
+                var nodes = document.querySelectorAll('a, button, img, [aria-label]');
+                for (var i = 0; i < nodes.length; i++) {
+                  var el = nodes[i];
+                  var r = el.getBoundingClientRect();
+                  if (r.width < 8 || r.height < 8) continue;
+                  var aria = ((el.getAttribute('aria-label') || '') + ' '
+                    + (el.getAttribute('alt') || '')).toLowerCase();
+                  if (aria.indexOf('google account') !== -1) return true;
+                }
+                return false;
+                """
+            ))
+        except Exception:
+            return False
+
+    def _prove_signed_out() -> bool:
+        """Open account home. Signed out only if Google no longer shows this account."""
+        try:
+            driver.switch_to.default_content()
+            # The about page often redirects before onload. A 12s load wait
+            # was the whole sign-out delay after the password had changed.
+            driver.set_page_load_timeout(5)
+            driver.get("https://myaccount.google.com/?hl=en")
+        except Exception as exc:
+            log(f"{email} — sign-out check failed: {exc}")
+        def _left_the_account(url: str) -> bool:
+            # www.google.com/account/about is where a signed-out session lands.
+            # That page still has a "Google Account" label, so the avatar check
+            # used to call a finished sign-out a failure and try again.
+            u = (url or "").lower()
+            if _signed_out_url(u):
+                return True
+            return any(part in u for part in ("account/about", "about.google"))
+
+        deadline = time.time() + 6
+        last = ""
+        while time.time() < deadline:
+            last = _live_url(driver)
+            if _left_the_account(last):
+                log(f"{email} — session is signed out ({last[:70]})")
+                return True
+            if "myaccount.google.com" in last and "servicelogin" not in last:
+                if _account_avatar_visible() or time.time() > deadline - 2:
+                    log(f"{email} — session still signed in ({last[:70]})")
+                    return False
+            time.sleep(0.3)
+        if _left_the_account(last):
+            log(f"{email} — session is signed out ({last[:70]})")
+            return True
+        if _account_avatar_visible():
+            log(f"{email} — session still signed in ({(last or '')[:70]})")
+            return False
+        log(f"{email} — session still signed in ({(last or '')[:70]})")
+        return False
+
+    def _logout_url_and_confirm() -> None:
+        try:
+            driver.switch_to.default_content()
+            log(f"{email} — opening Google sign-out page")
+            driver.get(
+                "https://accounts.google.com/Logout?hl=en"
+                "&continue=https://accounts.google.com/ServiceLogin"
+            )
+        except Exception as exc:
+            log(f"{email} — Logout URL warning: {exc}")
+            return
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            try:
+                here = driver.current_url or ""
+            except Exception:
+                here = ""
+            if _signed_out_url(here):
+                return
+            if _tap_profile_sign_out():
+                log(f"{email} — confirmed Sign out on the sign-out page")
+                time.sleep(1.0)
+                return
+            time.sleep(0.3)
+
+    def sign_out_via_profile_icon() -> bool:
+        """Profile photo → Sign out, then prove account home asks us to sign in again."""
+        try:
+            driver.switch_to.default_content()
+            driver.set_window_size(1440, 900)
+        except Exception:
+            pass
+        avatar = driver.execute_script(
+            """
+            function walk(root, acc) {
+              var nodes = root.querySelectorAll('a, button, [role="button"], img');
+              for (var i = 0; i < nodes.length; i++) {
+                var el = nodes[i];
+                var clickable = el.closest('a, button, [role="button"]') || el;
+                var aria = ((clickable.getAttribute('aria-label') || '') + ' '
+                  + (clickable.getAttribute('title') || '') + ' '
+                  + (el.getAttribute('alt') || '')).toLowerCase();
+                var text = (clickable.innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                var r = clickable.getBoundingClientRect();
+                if (r.width < 8 || r.height < 8 || r.top > 160) continue;
+                if (r.left < window.innerWidth * 0.55) continue;
+                var accountBtn = aria.indexOf('google account') !== -1
+                  || aria.indexOf('account menu') !== -1
+                  || text === 'account' || aria.indexOf('account') !== -1;
+                if (!accountBtn) continue;
+                var score = (aria.indexOf('google account') !== -1 ? 80 : 0) + r.right;
+                acc.push({el: clickable, score: score});
+              }
+              var kids = root.querySelectorAll('*');
+              for (var k = 0; k < kids.length; k++) {
+                if (!kids[k].shadowRoot) continue;
+                walk(kids[k].shadowRoot, acc);
+              }
+              return acc;
+            }
+            var found = walk(document, []);
+            if (!found.length) return null;
+            found.sort(function(a, b) { return b.score - a.score; });
+            return found[0].el;
+            """
+        )
+        opened_menu = False
+        if avatar is not None:
+            opened_menu = bool(_cdp_click_element(driver, avatar) or _trusted_tap(avatar))
+        if opened_menu:
+            log(f"{email} — opened profile menu")
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if _tap_profile_sign_out():
+                    log(f"{email} — profile menu: Sign out")
+                    time.sleep(0.8)
+                    _tap_profile_sign_out()
+                    break
+                time.sleep(0.3)
+        else:
+            log(f"{email} — profile icon not found")
+        if _prove_signed_out():
+            return True
+        _logout_url_and_confirm()
+        if _prove_signed_out():
+            return True
+        log(f"{email} — Sign out did not clear this session")
+        return False
+
     def run_device_activity_signouts(new_pw: str) -> dict:
         """After demo password change: sign out every device, then this session → Open."""
         log(f"{email} — Device activity: sign out all sessions")
+        use_desktop_device_list()
         try:
             driver.get(DEVICE_ACTIVITY_URL)
-            rand_sleep(1400, 2200)
         except Exception as exc:
             shot = screenshot_b64()
             return {
@@ -4766,112 +6973,318 @@ def _do_login(
                 "newPassword": new_pw,
                 "debugScreenshot": shot,
             }
-        collect_active_device_sessions(thorough=True)
+        def list_devices_fast(*, full_scroll: bool = False) -> list[dict]:
+            merged: dict[str, dict] = {}
 
+            def absorb() -> None:
+                for item in _gather_device_sessions_js():
+                    href = item.get("href") or ""
+                    if href:
+                        merged[href] = item
+
+            absorb()
+            # Desktop page still virtual-scrolls. Walk the window and any inner list.
+            try:
+                heights = driver.execute_script(
+                    """
+                    var hs = [document.body.scrollHeight || 0];
+                    var main = document.querySelector('[role=main]');
+                    if (main) hs.push(main.scrollHeight || 0);
+                    var divs = document.querySelectorAll('div');
+                    for (var i = 0; i < divs.length; i++) {
+                      var d = divs[i];
+                      if (d.scrollHeight > d.clientHeight + 50 && d.clientHeight > 100)
+                        hs.push(d.scrollHeight);
+                    }
+                    return Math.max.apply(null, hs.concat([900]));
+                    """
+                ) or 900
+            except Exception:
+                heights = 900
+            steps = min(10 if full_scroll else 6, max(3, int(heights / 400) + 1))
+            for step in range(steps):
+                y = step * 350
+                try:
+                    driver.execute_script(
+                        """
+                        var y = arguments[0];
+                        window.scrollTo(0, y);
+                        var main = document.querySelector('[role=main]');
+                        if (main) main.scrollTop = y;
+                        var divs = document.querySelectorAll('div');
+                        for (var i = 0; i < divs.length; i++) {
+                          var d = divs[i];
+                          if (d.scrollHeight > d.clientHeight + 50 && d.clientHeight > 100)
+                            d.scrollTop = y;
+                        }
+                        """,
+                        y,
+                    )
+                except Exception:
+                    pass
+                time.sleep(0.1)
+                absorb()
+            try:
+                driver.execute_script("window.scrollTo(0, 0);")
+            except Exception:
+                pass
+
+            out = list(merged.values())
+            out.sort(
+                key=lambda s: (
+                    _current_session(s.get("label") or ""),
+                    _SESSION_KIND_ORDER.index(s.get("kind") or "session")
+                    if (s.get("kind") or "session") in _SESSION_KIND_ORDER
+                    else 99,
+                    s.get("label") or "",
+                )
+            )
+            return out
+
+        def click_sign_out_ready(timeout: float = 2.0) -> str | None:
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                label = _tap_sign_out_button()
+                if label:
+                    return label
+                time.sleep(0.2)
+            return None
+
+        def _current_session(label: str) -> int:
+            t = (label or "").lower()
+            if "this device" in t or "current session" in t or "your current" in t:
+                return 1
+            return 0
+
+        def device_key(href: str) -> str:
+            marker = "/device-activity/id/"
+            path = href.split("?")[0].split("#")[0]
+            idx = path.find(marker)
+            if idx == -1:
+                return path
+            return path[idx:].rstrip("/")
+
+        def wait_auto_back_to_list(timeout: float = 7.0) -> bool:
+            """Confirm the Sign out dialog, then wait. Back() cancels an open dialog."""
+            confirmed = False
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if _device_url_kind() == "list":
+                    return True
+                if not confirmed:
+                    label = _tap_sign_out_button(dialog_only=True)
+                    if label:
+                        confirmed = True
+                        log(f"{email} — confirmed sign-out dialog")
+                        time.sleep(0.5)
+                        continue
+                time.sleep(0.25)
+            if _device_url_kind() == "detail" and not confirmed:
+                try:
+                    driver.back()
+                except Exception:
+                    pass
+                time.sleep(0.4)
+            return _device_url_kind() == "list"
+
+        def row_shows_signed_out(href: str) -> bool:
+            if not href or _device_url_kind() != "list":
+                return False
+            return bool(driver.execute_script(
+                """
+                var want = arguments[0];
+                var links = document.querySelectorAll('a[href*="device-activity"]');
+                for (var i = 0; i < links.length; i++) {
+                  var href = (links[i].href || '').split('#')[0];
+                  if (href !== want && href.indexOf(want) === -1) continue;
+                  var block = links[i].closest('[role="listitem"], li, tr') || links[i].parentElement;
+                  var t = ((block && block.innerText) || '').toLowerCase();
+                  if (t.indexOf('signed out') !== -1) return true;
+                }
+                return false;
+                """,
+                href,
+            ))
+
+        done_hrefs: set[str] = set()
+        attempts: dict[str, int] = {}
         signed_out_count = 0
-        idle_passes = 0
         kinds_done: dict[str, int] = {}
         kinds_seen: set[str] = set()
+        back_fails = 0
 
-        # One device-activity URL load → click device → sign out → back → next (no re-get loop)
-        for _round in range(40):
+        # Android, then Chrome, then Linux, then Windows — every row, then account logout.
+        for _round in range(24):
             if _device_url_kind() != "list":
-                if not ensure_device_activity_list("Device list"):
-                    idle_passes += 1
-                    if idle_passes >= 3:
+                if wait_auto_back_to_list():
+                    back_fails = 0
+                elif ensure_device_activity_list("Back to device list"):
+                    back_fails = 0
+                else:
+                    back_fails += 1
+                    log(f"{email} — not back on device list ({back_fails}/2)")
+                    if back_fails >= 2:
                         break
                     continue
 
-            if all_devices_signed_out_on_page():
-                log(f"{email} — all devices show signed out on list")
-                break
-
-            sessions = collect_active_device_sessions()
+            sessions = list_devices_fast(full_scroll=(_round == 0))
             for s in sessions:
                 kinds_seen.add(s.get("kind") or "session")
-            kinds_on_page = sorted({s.get("kind", "session") for s in sessions})
+            pending = [s for s in sessions if device_key(s.get("href") or "") not in done_hrefs]
+            by_kind: dict[str, int] = {}
+            for s in sessions:
+                k = s.get("kind") or "session"
+                by_kind[k] = by_kind.get(k, 0) + 1
+            names = [((s.get("kind") or "?") + ":" + (s.get("label") or "").split("\n")[0][:28]) for s in sessions]
             log(
-                f"{email} — sessions on page: {len(sessions)} active, "
-                f"kinds={kinds_on_page}"
+                f"{email} — sessions on page: {len(sessions)} still signed in, "
+                f"{len(pending)} left, counts={by_kind}, rows={names}"
             )
+            if not pending:
+                if not sessions and signed_out_count == 0 and _round < 2:
+                    log(f"{email} — device list empty, waiting for rows")
+                    time.sleep(1.5)
+                    continue
+                log(f"{email} — every listed device handled — account logout")
+                break
 
-            if not sessions:
-                idle_passes += 1
-                log(f"{email} — no active device row (idle {idle_passes}/3)")
-                if idle_passes >= 3:
-                    break
-                ensure_device_activity_list("Device list refresh")
-                rand_sleep(400, 600)
-                continue
-
-            idle_passes = 0
-            target = sessions[0]
+            target = pending[0]
+            href = target.get("href") or ""
+            key = device_key(href)
             kind = target.get("kind") or "session"
+            if _current_session(target.get("label") or ""):
+                log(f"{email} — current session stays on the list; profile sign-out is last")
+                done_hrefs.add(key)
+                continue
+            attempts[key] = attempts.get(key, 0) + 1
             device_label = open_device_session(target)
             if not device_label:
-                return_to_device_list()
+                if attempts[key] >= 2:
+                    done_hrefs.add(key)
                 continue
             log(f"{email} — opened device: {device_label[:80]}")
-            rand_sleep(650, 950)
-            handle_totp_if_prompted("Device detail", max_rounds=2, quick=True)
-
-            sign_out_label = click_sign_out_on_device_detail()
+            try:
+                labels = driver.execute_script(
+                    """
+                    var out = [];
+                    function walk(root) {
+                      var nodes = root.querySelectorAll('button, a, [role="button"]');
+                      for (var i = 0; i < nodes.length; i++) {
+                        var t = (nodes[i].innerText || '').replace(/\\s+/g, ' ').trim();
+                        if (!t || t.length > 32) continue;
+                        var r = nodes[i].getBoundingClientRect();
+                        if (r.width < 2 || r.height < 2) continue;
+                        if (out.indexOf(t) === -1) out.push(t);
+                      }
+                      var kids = root.querySelectorAll('*');
+                      for (var k = 0; k < kids.length; k++) {
+                        if (kids[k].shadowRoot) walk(kids[k].shadowRoot);
+                      }
+                    }
+                    walk(document);
+                    return out.slice(0, 10);
+                    """
+                )
+                log(f"{email} — detail buttons: {labels}")
+            except Exception:
+                pass
+            sign_out_label = click_sign_out_ready(2.0)
             if not sign_out_label:
-                log(f"{email} — Sign out not found on detail — back to list")
-                return_to_device_list()
+                try:
+                    driver.execute_script("window.scrollTo(0, 700);")
+                except Exception:
+                    pass
+                time.sleep(0.2)
+                sign_out_label = click_sign_out_ready(1.5)
+            if not sign_out_label:
+                log(f"{email} — Sign out not found — yeh device page nahi, skip")
+                if _device_url_kind() == "detail":
+                    try:
+                        driver.back()
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
+                done_hrefs.add(key)
                 continue
 
-            signed_out_count += 1
-            kinds_done[kind] = kinds_done.get(kind, 0) + 1
-            log(f"{email} — device sign-out #{signed_out_count} [{kind}]: {sign_out_label}")
-            rand_sleep(300, 500)
-            confirm_device_dialog()
-            rand_sleep(250, 400)
-            confirm_device_dialog()
-            handle_totp_if_prompted("After sign out", max_rounds=2, quick=True)
-            if not return_to_device_list():
-                log(f"{email} — back missed list — opening device activity again")
-                ensure_device_activity_list("After sign out")
-            rand_sleep(400, 650)
-
-        ensure_device_activity_list("Before self sign-out")
-
-        if not all_devices_signed_out_on_page():
-            log(f"{email} — signing out remaining device(s) via detail page")
-            for _ in range(5):
-                if all_devices_signed_out_on_page():
-                    break
-                if not sign_out_current_device_from_list():
-                    break
-        else:
-            log(f"{email} — list already all signed out — logging out browser session")
+            log(f"{email} — clicked Sign out [{kind}]")
+            time.sleep(0.35)
+            back_ok = wait_auto_back_to_list()
+            if not back_ok and _device_url_kind() != "list":
+                log(f"{email} — list par wapas nahi aaya")
+                try:
+                    driver.get(DEVICE_ACTIVITY_URL)
+                    time.sleep(1.0)
+                except Exception:
+                    pass
+            time.sleep(1.0)
+            still = list_devices_fast()
+            still_keys = {device_key(s.get("href") or "") for s in still}
+            if row_shows_signed_out(href) or key not in still_keys:
+                done_hrefs.add(key)
+                signed_out_count += 1
+                kinds_done[kind] = kinds_done.get(kind, 0) + 1
+                log(f"{email} — device sign-out #{signed_out_count} [{kind}] list se hat gaya")
+            else:
+                log(f"{email} — [{kind}] abhi bhi signed in ({attempts[key]}/2)")
+                if attempts[key] >= 2:
+                    done_hrefs.add(key)
+                    log(f"{email} — [{kind}] skip, next device")
 
         kinds_seen_sorted = sorted(kinds_seen)
         log(
             f"{email} — session types seen on device activity: {kinds_seen_sorted or ['none']}"
         )
-        log(f"{email} — final logout ({signed_out_count} other device(s) signed out)")
+        log(f"{email} — final logout via profile icon ({signed_out_count} other device(s) signed out)")
+        if _device_url_kind() != "list":
+            ensure_device_activity_list("Before profile sign-out")
+        signed_self = False
         try:
-            driver.get("https://accounts.google.com/Logout?continue=https://myaccount.google.com/")
-            rand_sleep(900, 1400)
-        except Exception as _le:
-            log(f"{email} — Logout URL warning: {_le}")
+            signed_self = sign_out_via_profile_icon()
+            rand_sleep(400, 700)
+        except Exception as exc:
+            log(f"{email} — profile sign-out warning: {exc}")
+        if not signed_self:
+            log(f"{email} — profile menu missed, using logout URL")
+            try:
+                driver.get("https://accounts.google.com/Logout?continue=https://accounts.google.com/ServiceLogin")
+                rand_sleep(700, 1100)
+                _tap_profile_sign_out()
+                time.sleep(0.6)
+            except Exception as _le:
+                log(f"{email} — Logout URL warning: {_le}")
+        try:
+            log(f"{email} — after self sign-out url: {(driver.current_url or '')[:90]}")
+        except Exception:
+            pass
 
         handle_totp_if_prompted("Self sign-out TOTP", max_rounds=2, quick=True)
         shot = screenshot_b64()
-        return {
-            "status": "opened",
-            "reason": (
-                f"Demo password + saare devices signed out ✅ "
+        same_password = sign_out_sessions and not change_password_after_login
+        self_bit = "current session signed out" if signed_self else "current session still signed in"
+        if same_password:
+            reason = (
+                f"{self_bit} "
+                f"({signed_out_count} other device sign-outs; types seen: "
+                f"{', '.join(kinds_seen_sorted) or 'none'})"
+            )
+        else:
+            reason = (
+                f"Demo password + device list done, {self_bit} "
                 f"({signed_out_count} sign-outs; types seen: "
                 f"{', '.join(kinds_seen_sorted) or 'none'}; "
                 f"signed out: {', '.join(f'{k}×{v}' for k, v in sorted(kinds_done.items())) or 'none'}; "
                 f"naya password export — {len(new_pw)} chars)"
-            ),
+            )
+        result_payload = {
+            "status": "opened" if signed_self or change_password_after_login else "unknown",
+            "reason": reason,
             "totpCode": totp_code,
-            "newPassword": new_pw,
             "debugScreenshot": shot,
         }
+        if not same_password:
+            result_payload["newPassword"] = new_pw
+        return result_payload
 
     def complete_password_change_if_needed(current_url: str) -> dict | None:
         """College demo: fill random new password on myaccount signinoptions/password."""
@@ -4883,85 +7296,84 @@ def _do_login(
             f"{email} — Password-change page: demo mode, random password "
             f"({len(new_pw)} chars, a-z A-Z 0-9)"
         )
+        try:
+            os.makedirs("/tmp/vanguard-mx", exist_ok=True)
+            _pw_path = "/tmp/vanguard-mx/last_new_password.json"
+            with open(_pw_path, "w") as _pwf:
+                json.dump({"email": email, "password": new_pw}, _pwf)
+            os.chmod(_pw_path, 0o600)
+        except Exception as _pe:
+            log(f"{email} — could not store new password file: {_pe}")
 
         def fill_field(el, value: str) -> None:
+            fast_paste(driver, el, value)
             try:
-                touch_click(driver, el)
-                rand_sleep(80, 160)
-                try:
-                    el.clear()
-                except Exception:
-                    pass
-                clipboard_type(driver, el, value)
+                filled = driver.execute_script(
+                    "return (arguments[0].value || '').length", el,
+                ) or 0
+                if int(filled) < len(value):
+                    el.click()
+                    el.send_keys(value)
             except Exception:
-                driver.execute_script(
-                    """
-                    const el = arguments[0], val = arguments[1];
-                    el.focus();
-                    el.value = val;
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                    """,
-                    el,
-                    value,
-                )
+                pass
 
         def click_password_form_continue() -> bool:
-            """Primary form button — not the post-fill 'stay signed in' dialog."""
-            return bool(driver.execute_script(
-                """
-                var labels = ['save password', 'save', 'next', 'continue', 'done', 'update'];
-                var btns = Array.from(document.querySelectorAll('button, [role="button"], div[role="button"]'));
-                for (var label of labels) {
-                    var hit = btns.find(function(b) {
-                        var t = (b.innerText || b.textContent || '').trim().toLowerCase();
-                        return t === label || t.indexOf(label) === 0;
-                    });
-                    if (hit && !hit.disabled) { hit.click(); return true; }
-                }
-                var submit = document.querySelector('button[type="submit"]');
-                if (submit && !submit.disabled) { submit.click(); return true; }
-                return false;
-                """
-            ))
+            """Real pointer click. A script click on Change password does not submit."""
+            control = _find_control_by_label(
+                driver, ("Change password", "Save password", "Save", "Next"),
+            )
+            if control and _trusted_button_click(driver, control):
+                log(f"{email} — password form button clicked")
+                return True
+            return _click_button_text(driver, ("Change password", "Save", "Next"))
 
         def confirm_stay_signed_in_dialog() -> bool:
-            """Dialog: 'You'll stay signed in on these devices after changing your password'."""
-            return bool(driver.execute_script(
-                """
-                function walk(root) {
-                  var btns = Array.from(root.querySelectorAll('button, [role="button"]'));
-                  for (var b of btns) {
-                    var t = (b.innerText || b.textContent || '').trim().toLowerCase();
-                    if (t === 'change password' && !b.disabled) {
-                      b.click();
-                      return true;
+            """Only the open modal, not the form button on the password page itself."""
+            try:
+                el = driver.execute_script(
+                    """
+                    var dialogs = document.querySelectorAll(
+                      '[role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+                    var root = null;
+                    for (var i = 0; i < dialogs.length; i++) {
+                      var t = (dialogs[i].innerText || '').toLowerCase();
+                      if (t.indexOf('stay signed in') === -1
+                          && t.indexOf('after changing') === -1) continue;
+                      var r = dialogs[i].getBoundingClientRect();
+                      if (r.width < 40 || r.height < 40) continue;
+                      root = dialogs[i];
+                      break;
                     }
-                  }
-                  for (var n of root.querySelectorAll('*')) {
-                    if (n.shadowRoot && walk(n.shadowRoot)) return true;
-                  }
-                  return false;
-                }
-                var body = (document.body.innerText || '').toLowerCase();
-                if (body.indexOf('stay signed in') === -1
-                    && body.indexOf('changing your password') === -1
-                    && body.indexOf('after changing your') === -1) {
-                  return false;
-                }
-                return walk(document);
-                """
-            ))
+                    if (!root) return null;
+                    var btns = root.querySelectorAll('button, [role="button"]');
+                    for (var j = 0; j < btns.length; j++) {
+                      var label = (btns[j].innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                      if (label === 'change password') return btns[j];
+                    }
+                    return null;
+                    """
+                )
+            except Exception:
+                el = None
+            if el is None:
+                return False
+            return bool(_trusted_button_click(driver, el) or _cdp_click_element(driver, el))
 
         def submit_password_change_form() -> None:
             click_password_form_continue()
-            rand_sleep(700, 1100)
-            for _ in range(4):
-                if confirm_stay_signed_in_dialog():
+            deadline = time.time() + 6.0
+            confirmed = False
+            while time.time() < deadline:
+                try:
+                    if not is_google_password_change_url(_live_url(driver)):
+                        return
+                except Exception:
+                    pass
+                if not confirmed and confirm_stay_signed_in_dialog():
+                    confirmed = True
                     log(f"{email} — clicked 'Change password' on stay-signed-in dialog")
-                    rand_sleep(2200, 3500)
-                else:
-                    break
+                    deadline = max(deadline, time.time() + 4.0)
+                time.sleep(0.3)
 
         def wait_fields(timeout: float = 18.0) -> list:
             deadline = time.time() + timeout
@@ -4974,7 +7386,7 @@ def _do_login(
             return fields
 
         try:
-            rand_sleep(800, 1400)
+            rand_sleep(200, 400)
             fields = wait_fields()
             log(f"{email} — password change: found {len(fields)} input(s) on page")
 
@@ -5002,19 +7414,28 @@ def _do_login(
             else:
                 fill_field(fields[0], new_pw)
 
-            rand_sleep(200, 400)
+            rand_sleep(150, 250)
             try:
                 fields[-1].send_keys(Keys.ENTER)
             except Exception:
                 pass
-            rand_sleep(400, 700)
             submit_password_change_form()
-            rand_sleep(1500, 2500)
-            clear_totp_pages(max_rounds=2, pause_label="After password change")
+            clear_totp_pages(max_rounds=1, pause_label="After password change")
 
-            url_after, text_after = page_state()
+            def _left_password_form(seconds: float = 6.0) -> str:
+                deadline = time.time() + seconds
+                last = ""
+                while time.time() < deadline:
+                    last = _live_url(driver)
+                    if last and not is_google_password_change_url(last):
+                        return last
+                    time.sleep(0.25)
+                return last or _live_url(driver)
+
+            url_after = _left_password_form()
+            text_after = ""
             if is_google_password_change_url(url_after):
-                fields2 = wait_fields(10.0)
+                fields2 = wait_fields(3.5)
                 log(f"{email} — password change retry: {len(fields2)} input(s)")
                 if fields2:
                     if len(fields2) >= 3:
@@ -5022,48 +7443,77 @@ def _do_login(
                         fill_field(fields2[1], new_pw)
                         fill_field(fields2[2], new_pw)
                     elif len(fields2) >= 2:
-                        fill_field(fields2[0], password)
+                        fill_field(fields2[0], new_pw)
                         fill_field(fields2[1], new_pw)
                     else:
                         fill_field(fields2[0], new_pw)
-                    rand_sleep(200, 400)
+                    rand_sleep(150, 250)
                     submit_password_change_form()
-                    rand_sleep(1500, 2500)
-                    clear_totp_pages(max_rounds=2, pause_label="After password change retry")
-                    url_after, text_after = page_state()
+                    clear_totp_pages(max_rounds=1, pause_label="After password change retry")
+                    url_after = _left_password_form()
+                    text_after = ""
 
-            if is_google_password_change_url(url_after):
-                for _dlg in range(4):
-                    if confirm_stay_signed_in_dialog():
-                        log(f"{email} — dialog confirm pass {_dlg + 1}")
-                        rand_sleep(2200, 3500)
-                        url_after, text_after = page_state()
-                        if not is_google_password_change_url(url_after):
-                            break
-                    else:
+            if is_google_password_change_url(url_after) and confirm_stay_signed_in_dialog():
+                log(f"{email} — clicked 'Change password' on stay-signed-in dialog")
+                _left = time.time() + 6.0
+                while time.time() < _left:
+                    url_after, text_after = page_state()
+                    if not is_google_password_change_url(url_after):
                         break
+                    time.sleep(0.3)
 
-            if not is_google_password_change_url(url_after):
+            def form_still_open() -> bool:
                 try:
-                    driver.get(ACCOUNT_HOME)
-                    rand_sleep(1500, 2500)
-                    url_after, text_after = page_state()
+                    here = _live_url(driver)
                 except Exception:
-                    pass
+                    return False
+                if not is_google_password_change_url(here):
+                    return False
+                return len(collect_password_fields(driver)) > 0
 
-            if is_google_password_change_url(url_after):
+            if form_still_open():
+                log(f"{email} — password form still open, signing out this session")
+                try:
+                    driver.get("https://accounts.google.com/Logout?continue=https://accounts.google.com/ServiceLogin")
+                    rand_sleep(600, 900)
+                    _tap_profile_sign_out()
+                except Exception as exc:
+                    log(f"{email} — Logout URL warning: {exc}")
                 shot = screenshot_b64()
                 return {
                     "status": "unknown",
-                    "reason": "Password change page still showing — check screenshot / try manually",
+                    "reason": "Password form was still open, so the new password was not saved. This session was signed out.",
                     "totpCode": totp_code,
-                    "newPassword": new_pw,
                     "debugScreenshot": shot,
                 }
 
-            # Password changed — do NOT return Open yet; sign out all devices first.
-            log(f"{email} — Password change done — starting device activity sign-outs")
-            return run_device_activity_signouts(new_pw)
+            # Password changed. Device logout continues to the device list.
+            # Off: sign out only this browser and stop.
+            if sign_out_sessions:
+                log(f"{email} — Password change done — starting device activity sign-outs")
+                return run_device_activity_signouts(new_pw)
+            log(f"{email} — Password change done — signing out this session only")
+            signed_self = False
+            try:
+                signed_self = sign_out_via_profile_icon()
+            except Exception as exc:
+                log(f"{email} — profile sign-out warning: {exc}")
+            shot = screenshot_b64()
+            signout_note = (
+                "current session signed out"
+                if signed_self
+                else "sign-out did not finish"
+            )
+            return {
+                "status": "opened",
+                "reason": (
+                    f"Demo password changed, {signout_note} ✅ "
+                    f"(naya password export — {len(new_pw)} chars)"
+                ),
+                "totpCode": totp_code,
+                "newPassword": new_pw,
+                "debugScreenshot": shot,
+            }
         except Exception as exc:
             log(f"{email} — password change error: {exc}")
             shot = screenshot_b64()
@@ -5075,53 +7525,400 @@ def _do_login(
                 "debugScreenshot": shot,
             }
 
-    # A phone already has Google cookies and a little mouse history. A cold
-    # profile that opens the sign-in form immediately is what makes the
-    # checkbox escalate to a puzzle. One homepage load is enough; no search.
-    try:
-        log(f"{email} — Warmup: google.com")
-        driver.get("https://www.google.com")
-        _warm_deadline = time.time() + 8
-        while time.time() < _warm_deadline:
+    def finish_demo_password_change(current_url: str) -> dict | None:
+        """After a real sign-in, open the password page and fill the demo password.
+
+        The India proxy signs in on the email page and lands on account home.
+        The change form only exists at signinoptions/password, so a home URL
+        used to be reported as Open before this page was ever opened.
+        """
+        nonlocal _password_change_started, url, text
+        if (
+            not change_password_after_login
+            or robot_check_only
+            or _password_change_started
+        ):
+            return None
+        if not (
+            signed_in_host(current_url)
+            or is_google_password_change_url(current_url)
+        ):
+            return None
+        _password_change_started = True
+
+        def _landed(href: str) -> bool:
+            if is_google_password_change_url(href):
+                return True
+            kind = challenge_kind(href)
+            if kind in {
+                "pwd", "password", "totp", "ipp", "skotp", "ootp", "sms",
+                "selection", "dp",
+            }:
+                return True
+            return "signin/continue" in href
+
+        def _wait_land(timeout: float, leave: str | None = None) -> str:
+            deadline = time.time() + timeout
+            last = _live_url(driver)
+            while time.time() < deadline:
+                last = _live_url(driver)
+                if leave and last == leave:
+                    time.sleep(0.3)
+                    continue
+                if _landed(last):
+                    return last
+                time.sleep(0.3)
+            return last
+
+        def _click_challenge_choice(mode: str) -> bool:
             try:
-                if driver.execute_script("return document.readyState") == "complete":
-                    break
+                el = driver.execute_script(
+                    """
+                    var mode = arguments[0];
+                    function norm(node) {
+                      return (node.innerText || node.textContent || '')
+                        .replace(/\\s+/g, ' ').trim().toLowerCase();
+                    }
+                    function visible(node) {
+                      if (!node || !node.getBoundingClientRect) return false;
+                      var r = node.getBoundingClientRect();
+                      return r.width > 8 && r.height > 8 && r.bottom > 0 && r.top < window.innerHeight;
+                    }
+                    var hits = [];
+                    function walk(root) {
+                      if (!root || !root.querySelectorAll) return;
+                      var nodes = root.querySelectorAll(
+                        'button, a, [role="button"], [role="link"], [data-challengetype], li'
+                      );
+                      for (var i = 0; i < nodes.length; i++) {
+                        hits.push(nodes[i]);
+                        if (nodes[i].shadowRoot) walk(nodes[i].shadowRoot);
+                      }
+                    }
+                    walk(document);
+                    var best = null;
+                    for (var j = 0; j < hits.length; j++) {
+                      var node = hits[j];
+                      var t = norm(node);
+                      if (!t || t.length > 120 || !visible(node)) continue;
+                      var ok = mode === 'authenticator'
+                        ? (node.getAttribute('data-challengetype') === '6'
+                           || t.indexOf('authenticator') !== -1)
+                        : (t.indexOf('try another way') !== -1
+                           || t.indexOf('another way') !== -1);
+                      if (!ok) continue;
+                      var b = node.closest
+                        ? (node.closest('button, a, [role="button"], [role="link"], li') || node)
+                        : node;
+                      if (!visible(b)) b = node;
+                      if (!best || t.length < best.len) best = {el: b, len: t.length};
+                    }
+                    return best ? best.el : null;
+                    """,
+                    mode,
+                )
+            except Exception:
+                el = None
+            return bool(el and _cdp_click_element(driver, el))
+
+        def _submit_current_password() -> bool:
+            field = wait_for_any([
+                'input[name="Passwd"]',
+                'input[type="password"]:not([name="hiddenPassword"])',
+                'input[name="password"]',
+                '#password input',
+            ], timeout=8)
+            if not field:
+                return False
+            try:
+                driver.execute_script(
+                    "arguments[0].focus(); arguments[0].click();", field,
+                )
             except Exception:
                 pass
-            time.sleep(0.3)
-        _xdt = _get_xdotool()
-        _win = _get_chrome_win_id()
-        if _xdt and _win:
-            _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
-            subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
-            for _mv in range(3):
-                subprocess.run(
-                    [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
-                    capture_output=True, timeout=3, env=_denv,
-                )
-                time.sleep(random.uniform(0.15, 0.35))
-        rand_sleep(600, 1100)
-    except Exception as _warm_err:
-        log(f"{email} — warmup skipped: {_warm_err}")
+            fast_paste(driver, field, password)
+            nxt = wait_for_any(
+                ["#passwordNext button", "#passwordNext [role='button']", "#passwordNext"],
+                timeout=2,
+            )
+            if not (nxt and _trusted_button_click(driver, nxt)):
+                _click_button_text(driver, ("Next",))
+            try:
+                for typ in ("keyDown", "keyUp"):
+                    driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                        "type": typ,
+                        "key": "Enter",
+                        "code": "Enter",
+                        "windowsVirtualKeyCode": 13,
+                        "nativeVirtualKeyCode": 13,
+                    })
+            except Exception:
+                pass
+            return True
 
-    log(f"{email} — Opening password-page sign-in link")
-    try:
-        driver.get(LOGIN_START)
-        rand_sleep(600, 1000)
-    except Exception as e:
-        # Navigation failure = Chrome/ChromeDriver crashed — treat as retriable
-        shot = None
-        try: shot = screenshot_b64()
-        except Exception: pass
+        _reauth_totp_attempts = 0
+
+        def _submit_reauth_totp(leave_url: str) -> str:
+            nonlocal _reauth_totp_attempts
+            try:
+                here = _live_url(driver)
+            except Exception:
+                here = ""
+            if here and not is_totp_challenge_url(here):
+                return here
+            _reauth_totp_attempts += 1
+            wrong = False
+            try:
+                _, body = page_state()
+                wrong = any(x in body for x in (
+                    "wrong code", "didn't work", "code is incorrect", "try again",
+                ))
+            except Exception:
+                pass
+            enter_fresh_totp_once(
+                "Password page re-auth",
+                force_new=wrong or totp_window_remaining() <= 8,
+                field_timeout=5,
+            )
+            return _wait_land(12, leave=leave_url)
+
+        target = current_url
+        if not is_google_password_change_url(target):
+            log(f"{email} — Demo password change: opening signinoptions/password")
+            try:
+                driver.get(LOGIN_START)
+            except Exception as exc:
+                log(f"{email} — password page nav failed: {exc}")
+                shot = screenshot_b64()
+                return {
+                    "status": "unknown",
+                    "reason": "Signed in, but the password change page did not open",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
+            target = _wait_land(18)
+            log(f"{email} — password page nav: {target[:90]}")
+            snap("Password change page")
+
+        for _hop in range(4):
+            if is_google_password_change_url(target):
+                break
+            url, text = page_state()
+            if any(x in text for x in (
+                "wrong password", "didn't recognize", "incorrect password",
+                "password you entered",
+            )):
+                shot = screenshot_b64()
+                return {
+                    "status": "wrong_password",
+                    "reason": "Current password was rejected while opening the password change page",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
+            kind = challenge_kind(target)
+            if kind in {"skotp", "ootp", "sms", "selection", "dp"}:
+                log(f"{email} — password page re-check is {kind}, opening Authenticator")
+                if kind in {"skotp", "ootp", "sms"}:
+                    _click_challenge_choice("other")
+                    time.sleep(1.0)
+                _click_challenge_choice("authenticator")
+                time.sleep(0.8)
+                if is_totp_challenge_url(driver.current_url or ""):
+                    target = _submit_reauth_totp(target)
+                else:
+                    target = _wait_land(8, leave=target)
+                continue
+            if is_totp_challenge_url(target):
+                if _reauth_totp_attempts >= 2:
+                    break
+                log(f"{email} — password page re-check asked for the authenticator code")
+                target = _submit_reauth_totp(target)
+                continue
+            if kind in {"pwd", "password"} or "challenge/pwd" in target:
+                log(f"{email} — password page asked for the current password")
+                if not _submit_current_password():
+                    break
+                target = _wait_land(16, leave=target)
+                continue
+            if "signin/continue" in target:
+                try:
+                    driver.execute_script(
+                        """
+                        var btn = document.querySelector('#confirm, button[type="submit"], button');
+                        if (btn) btn.click();
+                        """
+                    )
+                except Exception:
+                    pass
+                target = _wait_land(8, leave=target)
+                continue
+            break
+
+        url, text = page_state()
+        if is_google_password_change_url(url):
+            snap("Password change page")
+            return complete_password_change_if_needed(url)
+        snap("Password change page")
+        shot = screenshot_b64()
         return {
             "status": "unknown",
-            "reason": f"Chrome crash while opening accounts.google.com. ({type(e).__name__}: {str(e).splitlines()[0][:150]})",
+            "reason": f"Signed in, but the password change form did not open ({url[:70]})",
             "totpCode": totp_code,
             "debugScreenshot": shot,
         }
 
-    url, text = page_state()
-    log(f"{email} — After nav: {url[:70]}")
+    # Phone proxy: direct identifier URL is faster than myaccount password redirect (~20s).
+    _signin_entry = (
+        GOOGLE_EMAIL_SIGNIN
+        if (not change_password_after_login or _phone_fast)
+        else LOGIN_START
+    )
+
+    # A phone already has Google cookies and a little mouse history. A cold
+    # profile that opens the sign-in form immediately is what makes the
+    # checkbox escalate to a puzzle. One homepage load is enough; no search.
+    if robot_check_only:
+        if _use_warmup:
+            try:
+                log(f"{email} — Warmup: google.com")
+                driver.get("https://www.google.com")
+                _warm_deadline = time.time() + 3.5
+                while time.time() < _warm_deadline:
+                    try:
+                        if driver.execute_script("return document.readyState") in ("interactive", "complete"):
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.15)
+                rand_sleep(250, 450)
+            except Exception as _warm_err:
+                log(f"{email} — warmup skipped: {_warm_err}")
+        log(f"{email} — Robot check: open email sign-in")
+        try:
+            driver.get(_signin_entry)
+            time.sleep(0.45)
+        except Exception as e:
+            shot = None
+            try:
+                shot = screenshot_b64()
+            except Exception:
+                pass
+            return {
+                "status": "unknown",
+                "reason": f"Chrome crash while opening sign-in. ({type(e).__name__})",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
+        url, text = page_state()
+        log(f"{email} — After nav: {url[:70]}")
+        snap("Sign-in page")
+        tmark("robot sign-in nav")
+    else:
+        if not change_password_after_login:
+            if _use_warmup:
+                try:
+                    log(f"{email} — Warmup: google.com")
+                    driver.get("https://www.google.com")
+                    _warm_deadline = time.time() + (4 if _phone_fast else 8)
+                    while time.time() < _warm_deadline:
+                        try:
+                            if driver.execute_script("return document.readyState") in ("interactive", "complete"):
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(0.2)
+                    _xdt = _get_xdotool()
+                    _win = _get_chrome_win_id()
+                    if _xdt and _win:
+                        _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
+                        subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
+                        for _mv in range(2 if _phone_fast else 3):
+                            subprocess.run(
+                                [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
+                                capture_output=True, timeout=3, env=_denv,
+                            )
+                            time.sleep(random.uniform(0.1, 0.25))
+                    rand_sleep(400, 700) if _phone_fast else rand_sleep(600, 1100)
+                except Exception as _warm_err:
+                    log(f"{email} — warmup skipped: {_warm_err}")
+                tmark("warmup google.com")
+            elif _phone_fast:
+                log(f"{email} — Phone mode: skip warmup (set PHONE_WARMUP=1 to enable)")
+
+            try:
+                log(f"{email} — Opening email sign-in link")
+                tmark("sign-in nav start")
+                driver.get(_signin_entry)
+                rand_sleep(*_post_nav_sleep)
+            except Exception as e:
+                shot = None
+                try:
+                    shot = screenshot_b64()
+                except Exception:
+                    pass
+                return {
+                    "status": "unknown",
+                    "reason": f"Chrome crash while opening accounts.google.com. ({type(e).__name__}: {str(e).splitlines()[0][:150]})",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
+            url, text = page_state()
+            log(f"{email} — After nav: {url[:70]}")
+            snap("Sign-in page")
+            tmark("sign-in nav done")
+        else:
+            if _use_warmup:
+                try:
+                    log(f"{email} — Warmup: google.com")
+                    driver.get("https://www.google.com")
+                    _warm_deadline = time.time() + (4 if _phone_fast else 8)
+                    while time.time() < _warm_deadline:
+                        try:
+                            if driver.execute_script("return document.readyState") in ("interactive", "complete"):
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(0.2)
+                    _xdt = _get_xdotool()
+                    _win = _get_chrome_win_id()
+                    if _xdt and _win:
+                        _denv = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}
+                        subprocess.run([_xdt, "windowfocus", "--sync", _win], capture_output=True, timeout=3, env=_denv)
+                        for _mv in range(2 if _phone_fast else 3):
+                            subprocess.run(
+                                [_xdt, "mousemove", "--window", _win, str(random.randint(40, 280)), str(random.randint(80, 360))],
+                                capture_output=True, timeout=3, env=_denv,
+                            )
+                            time.sleep(random.uniform(0.1, 0.25))
+                    rand_sleep(400, 700) if _phone_fast else rand_sleep(600, 1100)
+                except Exception as _warm_err:
+                    log(f"{email} — warmup skipped: {_warm_err}")
+                tmark("warmup google.com")
+            elif _phone_fast:
+                log(f"{email} — Phone mode: skip warmup (set PHONE_WARMUP=1 to enable)")
+
+            log(f"{email} — Opening password-page sign-in link")
+            try:
+                tmark("sign-in nav start")
+                driver.get(_signin_entry)
+                rand_sleep(*_post_nav_sleep)
+            except Exception as e:
+                shot = None
+                try:
+                    shot = screenshot_b64()
+                except Exception:
+                    pass
+                return {
+                    "status": "unknown",
+                    "reason": f"Chrome crash while opening accounts.google.com. ({type(e).__name__}: {str(e).splitlines()[0][:150]})",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
+
+            url, text = page_state()
+            log(f"{email} — After nav: {url[:70]}")
+            snap("Sign-in page")
+            tmark("sign-in nav done")
 
     # Defined early so TOTP right after LOGIN_START is handled before email step.
     def finish_after_totp(start_label: str) -> dict | None:
@@ -5142,16 +7939,18 @@ def _do_login(
                 "totpCode": totp_code,
                 "debugScreenshot": shot,
             }
-        clear_totp_pages(max_rounds=2, pause_label=f"{start_label} extra")
-        rand_sleep(700, 1200)
-        deadline = time.time() + 35
+        clear_totp_pages(max_rounds=1 if _pace["fast"] else 2, pause_label=f"{start_label} extra")
+        rand_sleep(*_pace["totp_after"])
+        deadline = time.time() + _pace["totp_wait_s"]
         while time.time() < deadline:
             url = driver.current_url
             if signed_in_host(url) or is_google_password_change_url(url):
                 break
+            if "gds.google.com" in url:
+                break
             if is_totp_challenge_url(url):
                 enter_fresh_totp_once("TOTP while waiting")
-                rand_sleep(700, 1200)
+                rand_sleep(*_pace["totp_after"])
                 continue
             if "signin/continue" in url:
                 try:
@@ -5161,7 +7960,7 @@ def _do_login(
                     """)
                 except Exception:
                     pass
-            time.sleep(0.45)
+            time.sleep(_pace["totp_poll_s"])
         url, text = page_state()
         _pc = complete_password_change_if_needed(url)
         if _pc:
@@ -5307,7 +8106,22 @@ def _do_login(
 
     # ── Step 2: Enter email ───────────────────────────────────────────────────
     log(f"{email} — Step 2: typing email")
+    tmark("email step start")
     email_field = wait_for_any(EMAIL_SELECTORS, timeout=8)
+
+    if not email_field and not change_password_after_login:
+        log(f"{email} — email field missing (stale session?) — logout + identifier retry")
+        try:
+            driver.get(
+                "https://accounts.google.com/Logout"
+                "?continue=https%3A%2F%2Faccounts.google.com%2Fv3%2Fsignin%2Fidentifier"
+            )
+            rand_sleep(500, 900)
+            driver.get(GOOGLE_EMAIL_SIGNIN)
+            rand_sleep(500, 900)
+        except Exception as _reauth_err:
+            log(f"{email} — sign-in retry nav warning: {_reauth_err}")
+        email_field = wait_for_any(EMAIL_SELECTORS, timeout=10)
 
     if not email_field:
         url, text = page_state()
@@ -5330,47 +8144,99 @@ def _do_login(
     # click with stale-element retry (proxy extension can cause brief page reload)
     for _attempt in range(3):
         try:
-            touch_click(driver, email_field)   # TouchEvent — real phone fires touch not mouse
+            if _phone_fast:
+                driver.execute_script("arguments[0].focus(); arguments[0].click();", email_field)
+            else:
+                touch_click(driver, email_field)
             break
         except Exception:
-            rand_sleep(200, 400)
+            rand_sleep(80, 150) if _phone_fast else rand_sleep(200, 400)
             email_field = wait_for_any(EMAIL_SELECTORS, timeout=6) or email_field
 
-    rand_sleep(80, 160)
-    clipboard_type(driver, email_field, email)   # instant paste — xdotool clipboard
-    rand_sleep(100, 200)
-    # Click the "Next" button via touch — more human than Keys.ENTER (detectable as Selenium)
-    _email_next = wait_for_any([
-        '#identifierNext button', '#identifierNext', '[jsname="LgbsSe"]',
-        'button[type="button"]', 'div[role="button"]',
-    ], timeout=4)
-    if _email_next:
-        try:
-            touch_click(driver, _email_next)   # TouchEvent tap on Next
-        except Exception:
-            email_field.send_keys(Keys.ENTER)
+    if _phone_fast:
+        fast_paste(driver, email_field, email)
     else:
-        email_field.send_keys(Keys.ENTER)
+        rand_sleep(80, 160)
+        clipboard_type(driver, email_field, email)
+        rand_sleep(100, 200)
 
-    # Wait for any URL change that signals automation rejection or a challenge page.
-    # Google's sign-in is an SPA: after typing email + clicking Next, the URL
-    # STAYS at /v3/signin/identifier while the password field appears in-place.
-    # We only break early if Google navigates away (rejected or challenge).
-    # If the URL doesn't change (normal SPA case), we time out and proceed to
-    # Step 3 which looks for the password field directly.
-    _nav_deadline = time.time() + 8
+    def _click_email_next() -> bool:
+        # Only the real Next control. A generic button on this page is not Next.
+        nxt = wait_for_any(["#identifierNext button", "#identifierNext"], timeout=2)
+        if nxt and _trusted_button_click(driver, nxt):
+            log(f"{email} — Next clicked")
+            return True
+        if _click_button_text(driver, ("Next",)):
+            log(f"{email} — Next clicked by label")
+            return True
+        try:
+            email_field.send_keys(Keys.ENTER)
+            log(f"{email} — Next via Enter")
+            return True
+        except Exception:
+            return False
+
+    def _email_box_visible() -> bool:
+        try:
+            box = driver.find_element(By.CSS_SELECTOR, "#identifierId, input[type='email']")
+            return bool(box.is_displayed())
+        except Exception:
+            return False
+
+    _click_email_next()
+    # A slow phone proxy can take as long to leave this page as it took to open it.
+    _nav_deadline = time.time() + (32 if _phone_fast else 12)
+    _next_retried = False
+    _restarts = 0
+    _next_at = time.time()
     while time.time() < _nav_deadline:
         try:
-            _cur = driver.current_url
+            _cur = driver.current_url or ""
             if "signin/rejected" in _cur or ("signin/" in _cur and "identifier" not in _cur):
+                break
+            # The email page keeps a hidden password input. Only a visible box counts.
+            _pw_seen = False
+            for _pw in driver.find_elements(By.CSS_SELECTOR, 'input[name="Passwd"], input[type="password"]'):
+                try:
+                    if (_pw.get_attribute("name") or "") == "hiddenPassword":
+                        continue
+                    if _pw.is_displayed():
+                        _pw_seen = True
+                        break
+                except Exception:
+                    continue
+            if _pw_seen:
                 break
         except Exception:
             pass
+        if _restarts < 2 and _clear_google_error_dialog(driver, email):
+            _restarts += 1
+            email_field = wait_for_any(EMAIL_SELECTORS, timeout=12) or email_field
+            try:
+                if _phone_fast:
+                    fast_paste(driver, email_field, email)
+                else:
+                    clipboard_type(driver, email_field, email)
+                _click_email_next()
+            except Exception as exc:
+                log(f"{email} — resubmit after Restart failed: {exc}")
+            _next_retried = False
+            _next_at = time.time()
+            _nav_deadline = max(_nav_deadline, time.time() + 24)
+            continue
+        # A second Next too soon interrupts the first request and Google
+        # opens "Something went wrong". Wait until that request has had a
+        # chance to leave the page.
+        if not _next_retried and (time.time() - _next_at) > 10 and _email_box_visible():
+            log(f"{email} — email page still open, clicking Next again")
+            _click_email_next()
+            _next_retried = True
         time.sleep(0.25)
-    rand_sleep(300, 600)  # brief settle
 
     url, text = page_state()
     log(f"{email} — After email submit: {url[:70]}")
+    snap("After email")
+    tmark("email step done")
 
     if "signin/rejected" in url:
         shot = screenshot_b64()
@@ -5406,99 +8272,44 @@ def _do_login(
     # one checkbox click, then the password page. An image puzzle is a
     # different page — we do not try to solve that.
     if "challenge/recaptcha" in url:
-        log(f"{email} — I'm not a robot checkbox — clicking it")
-        _rc_result = "missed"
-        try:
-            _iframe_deadline = time.time() + 8
-            _anchor_frame = None
-            while time.time() < _iframe_deadline and _anchor_frame is None:
-                driver.switch_to.default_content()
-                for _fr in driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha']"):
-                    _src = _fr.get_attribute("src") or ""
-                    if "anchor" in _src or "bframe" not in _src:
-                        if "bframe" in _src:
-                            continue
-                        _anchor_frame = _fr
-                        break
-                if _anchor_frame is None:
-                    time.sleep(0.3)
-            if _anchor_frame is not None:
-                driver.switch_to.frame(_anchor_frame)
-                _box = wait_for_any(["#recaptcha-anchor", ".recaptcha-checkbox-border"], timeout=6)
-                if _box:
-                    # Look at the box the way a phone user does, then click once.
-                    rand_sleep(1200, 2200)
-                    try:
-                        natural_mouse_move(driver, _box)
-                    except Exception:
-                        pass
-                    _box.click()
-                    log(f"{email} — I'm not a robot checkbox clicked")
-                driver.switch_to.default_content()
-
-            def _checkbox_ticked() -> bool:
-                driver.switch_to.default_content()
-                for _fr in driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha']"):
-                    _src = _fr.get_attribute("src") or ""
-                    if "bframe" in _src:
-                        continue
-                    try:
-                        driver.switch_to.frame(_fr)
-                        _anchor = driver.find_elements(By.CSS_SELECTOR, "#recaptcha-anchor")
-                        if _anchor and _anchor[0].get_attribute("aria-checked") == "true":
-                            driver.switch_to.default_content()
-                            return True
-                    except Exception:
-                        pass
-                    driver.switch_to.default_content()
-                return False
-
-            # The puzzle iframe is often already in the DOM. Success is the
-            # checkbox ticking, same as on a phone — not the iframe existing.
-            _rc_deadline = time.time() + 10
-            while time.time() < _rc_deadline:
-                driver.switch_to.default_content()
-                if "challenge/recaptcha" not in driver.current_url or _checkbox_ticked():
-                    _rc_result = "passed"
-                    break
-                time.sleep(0.4)
-            else:
-                _image = False
-                driver.switch_to.default_content()
-                for _bf in driver.find_elements(By.CSS_SELECTOR, "iframe[src*='bframe']"):
-                    try:
-                        if _bf.is_displayed() and _bf.size.get("height", 0) > 80:
-                            _image = True
-                            break
-                    except Exception:
-                        pass
-                _rc_result = "image" if _image else "timeout"
-        except Exception as _rc_err:
-            log(f"{email} — recaptcha checkbox error: {_rc_err}")
-            _rc_result = "missed"
-        finally:
-            try:
-                driver.switch_to.default_content()
-            except Exception:
-                pass
+        _rc_result = handle_recaptcha_checkbox(
+            driver, email, pace=_pace, proxy_url=proxy_url, page_state=page_state,
+        )
         url, text = page_state()
         log(f"{email} — After I'm not a robot ({_rc_result}): {url[:70]}")
+        if _rc_result != "passed" and "challenge/recaptcha" not in url:
+            log(f"{email} — left the robot page, continuing")
+            _rc_result = "passed"
         if _rc_result != "passed":
             shot = screenshot_b64()
-            _why = (
-                "Google asked for an image puzzle after I'm not a robot."
-                if _rc_result == "image"
-                else "Google showed I'm not a robot and the checkbox did not open the password page."
-            )
-            return {
+            if _rc_result == "loading":
+                _why = "Verify it's you stayed on Loading. The robot checkbox never appeared."
+            elif _rc_result == "image":
+                _why = "Google asked for an image puzzle after I'm not a robot."
+            else:
+                _why = "Google showed I'm not a robot and the checkbox did not open the password page."
+            if _rc_result == "image":
+                try:
+                    from recaptcha_solver import captcha_solver_configured as _csc
+                    if not _csc():
+                        _why += (
+                            " Free path: pip install faster-whisper on VPS (audio captcha), "
+                            "or set CAPTCHA_API_KEY for paid image solve."
+                        )
+                except Exception:
+                    pass
+            _fail = {
                 "status": "verification_required",
                 "reason": _why,
                 "totpCode": totp_code,
                 "debugScreenshot": shot,
             }
+            if robot_check_only:
+                _fail["robotOutcome"] = "robot"
+            return _fail
 
     result = classify(url, text)
-    if result:
+    if result and not robot_check_only:
         return result
 
     PW_SELECTORS = [
@@ -5508,9 +8319,77 @@ def _do_login(
         '#password input',
     ]
 
+    if robot_check_only:
+        log(f"{email} — Robot check: looking for password page (no password typed)")
+        pw_probe = wait_for_any(PW_SELECTORS, timeout=8)
+        url, text = page_state()
+        if pw_probe:
+            shot = screenshot_b64()
+            return {
+                "status": "opened",
+                "reason": "Robot check: password page (not robot)",
+                "totpCode": totp_code,
+                "robotOutcome": "not_robot",
+                "debugScreenshot": shot,
+            }
+        if "challenge/recaptcha" in url:
+            shot = screenshot_b64()
+            return {
+                "status": "verification_required",
+                "reason": "Robot check: captcha / I'm not a robot",
+                "totpCode": totp_code,
+                "robotOutcome": "robot",
+                "debugScreenshot": shot,
+            }
+        if result:
+            out = dict(result)
+            reason_l = str(out.get("reason", "")).lower()
+            if (
+                out.get("status") == "verification_required"
+                and any(x in reason_l for x in (
+                    "image puzzle", "not a robot", "recaptcha", "captcha",
+                ))
+            ):
+                out["robotOutcome"] = "robot"
+            else:
+                out["robotOutcome"] = "unknown"
+            out.setdefault("debugScreenshot", screenshot_b64())
+            out.setdefault("totpCode", totp_code)
+            return out
+        shot = screenshot_b64()
+        return {
+            "status": "unknown",
+            "reason": f"Robot check: password page nahi mila ({url[:80]})",
+            "totpCode": totp_code,
+            "robotOutcome": "unknown",
+            "debugScreenshot": shot,
+        }
+
     # ── Step 3: Enter password ────────────────────────────────────────────────
     log(f"{email} — Step 3: typing password")
-    pw_field = wait_for_any(PW_SELECTORS, timeout=8)
+    tmark("password step start")
+    pw_field = None
+    _pw_deadline = time.time() + (14 if _phone_fast else 8)
+    while time.time() < _pw_deadline and pw_field is None:
+        _cur_pw = _live_url(driver)
+        if "challenge/recaptcha" in _cur_pw:
+            log(f"{email} — robot page opened while waiting for password")
+            _rc_result = handle_recaptcha_checkbox(
+                driver, email, pace=_pace, proxy_url=proxy_url, page_state=page_state,
+            )
+            url, text = page_state()
+            log(f"{email} — After I'm not a robot ({_rc_result}): {url[:70]}")
+            if _rc_result != "passed" and "challenge/recaptcha" in (driver.current_url or ""):
+                shot = screenshot_b64()
+                return {
+                    "status": "verification_required",
+                    "reason": "Google showed I'm not a robot and the checkbox did not open the password page.",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
+            pw_field = wait_for_any(PW_SELECTORS, timeout=10)
+            break
+        pw_field = wait_for_any(PW_SELECTORS, timeout=0.4)
 
     if pw_field:
         url, text = page_state()
@@ -5520,50 +8399,127 @@ def _do_login(
 
     if not pw_field:
         url, text = page_state()
-        result = classify(url, text)
-        if result:
-            return result
-        shot = screenshot_b64()
-        return {
-            "status": "unknown",
-            "reason": f"Password field not found. URL: {url[:80]}",
-            "totpCode": totp_code,
-            "debugScreenshot": shot,
-        }
+        if "challenge/recaptcha" in url:
+            log(f"{email} — robot page opened while waiting for password")
+            _rc_result = handle_recaptcha_checkbox(
+                driver, email, pace=_pace, proxy_url=proxy_url, page_state=page_state,
+            )
+            url, text = page_state()
+            log(f"{email} — After I'm not a robot ({_rc_result}): {url[:70]}")
+            if "challenge/recaptcha" not in (driver.current_url or ""):
+                pw_field = wait_for_any(PW_SELECTORS, timeout=10)
+        if not pw_field:
+            result = classify(url, text)
+            if result:
+                return result
+            shot = screenshot_b64()
+            return {
+                "status": "unknown",
+                "reason": f"Password field not found. URL: {url[:80]}",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
 
-    touch_click(driver, pw_field)    # TouchEvent — real phone fires touch not mouse
-    rand_sleep(80, 160)
-    clipboard_type(driver, pw_field, password)   # instant paste — xdotool clipboard
-    rand_sleep(100, 180)
-    # Click the "Next" button via touch — more human than Keys.ENTER (detectable as Selenium)
-    _pw_next = wait_for_any([
-        '#passwordNext button', '#passwordNext', '[jsname="LgbsSe"]',
-        'button[type="button"]', 'div[role="button"]',
-    ], timeout=4)
-    if _pw_next:
+    if _phone_fast:
         try:
-            touch_click(driver, _pw_next)    # TouchEvent tap on Next
+            driver.execute_script("arguments[0].focus(); arguments[0].click();", pw_field)
         except Exception:
-            pw_field.send_keys(Keys.ENTER)
+            pass
+        fast_paste(driver, pw_field, password)
     else:
-        pw_field.send_keys(Keys.ENTER)
+        touch_click(driver, pw_field)
+        rand_sleep(80, 160)
+        clipboard_type(driver, pw_field, password)
+        rand_sleep(100, 180)
+    def _press_enter() -> None:
+        for typ in ("keyDown", "keyUp"):
+            driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                "type": typ,
+                "key": "Enter",
+                "code": "Enter",
+                "windowsVirtualKeyCode": 13,
+                "nativeVirtualKeyCode": 13,
+            })
 
-    # Wait for URL to advance past the password page (proxy latency can be 2-4s).
-    # Polling is more reliable than a fixed sleep — catches fast AND slow responses.
-    _pre_pwd_url = driver.current_url
-    _nav_deadline = time.time() + 10
+    def _click_password_next() -> None:
+        try:
+            state = driver.execute_script(
+                """
+                var b = document.querySelector('#passwordNext button, #passwordNext [role="button"]');
+                if (!b) return 'missing';
+                return (b.disabled || b.getAttribute('aria-disabled') === 'true') ? 'disabled' : 'ready';
+                """
+            )
+            log(f"{email} — password Next {state}")
+        except Exception:
+            pass
+        nxt = wait_for_any(["#passwordNext button", "#passwordNext [role='button']", "#passwordNext"], timeout=2)
+        if nxt and _trusted_button_click(driver, nxt):
+            log(f"{email} — password Next clicked")
+        elif _click_button_text(driver, ("Next",)):
+            log(f"{email} — password Next clicked by label")
+        else:
+            log(f"{email} — password Next control not found")
+        try:
+            pw_field.click()
+        except Exception:
+            pass
+        try:
+            _press_enter()
+            log(f"{email} — password Enter pressed")
+        except Exception as exc:
+            log(f"{email} — password Enter failed: {exc}")
+
+    _click_password_next()
+
+    # The first Next on this proxy often lands before Google accepts the field.
+    # Email already retries; the password page was stopping after one click.
+    _pre_pwd_url = _live_url(driver)
+    _pwd_wait_s = 8
+    _nav_deadline = time.time() + _pwd_wait_s
+    _pw_retried = False
+    _pw_next_at = time.time()
     while time.time() < _nav_deadline:
         try:
-            _cur = driver.current_url
+            _cur = _live_url(driver)
             if _cur != _pre_pwd_url and "challenge/pwd" not in _cur:
+                break
+            _, _body = page_state()
+            if any(x in _body for x in (
+                "wrong password", "didn't recognize", "incorrect password",
+                "password you entered",
+            )):
                 break
         except Exception:
             pass
-        time.sleep(0.25)
-    rand_sleep(300, 600)  # extra settle after URL change
+        if (
+            not _pw_retried
+            and (time.time() - _pw_next_at) > 5
+            and "challenge/pwd" in _live_url(driver)
+        ):
+            log(f"{email} — password page still open, submitting again")
+            try:
+                pw_field = wait_for_any(PW_SELECTORS, timeout=2) or pw_field
+                filled = driver.execute_script(
+                    "return (arguments[0].value || '').length", pw_field,
+                ) or 0
+                if password and int(filled) < len(password):
+                    log(f"{email} — password field short ({filled}/{len(password)}), typing again")
+                    pw_field.click()
+                    pw_field.send_keys(password)
+            except Exception as exc:
+                log(f"{email} — password refill: {exc}")
+            _click_password_next()
+            _pw_retried = True
+            _nav_deadline = max(_nav_deadline, time.time() + 12)
+        time.sleep(0.2)
+    rand_sleep(150, 300) if _phone_fast else rand_sleep(300, 600)
 
     url, text = page_state()
     log(f"{email} — After password submit: {url[:70]}")
+    snap("After password")
+    tmark("password step done")
+    _log_login_timing_summary()
 
     # ── Quick wrong-password check (before anything else) ─────────────────────
     if any(x in text for x in [
@@ -5653,6 +8609,9 @@ def _do_login(
     # challenge/totp / challenge/ipp = already on TOTP input page (handle separately below).
     # Text: "verify that it's you" is the page heading for the Google Authenticator
     # challenge page — distinct from "verify it's you" (method-selection heading).
+    if is_sms_code_url(url):
+        log(f"{email} — Phone SMS code page, not Google Authenticator ({url[:70]})")
+        totp_field = None
     is_2fa_select = (
         any(x in text for x in [
             "2-step verification",
@@ -5663,6 +8622,7 @@ def _do_login(
         ])
         or "challenge/dp" in url
         or "challenge/selection" in url
+        or is_sms_code_url(url)
         or _on_totp_url  # already on TOTP input page — treat as 2FA page
     )
 
@@ -5692,58 +8652,124 @@ def _do_login(
             # Method-selection page — click the Google Authenticator option.
             log(f"{email} — Clicking 'Google Authenticator' option")
 
-            def _click_authenticator():
+            def _click_visible_match(mode: str) -> bool:
+                """mode is 'other' or 'authenticator'. Walks closed shadow roots."""
                 try:
-                    driver.execute_script("""
-                        // Try by data-challengetype (totp = 6)
-                        var byType = document.querySelector('[data-challengetype="6"]');
-                        if (byType) { byType.click(); return; }
-                        // Try by visible text containing "authenticator"
-                        var allEls = Array.from(document.querySelectorAll(
-                            'li, div[role="listitem"], [data-challengetype]'));
-                        var found = allEls.find(function(el) {
-                            return el.innerText && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
-                        });
-                        if (found) { found.click(); return; }
-                        // Broader fallback — any clickable element with the word
-                        var broader = Array.from(document.querySelectorAll('*')).find(function(el) {
-                            return el.children.length === 0
-                                && el.innerText
-                                && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
-                        });
-                        if (broader) broader.click();
-                    """)
-                except Exception as e:
-                    log(f"Authenticator click error: {e}")
+                    el = driver.execute_script(
+                        """
+                        var mode = arguments[0];
+                        function norm(node) {
+                          return (node.innerText || node.textContent || '')
+                            .replace(/\\s+/g, ' ').trim().toLowerCase();
+                        }
+                        function visible(node) {
+                          if (!node || !node.getBoundingClientRect) return false;
+                          var r = node.getBoundingClientRect();
+                          return r.width > 8 && r.height > 8 && r.bottom > 0 && r.top < window.innerHeight;
+                        }
+                        var hits = [];
+                        function walk(root) {
+                          if (!root || !root.querySelectorAll) return;
+                          var nodes = root.querySelectorAll(
+                            'button, a, [role="button"], [role="link"], [data-challengetype], li'
+                          );
+                          for (var i = 0; i < nodes.length; i++) {
+                            hits.push(nodes[i]);
+                            if (nodes[i].shadowRoot) walk(nodes[i].shadowRoot);
+                          }
+                        }
+                        walk(document);
+                        var best = null;
+                        for (var j = 0; j < hits.length; j++) {
+                          var node = hits[j];
+                          var t = norm(node);
+                          if (!t || t.length > 120 || !visible(node)) continue;
+                          var ok = false;
+                          if (mode === 'authenticator') {
+                            ok = node.getAttribute('data-challengetype') === '6'
+                              || t.indexOf('authenticator') !== -1
+                              || t.indexOf('google authentication') !== -1;
+                          } else {
+                            ok = t.indexOf('try another way') !== -1
+                              || t.indexOf('another way') !== -1
+                              || t.indexOf('more ways') !== -1;
+                          }
+                          if (!ok) continue;
+                          var b = node.closest
+                            ? (node.closest('button, a, [role="button"], [role="link"], li') || node)
+                            : node;
+                          if (!visible(b)) b = node;
+                          if (!best || t.length < best.len) best = {el: b, len: t.length};
+                        }
+                        return best ? best.el : null;
+                        """,
+                        mode,
+                    )
+                except Exception:
+                    el = None
+                if el is None:
+                    return False
+                clicked = _cdp_click_element(driver, el)
+                if clicked:
+                    log(f"{email} — {'Authenticator' if mode == 'authenticator' else 'Try another way'} clicked")
+                return clicked
 
-            _click_authenticator()
-            rand_sleep(700, 1100)
-
-            # Wait for the TOTP input to appear (longer timeout — SPA navigation on dp page)
-            totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=18)
-
-            # Fallback: try "Try another way" → then click authenticator again
-            if totp_field is None:
-                log(f"{email} — TOTP not found after first click, trying 'Try another way'")
-                try:
-                    driver.execute_script("""
-                        var links = Array.from(document.querySelectorAll('a, button, [role="button"]'));
-                        var found = links.find(function(el) {
-                            var t = (el.innerText || '').toLowerCase();
-                            return t.indexOf('another way') !== -1 || t.indexOf('different') !== -1
-                                || t.indexOf('more options') !== -1 || t.indexOf('try again') !== -1;
-                        });
-                        if (found) found.click();
-                    """)
-                    rand_sleep(700, 1200)
-                    _click_authenticator()
-                    rand_sleep(700, 1200)
-                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=15)
-                except Exception as e:
-                    log(f"Try another way error: {e}")
+            tmark("2fa start")
+            log(f"{email} — 2FA link: {challenge_kind(driver.current_url or '') or 'totp'}")
+            _row_deadline = time.time() + 14
+            _auth_clicks = 0
+            _other_clicks = 0
+            while time.time() < _row_deadline and totp_field is None:
+                _cur = driver.current_url or ""
+                if is_totp_challenge_url(_cur):
+                    log(f"{email} — TOTP page link open, entering the code box")
+                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2)
+                    break
+                kind = challenge_kind(_cur)
+                # SMS page has its own code box. Open Authenticator before typing.
+                if kind in {"skotp", "ootp", "sms"} and _other_clicks < 2:
+                    if _click_visible_match("other"):
+                        _other_clicks += 1
+                        time.sleep(1.0)
+                        continue
+                if _auth_clicks < 3 and _click_visible_match("authenticator"):
+                    _auth_clicks += 1
+                    time.sleep(0.8)
+                    if is_totp_challenge_url(driver.current_url or ""):
+                        totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=3)
+                        break
+                    continue
+                time.sleep(0.25)
 
         url, text = page_state()
         log(f"{email} — After 2FA handling: {url[:70]}, totp_field={'found' if totp_field else 'NOT found'}")
+        snap("2FA page")
+        if totp_field is not None:
+            tmark("totp field ready")
+
+    if totp_field is None and is_totp_challenge_url(driver.current_url or ""):
+        log(f"{email} — TOTP page open, waiting for the code box")
+        _box_deadline = time.time() + 10
+        while time.time() < _box_deadline and totp_field is None:
+            totp_field = find_totp_input(driver)
+            if totp_field is not None:
+                break
+            time.sleep(0.3)
+        log(f"{email} — TOTP code box {'found' if totp_field else 'still missing'}")
+
+    if is_sms_code_url(driver.current_url or ""):
+        totp_field = None
+        shot = screenshot_b64()
+        log(f"{email} — still on the phone SMS page, authenticator code not entered")
+        return {
+            "status": "verification_required",
+            "reason": (
+                "Google opened the phone SMS code page, not Google Authenticator. "
+                "The authenticator code was not entered."
+            ),
+            "totpCode": totp_code,
+            "debugScreenshot": shot,
+        }
 
     # ── Enter TOTP code (whether we just navigated here or were already here) ─
     if totp_field is not None:
@@ -5757,23 +8783,90 @@ def _do_login(
                 return {"status": "opened", "reason": "Mailbox opened successfully ✅", "totpCode": None, "debugScreenshot": shot}
             return {"status": "2fa_required", "reason": "2FA required — provide TOTP secret", "totpCode": None, "debugScreenshot": shot}
 
-        # Fresh code each time — Google may show TOTP once or twice (or again after password change).
+        # One submit. Re-entering the same page immediately costs ~10s and Google ignores it.
         enter_fresh_totp_once("Step 4 — TOTP")
-        clear_totp_pages(max_rounds=2, pause_label="Step 4 — extra TOTP")
+        tmark("totp submitted")
+        if not _pace["fast"]:
+            clear_totp_pages(max_rounds=2, pause_label="Step 4 — extra TOTP")
+        _last_totp_submit = time.time()
+        _totp_next_retried = False
 
-        rand_sleep(700, 1200)
+        rand_sleep(*_pace["totp_after"])
 
         log(f"{email} — Waiting for Google Account after TOTP…")
+        _wrong_totp_phrases = (
+            "wrong code", "that code didn't work", "code is incorrect",
+            "enter the code again", "code expired", "try again",
+            "didn't recognize that code",
+        )
         _totp_redirect_early = None
-        deadline = time.time() + 30
+        deadline = time.time() + _pace["totp_wait_s"]
         while time.time() < deadline:
-            url = driver.current_url
+            try:
+                url = driver.execute_script("return location.href") or driver.current_url
+            except Exception:
+                url = driver.current_url
             if signed_in_host(url) or is_google_password_change_url(url):
                 break
+            # Match the host only. The totp URL's continue= query contains
+            # myaccount.google.com and used to look like we had already left.
+            _totp_host = ""
+            try:
+                from urllib.parse import urlparse as _urlparse
+                _totp_host = (_urlparse(url).hostname or "").lower()
+            except Exception:
+                _totp_host = ""
+            if _totp_host == "myaccount.google.com" or _totp_host.endswith("gds.google.com"):
+                log(f"{email} — left TOTP page → {url[:70]}")
+                break
 
+            _retry_after = 3.0 if _pace["fast"] else 6
+            _totp_still_shown = False
             if is_totp_challenge_url(url):
-                enter_fresh_totp_once("TOTP while waiting for redirect")
-                rand_sleep(700, 1200)
+                try:
+                    for _sel in TOTP_INPUT_SELECTORS:
+                        _box = driver.find_element(By.CSS_SELECTOR, _sel)
+                        if _box.is_displayed():
+                            _totp_still_shown = True
+                            break
+                except Exception:
+                    _totp_still_shown = False
+            if (
+                _totp_still_shown
+                and not _totp_next_retried
+                and (time.time() - _last_totp_submit) >= _retry_after
+            ):
+                # The box stays visible while Google is still accepting the code
+                # (often 8–10s on this proxy). A second Next in that window
+                # resubmits a dying code. Only tap again when the box is empty,
+                # or when Google has already shown a wrong-code error.
+                _err_url, _err_text = page_state()
+                _specific_wrong = (
+                    "wrong code", "that code didn't work", "code is incorrect",
+                    "enter the code again", "code expired",
+                    "didn't recognize that code",
+                )
+                if any(x in _err_text for x in _specific_wrong):
+                    log(f"{email} — TOTP error already on screen, leaving it for a fresh code")
+                    break
+                _filled = False
+                try:
+                    for _sel in TOTP_INPUT_SELECTORS:
+                        _box = driver.find_element(By.CSS_SELECTOR, _sel)
+                        if _box.is_displayed():
+                            _val = _box.get_attribute("value") or ""
+                            _filled = sum(ch.isdigit() for ch in _val) >= 6
+                            break
+                except Exception:
+                    _filled = False
+                if _filled and (time.time() - _last_totp_submit) < 10:
+                    time.sleep(_pace["totp_poll_s"])
+                    continue
+                log(f"{email} — TOTP page still open, clicking Next again")
+                if not _click_button_text(driver, ("Next", "Verify")):
+                    enter_fresh_totp_once("TOTP while waiting for redirect")
+                _totp_next_retried = True
+                _last_totp_submit = time.time()
                 continue
 
             # ── Early exit: detect "Verify your info to continue" immediately ──
@@ -5806,44 +8899,64 @@ def _do_login(
                     """)
                 except Exception:
                     pass
-            time.sleep(0.5)
+            time.sleep(_pace["totp_poll_s"])
         if _totp_redirect_early:
             return _totp_redirect_early
 
-        rand_sleep(700, 1200)
+        rand_sleep(*_pace["totp_after"])
         url, text = page_state()
         log(f"{email} — After TOTP submit (final): {url[:70]}")
+        snap("After authenticator code")
+        tmark("totp done")
+        _log_login_timing_summary()
+        if "gds.google.com" in url and _pace["fast"]:
+            try:
+                driver.get(ACCOUNT_HOME)
+                rand_sleep(*_pace["post_nav"])
+                url, text = page_state()
+            except Exception:
+                pass
 
-        # Wrong TOTP — auto-retry once with the next fresh 30s window
-        _wrong_totp_phrases = [
-            "wrong code", "that code didn't work", "code is incorrect",
-            "enter the code again", "code expired", "try again",
-            "didn't recognize that code",
-        ]
+        # Wrong TOTP — one retry on the next 30s window, then wait for Google's answer.
         if any(x in text for x in _wrong_totp_phrases):
             if totp_secret:
                 log(f"{email} — Wrong TOTP — waiting for next 30s window, then retry")
                 _totp_cache["code"] = None
                 _totp_cache["window"] = None
+                _text_before_retry = text
                 if enter_fresh_totp_once("TOTP wrong-code retry", force_new=True):
-                    rand_sleep(700, 1200)
+                    _retry_deadline = time.time() + max(_pace["totp_wait_s"], 12)
+                    while time.time() < _retry_deadline:
+                        url, text = page_state()
+                        if signed_in_host(url) or not is_totp_challenge_url(url):
+                            break
+                        if text != _text_before_retry and any(x in text for x in _wrong_totp_phrases):
+                            break
+                        time.sleep(_pace["totp_poll_s"])
                     url, text = page_state()
                     log(f"{email} — After TOTP retry: {url[:70]}")
                     retry_code = totp_code
-                    if any(x in text for x in _wrong_totp_phrases):
+                    _retry_still_wrong = (
+                        is_totp_challenge_url(url)
+                        and not signed_in_host(url)
+                        and any(x in text for x in _wrong_totp_phrases)
+                    )
+                    if _retry_still_wrong:
+                        shot = screenshot_b64()
                         if "v3/signin" in url and "challenge" not in url:
                             log(f"{email} — Wrong TOTP on v3/signin/TL page (2 attempts) → opened per user rule")
-                            shot = screenshot_b64()
                             return {
                                 "status": "opened",
                                 "reason": "Mailbox opened successfully ✅",
                                 "totpCode": retry_code,
                                 "debugScreenshot": shot,
                             }
+                        log(f"{email} — TOTP still wrong after fresh code — saving screenshot")
                         return {
                             "status": "wrong_password",
                             "reason": "TOTP codes wrong on 2 attempts — check 2FA secret",
                             "totpCode": retry_code,
+                            "debugScreenshot": shot,
                         }
             _cur_url_for_wrong = driver.current_url if hasattr(driver, 'current_url') else url
             if any(x in driver.page_source if hasattr(driver, 'page_source') else "" for x in _wrong_totp_phrases):
@@ -5857,10 +8970,13 @@ def _do_login(
                         "totpCode": totp_code,
                         "debugScreenshot": shot,
                     }
+                shot = screenshot_b64()
+                log(f"{email} — TOTP rejected — saving screenshot")
                 return {
                     "status": "wrong_password",
-                    "reason": f"TOTP code {totp_code} was wrong or expired — check your TOTP secret",
+                    "reason": "Authenticator code was rejected. Check the 2FA secret.",
                     "totpCode": totp_code,
+                    "debugScreenshot": shot,
                 }
 
         _pc_after_totp = complete_password_change_if_needed(url)
@@ -5884,6 +9000,7 @@ def _do_login(
     # Google often shows recovery/address/terms screens before landing on Gmail.
     # Strategy: try to dismiss nicely first; if still not at Gmail after a few
     # attempts, force-navigate directly to the inbox.
+    _last_interstitial_totp = 0.0
     for _attempt in range(8):
         url, text = page_state()
         host = get_hostname(url)
@@ -5966,31 +9083,36 @@ def _do_login(
         # Click "Not now" / "Skip" / "Later" properly so the auth session finalises
         elif "gds.google.com" in host:
             page_name = url[url.find('/web/'):url.find('?')] if '/web/' in url else url[:50]
-            log(f"{email} — gds interstitial ({page_name}), clicking dismiss")
-            try:
-                clicked = driver.execute_script("""
-                    var skip_texts = ['not now','skip','later','no thanks','dismiss',
-                                      'cancel','maybe later','remind me later'];
-                    var btns = Array.from(document.querySelectorAll('button, a[role="button"]'));
-                    for (var t of skip_texts) {
-                        var found = btns.find(function(b) {
-                            return b.innerText && b.innerText.trim().toLowerCase() === t;
-                        });
-                        if (found) { found.click(); return true; }
-                    }
-                    // Fallback: last button (usually the secondary/skip action)
-                    if (btns.length > 1) { btns[btns.length - 1].click(); return true; }
-                    return false;
-                """)
-                if not clicked:
-                    # Nothing to click — just navigate away
-                    driver.get("https://myaccount.google.com/")
-            except Exception as e:
-                log(f"gds dismiss error: {e}")
+            if _pace["fast"]:
+                log(f"{email} — gds interstitial ({page_name}) — fast path → account home")
                 try:
-                    driver.get("https://myaccount.google.com/")
+                    driver.get(ACCOUNT_HOME)
                 except Exception:
                     pass
+            else:
+                log(f"{email} — gds interstitial ({page_name}), clicking dismiss")
+                try:
+                    clicked = driver.execute_script("""
+                        var skip_texts = ['not now','skip','later','no thanks','dismiss',
+                                          'cancel','maybe later','remind me later'];
+                        var btns = Array.from(document.querySelectorAll('button, a[role="button"]'));
+                        for (var t of skip_texts) {
+                            var found = btns.find(function(b) {
+                                return b.innerText && b.innerText.trim().toLowerCase() === t;
+                            });
+                            if (found) { found.click(); return true; }
+                        }
+                        if (btns.length > 1) { btns[btns.length - 1].click(); return true; }
+                        return false;
+                    """)
+                    if not clicked:
+                        driver.get(ACCOUNT_HOME)
+                except Exception as e:
+                    log(f"gds dismiss error: {e}")
+                    try:
+                        driver.get(ACCOUNT_HOME)
+                    except Exception:
+                        pass
             dismissed = True
 
         # uplevelingstep — Google account security upgrade prompt
@@ -6099,45 +9221,69 @@ def _do_login(
                 pass
             dismissed = True
 
-        # TOTP page reappeared — enter a fresh code and continue
+        # TOTP page reappeared — enter a fresh code and continue.
+        # On the fast path a code was just submitted; looping here used to paste
+        # it again four times before Google finished the redirect.
         elif "challenge/totp" in url or "challenge/selection" in url:
+            if _pace.get("fast") and time.time() - _last_interstitial_totp < 4:
+                time.sleep(0.25)
+                continue
             log(f"{email} — TOTP/selection page reappeared in interstitial loop, re-entering")
             if totp_secret:
-                # Previous TOTP code was already consumed/rejected — same code
-                # will always fail because TOTP codes are one-time-use per 30s window.
-                # Always wait for the next window before generating a fresh code.
-                _secs_until_next = 30 - (int(time.time()) % 30)
-                if _secs_until_next > 1:
-                    log(f"{email} — Waiting {_secs_until_next}s for next TOTP window (previous code consumed)…")
-                    time.sleep(_secs_until_next + 0.5)
+                # Wait out the window only when Google rejected the code.
+                # A page that is still sitting on the prompt can take the same code.
+                _totp_body = ""
+                try:
+                    _totp_body = driver.find_element(By.TAG_NAME, "body").text.lower()
+                except Exception:
+                    _totp_body = ""
+                _code_rejected = any(x in _totp_body for x in (
+                    "wrong code", "didn't work", "code is incorrect",
+                    "try again", "expired",
+                ))
+                if _code_rejected:
+                    _secs_until_next = 30 - (int(time.time()) % 30)
+                    if _secs_until_next > 1:
+                        log(f"{email} — Waiting {_secs_until_next}s for next TOTP window")
+                        time.sleep(_secs_until_next + 0.4)
                 fresh_code = generate_totp(totp_secret)
-                log(f"{email} — Fresh TOTP code (new window): {fresh_code}")
+                log(f"{email} — Fresh TOTP code ready")
                 try:
                     # On selection page, click authenticator first
                     if "challenge/selection" in url:
                         driver.execute_script("""
                             var byType = document.querySelector('[data-challengetype="6"]');
                             if (byType) { byType.click(); return; }
-                            var all = Array.from(document.querySelectorAll('*'));
+                            var all = Array.from(document.querySelectorAll('li, [role="link"], [role="button"]'));
                             var found = all.find(function(el) {
-                                return el.children.length === 0 && el.innerText &&
-                                       el.innerText.toLowerCase().indexOf('authenticator') !== -1;
+                                var t = (el.innerText || '').toLowerCase();
+                                return t.indexOf('authenticator') !== -1 && t.length < 90;
                             });
                             if (found) found.click();
                         """)
-                        rand_sleep(700, 1200)
+                        rand_sleep(*( (200, 350) if _pace.get("fast") else (700, 1200) ))
                     tf = wait_for_any([
                         'input[name="totpPin"]', 'input[name="Pin"]',
                         'input[autocomplete="one-time-code"]', 'input[type="tel"]',
                         'input[aria-label*="code"]',
                     ], timeout=8)
                     if tf:
-                        tf.clear()
-                        rand_sleep(50, 100)
-                        human_type(tf, fresh_code)
-                        rand_sleep(150, 300)
-                        tf.send_keys(Keys.ENTER)
-                        rand_sleep(800, 1500)
+                        if _pace.get("fast"):
+                            fast_paste(driver, tf, fresh_code)
+                            nxt = wait_for_any(["#totpNext button", "#totpNext"], timeout=2)
+                            if nxt and _trusted_button_click(driver, nxt):
+                                log(f"{email} — TOTP Next clicked")
+                            elif not _click_button_text(driver, ("Next", "Verify")):
+                                tf.send_keys(Keys.ENTER)
+                                log(f"{email} — TOTP Enter pressed")
+                            _last_interstitial_totp = time.time()
+                        else:
+                            tf.clear()
+                            rand_sleep(50, 100)
+                            human_type(tf, fresh_code)
+                            rand_sleep(150, 300)
+                            tf.send_keys(Keys.ENTER)
+                            rand_sleep(800, 1500)
                         dismissed = True
                 except Exception as e:
                     log(f"Re-TOTP error: {e}")
@@ -6252,6 +9398,10 @@ def _do_login(
     if _password_change_result:
         return _password_change_result
 
+    if sign_out_sessions and (signed_in_host(url) or "myaccount.google.com" in url):
+        log(f"{email} — sign out remaining sessions, password stays the same")
+        return run_device_activity_signouts(password)
+
     result = classify(url, text)
     if result:
         return result
@@ -6261,7 +9411,22 @@ def _do_login(
     # Google sometimes leaves the browser on the bare accounts host after a
     # successful sign-in/interstitial. Per the checker rules, this unexpected
     # page is an Open result rather than a verification failure.
-    if get_hostname(url) == "accounts.google.com":
+    if get_hostname(url) == "accounts.google.com" and challenge_kind(url):
+        kind = challenge_kind(url)
+        names = {
+            "totp": "Google Authenticator",
+            "ipp": "Google Authenticator",
+            "skotp": "phone SMS",
+            "pwd": "password",
+            "selection": "2FA choice",
+        }
+        return {
+            "status": "verification_required",
+            "reason": f"Still on the {names.get(kind, kind)} page. Login did not finish.",
+            "totpCode": totp_code,
+            "debugScreenshot": shot,
+        }
+    if get_hostname(url) == "accounts.google.com" and "/signin/" not in url:
         return {
             "status": "opened",
             "reason": "Unexpected page: https://accounts.google.com — classified as Open",

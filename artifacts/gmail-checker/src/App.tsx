@@ -1,6 +1,13 @@
+import { useEffect } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Route, Switch, Router as WouterRouter } from 'wouter';
 import Home from './pages/home';
+import SmtpProject from './pages/smtp-project';
+
+// Port 8888 is the original multi-section SMTP project. This Gmail project is served on 8890.
+function isSmtpSite() {
+  return window.location.port === "8888";
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -26,13 +33,16 @@ function NotFound() {
 function Router() {
   return (
     <Switch>
-      <Route path="/" component={Home} />
+      <Route path="/" component={isSmtpSite() ? SmtpProject : Home} />
       <Route component={NotFound} />
     </Switch>
   );
 }
 
 function App() {
+  useEffect(() => {
+    document.title = isSmtpSite() ? "Vanguard MX" : "Gmail Checker";
+  }, []);
   return (
     <QueryClientProvider client={queryClient}>
       <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>

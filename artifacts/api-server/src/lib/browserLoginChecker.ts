@@ -79,7 +79,10 @@ export interface BrowserLoginResult {
   totpCode: string | null;
   /** Set when changePasswordAfterLogin demo mode completes on signinoptions/password */
   newPassword?: string;
+  /** Robot check: not_robot | robot | unknown */
+  robotOutcome?: string;
   debugScreenshot?: string;
+  stepScreenshots?: Array<{ label: string; image: string }>;
   exitIp?: string;
   ipInfo?: IpInfo;
   fingerprint?: string;
@@ -113,6 +116,11 @@ function getPython3(): string {
 function injectStickySession(proxyUrl: string, sessionId: string): string {
   try {
     const u = new URL(proxyUrl);
+    // LocalToNet rejects unknown username suffixes with HTTP 407.
+    // ProxyScrape-style -session-<id> must not be appended to that gateway.
+    if ((u.hostname || "").toLowerCase().includes("localtonet")) {
+      return proxyUrl;
+    }
     if (u.username) {
       // A saved ProxyScrape URL already ends in -session-<id>. Appending a
       // second token breaks the gateway, so replace the trailing one and keep
@@ -163,6 +171,8 @@ async function checkOneAccount(
   killSet?: Set<ChildProcess>, // shared set — caller kills all procs on abort
   deviceIndex?: number,     // selected PHONE_PROFILES index; shared with Device Check
   changePasswordAfterLogin = false,
+  robotCheckOnly = false,
+  signOutSessions = false,
   onLog?: (email: string, line: string) => void,
 ): Promise<BrowserLoginResult> {
   let totpCode: string | null = null;
@@ -180,6 +190,8 @@ async function checkOneAccount(
     freshProfile,
     deviceIndex: Number.isInteger(deviceIndex) ? deviceIndex : null,
     changePasswordAfterLogin,
+    ...(signOutSessions ? { signOutSessions: true } : {}),
+    ...(robotCheckOnly ? { robotCheckOnly: true } : {}),
   });
 
   console.log(`[BROWSER] ${email} — spawning Python UC checker`);
@@ -197,6 +209,7 @@ async function checkOneAccount(
 
     let stdout = "";
     let stderr = "";
+    let stderrLineBuf = "";
 
     let forceKillTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
@@ -223,13 +236,16 @@ async function checkOneAccount(
     proc.stderr.on("data", (chunk: Buffer) => {
       const line = chunk.toString();
       stderr += line;
-      // Forward Python logs to our server stdout
       process.stdout.write(line);
-      // Also stream the same progress into the browser-check terminal.
-      // Split chunks because stderr data events are not guaranteed to be line-delimited.
-      for (const raw of line.split(/\r?\n/)) {
+      stderrLineBuf += line;
+      const parts = stderrLineBuf.split(/\r?\n/);
+      stderrLineBuf = parts.pop() ?? "";
+      for (const raw of parts) {
         const trimmed = raw.trim();
-        if (trimmed) onLog?.(email, redactBrowserLog(trimmed));
+        if (!trimmed) continue;
+        // Keep the screenshot line intact. The redactor would chew digits inside the image.
+        if (trimmed.startsWith("STEP_SHOT\t")) onLog?.(email, trimmed);
+        else onLog?.(email, redactBrowserLog(trimmed));
       }
     });
 
@@ -252,12 +268,19 @@ async function checkOneAccount(
           reason: parsed.reason ?? "No reason returned",
           totpCode: parsed.totpCode ?? totpCode,
           debugScreenshot: parsed.debugScreenshot ?? undefined,
+          stepScreenshots: Array.isArray(parsed.stepScreenshots)
+            ? parsed.stepScreenshots.filter(
+                (shot: { label?: unknown; image?: unknown }) =>
+                  typeof shot?.label === "string" && typeof shot?.image === "string",
+              )
+            : undefined,
           exitIp: parsed.exitIp ?? undefined,
           ipInfo: parsed.ipInfo ?? undefined,
           fingerprint: parsed.fingerprint ?? undefined,
           fingerprintData: parsed.fingerprintData ?? undefined,
           durationMs: typeof parsed.durationMs === "number" ? parsed.durationMs : undefined,
           newPassword: typeof parsed.newPassword === "string" ? parsed.newPassword : undefined,
+          robotOutcome: typeof parsed.robotOutcome === "string" ? parsed.robotOutcome : undefined,
         });
       } catch {
         const snippet = (stderr || stdout).slice(-400);
@@ -316,6 +339,8 @@ export async function browserLoginCheck(
   signal?: AbortSignal,        // abort signal — checked before each new account starts
   deviceIndex?: number,        // selected PHONE_PROFILES index — same profile as Device Check
   changePasswordAfterLogin = false,
+  robotCheckOnly = false,
+  signOutSessions = false,
   onLog?: (email: string, line: string) => void, // Python progress for the browser terminal
 ): Promise<BrowserLoginResult[]> {
   // Proxy selection: rotation list takes priority over single proxy
@@ -369,6 +394,8 @@ export async function browserLoginCheck(
         killSet,  // pass kill-set so proc is registered for immediate SIGKILL on abort
         deviceIndex,
         changePasswordAfterLogin,
+        robotCheckOnly,
+        signOutSessions,
         onLog,
       ).catch(
         (err: unknown) => ({

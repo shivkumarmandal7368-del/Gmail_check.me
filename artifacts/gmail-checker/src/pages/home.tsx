@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react"
+import * as XLSX from "xlsx"
 import type { BrowserLoginResult } from "@workspace/api-client-react"
 import { getBrowserResultCategory } from "@/lib/browserResultCategory"
 
@@ -23,31 +24,75 @@ import { Progress } from "@/components/ui/progress"
 import {
   Download, Terminal, CheckCircle2, XCircle, AlertTriangle,
   HelpCircle, Activity, ShieldAlert, Smartphone,
-  Lock, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle, Zap
+  Lock, LogOut, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle, Zap, Bot
 } from "lucide-react"
+import { RobotChecker } from "@/pages/RobotChecker";
 
 type LoginList = "opened" | "not_opened" | "delete" | "unknown" | "fingerprint";
+type AppMode = "browser" | "robot";
 
 export default function Home() {
+  const [mode, setMode] = useState<AppMode>(() => {
+    try {
+      return localStorage.getItem("vmx_mode") === "robot" ? "robot" : "browser";
+    } catch {
+      return "browser";
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("vmx_mode", mode);
+    } catch {
+      /* ignore */
+    }
+  }, [mode]);
+
   return (
     <div className="min-h-screen bg-background text-foreground p-4 md:p-6 font-sans">
       <div className="max-w-6xl mx-auto space-y-5">
-        <header className="flex items-center justify-between pb-4 border-b border-border">
+        <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-border">
           <div className="flex items-center gap-3">
             <div className="bg-primary/10 p-2 rounded-lg border border-primary/20">
-              <Globe className="w-5 h-5 text-primary" />
+              {mode === "robot" ? <Bot className="w-5 h-5 text-primary" /> : <Globe className="w-5 h-5 text-primary" />}
             </div>
             <div>
               <h1 className="text-xl font-semibold tracking-tight">Vanguard MX</h1>
-              <p className="text-sm text-muted-foreground font-mono">Browser Check</p>
+              <p className="text-sm text-muted-foreground font-mono">
+                {mode === "robot" ? "Robot Check" : "Browser Check"}
+              </p>
             </div>
           </div>
-          <div className="flex items-center gap-2 text-sm text-muted-foreground bg-card px-3 py-1.5 rounded-full border border-border">
-            <Activity className="w-4 h-4 text-primary" />
-            <span className="font-mono">System Online</span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex rounded-lg border border-border overflow-hidden font-mono text-sm">
+              <button
+                type="button"
+                onClick={() => setMode("browser")}
+                className={cn(
+                  "px-3 py-1.5 flex items-center gap-1.5 transition-colors",
+                  mode === "browser" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted/50",
+                )}
+              >
+                <Globe className="w-3.5 h-3.5" /> Browser
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode("robot")}
+                className={cn(
+                  "px-3 py-1.5 flex items-center gap-1.5 transition-colors border-l border-border",
+                  mode === "robot" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted/50",
+                )}
+              >
+                <Bot className="w-3.5 h-3.5" /> Robot
+              </button>
+            </div>
+            <div className="flex items-center gap-2 text-sm text-muted-foreground bg-card px-3 py-1.5 rounded-full border border-border">
+              <Activity className="w-4 h-4 text-primary" />
+              <span className="font-mono">System Online</span>
+            </div>
           </div>
         </header>
-        <BrowserChecker />
+        {mode === "robot" ? <RobotChecker /> : <BrowserChecker />}
       </div>
     </div>
   );
@@ -57,7 +102,7 @@ function BrowserChecker() {
   // ── localStorage keys ────────────────────────────────────────────────────
   const LS = {
     input: "vbc_input", proxy: "vbc_proxy", proxyMode: "vbc_proxy_mode", concurrency: "vbc_conc",
-    fresh: "vbc_fresh", changePw: "vbc_change_pw", device: "vbc_device", results: "vbc_results", total: "vbc_total",
+    fresh: "vbc_fresh", changePw: "vbc_change_pw", deviceLogout: "vbc_device_logout", device: "vbc_device", results: "vbc_results", total: "vbc_total",
     active: "vbc_active", savedAt: "vbc_saved_at", jobId: "vbc_job_id",
     creds: "vbc_creds",
   } as const;
@@ -71,6 +116,7 @@ function BrowserChecker() {
   const [savedProxy,   setSavedProxy]   = useState<{ configured: boolean; label: string } | null>(null);
   const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, false));
   const [changePasswordAfterLogin, setChangePasswordAfterLogin] = useState<boolean>(() => lsGet(LS.changePw, false));
+  const [deviceLogout, setDeviceLogout] = useState<boolean>(() => lsGet(LS.deviceLogout, false));
   const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
 
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
@@ -102,6 +148,7 @@ function BrowserChecker() {
   const [proxyCheckError, setProxyCheckError] = useState<string>("");
   const [jobStartError, setJobStartError] = useState<string>("");
   const [browserLogs, setBrowserLogs] = useState<Array<{ email?: string; message: string }>>([]);
+  const [liveShots, setLiveShots] = useState<Array<{ label: string; image: string }>>([]);
 
   // refs
   const sseAbortRef      = useRef<AbortController | null>(null);
@@ -137,6 +184,7 @@ function BrowserChecker() {
   }, []);
   useEffect(() => { try { localStorage.setItem(LS.fresh,       JSON.stringify(freshProfile)); } catch {} }, [freshProfile]);
   useEffect(() => { try { localStorage.setItem(LS.changePw, JSON.stringify(changePasswordAfterLogin)); } catch {} }, [changePasswordAfterLogin]);
+  useEffect(() => { try { localStorage.setItem(LS.deviceLogout, JSON.stringify(deviceLogout)); } catch {} }, [deviceLogout]);
   useEffect(() => { try { localStorage.setItem(LS.device,      JSON.stringify(deviceIndex));  } catch {} }, [deviceIndex]);
   useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
   useEffect(() => { try { localStorage.setItem(LS.total,       JSON.stringify(total));        } catch {} }, [total]);
@@ -402,7 +450,11 @@ function BrowserChecker() {
   };
 
   const handleJobEvent = (evt: any) => {
-    if (evt.type === "log") {
+    if (evt.type === "screen" && typeof evt.image === "string") {
+      const image = evt.image.startsWith("data:") ? evt.image : `data:image/jpeg;base64,${evt.image}`;
+      const label = typeof evt.label === "string" ? evt.label : "Step";
+      setLiveShots(prev => [...prev, { label, image }].slice(-18));
+    } else if (evt.type === "log") {
       setBrowserLogs(prev => [
         ...prev,
         { email: typeof evt.email === "string" ? evt.email : undefined, message: String(evt.message ?? "") },
@@ -467,6 +519,7 @@ function BrowserChecker() {
       ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
       concurrency: 1, freshProfile, deviceIndex,
       ...(changePasswordAfterLogin ? { changePasswordAfterLogin: true } : {}),
+      ...(deviceLogout ? { signOutSessions: true } : {}),
     });
   };
 
@@ -544,7 +597,7 @@ function BrowserChecker() {
     sseAbortRef.current?.abort();
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     appendModeRef.current = false;
-    setResults([]); setTotal(credentials.length); setReconnectedAt(null); setRestoredAt(null); setSelectedUnknown(new Set());
+    setResults([]); setLiveShots([]); setTotal(credentials.length); setReconnectedAt(null); setRestoredAt(null); setSelectedUnknown(new Set());
     setJobStatus("running"); setPauseRequested(false); setResumeReady(false);
     setJobStartError("");
     try {
@@ -732,13 +785,28 @@ function BrowserChecker() {
     return map[status] ?? status;
   };
 
-  const downloadCSV = (rows: ExtBrowserResult[], name: string) => {
-    const csv = (s: string) => `"${String(s ?? "").replace(/"/g, '""')}"`;
-    const header = "Email,Password,2FA Secret,Result";
-    const body = rows.map(r =>
-      [csv(r.email), csv(r.password ?? ""), csv(r.totpSecret ?? ""), csv(statusLabel(r.status))].join(",")
-    ).join("\n");
-    download(header + "\n" + body, name + ".csv", "text/csv");
+  const downloadExcel = (rows: ExtBrowserResult[], name: string) => {
+    const header = ["#", "Gmail", "New Password", "2FA"];
+    const data = rows.map((r, i) => {
+      const fresh = (r as { newPassword?: string }).newPassword;
+      return [i + 1, r.email, fresh || r.password || "", r.totpSecret ?? ""];
+    });
+    const worksheet = XLSX.utils.aoa_to_sheet([header, ...data]);
+    worksheet["!cols"] = [{ wch: 6 }, { wch: 36 }, { wch: 22 }, { wch: 28 }];
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Gmail");
+    const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+    const blob = new Blob([buffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${name}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const downloadJSON = (rows: ExtBrowserResult[], name: string) => {
@@ -962,7 +1030,7 @@ function BrowserChecker() {
                 </div>
               </div>
               <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
-                {freshProfile ? "Pehla khatam, phir agla naya profile aur naya canvas. Phone model yahi selected device rahega. Timezone, language aur keyboard Chrome ke IP se match honge." : "Sab accounts ek hi fingerprint: Device Check ne jo device banaya, wahi. Timezone, language aur keyboard Chrome ke IP se match honge."}
+                {freshProfile ? "Pehla khatam, phir agla naya profile aur naya canvas. Sign-in real Linux Chrome se hota hai, fake phone nahi — isi se checkbox pe puzzle kam khulta hai. Timezone aur language IP se match honge." : "Profile reuse hota hai. Sign-in real Linux Chrome se hota hai, fake phone nahi. Timezone aur language IP se match honge."}
               </p>
             </button>
 
@@ -981,6 +1049,24 @@ function BrowserChecker() {
                 {changePasswordAfterLogin
                   ? "Login ke baad myaccount signinoptions/password par random naya password + confirm bharega. Naya password export/table mein dikhega — sirf apne test accounts ke liye."
                   : "Off: password change page skip karke seedha account home khulega (fields khali dikhenge)."}
+              </p>
+            </button>
+
+            <button onClick={() => !isChecking && setDeviceLogout(v => !v)} disabled={isChecking}
+              className={cn("w-full rounded-lg border p-3 text-left transition-colors",
+                deviceLogout ? "border-rose-500/40 bg-rose-500/5" : "border-border bg-card/30 opacity-60")}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] font-mono uppercase tracking-widest text-rose-400/80 flex items-center gap-1">
+                  <LogOut className="w-3 h-3" /> Device logout
+                </span>
+                <div className={cn("w-8 h-4 rounded-full transition-colors relative", deviceLogout ? "bg-rose-500" : "bg-border")}>
+                  <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", deviceLogout ? "left-4" : "left-0.5")} />
+                </div>
+              </div>
+              <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
+                {deviceLogout
+                  ? "On: login ke baad, password change on ho to uske baad, device activity pe baaki devices sign out karega, phir yeh session bhi."
+                  : "Off: device list skip. Password change on ho to naya password ke baad sirf yeh session sign out karke complete."}
               </p>
             </button>
 
@@ -1024,6 +1110,48 @@ function BrowserChecker() {
             </Button>
           </CardContent>
         </Card>
+
+        {(liveShots.length > 0 || isChecking) && (
+          <Card className="border-border bg-card/40">
+            <CardHeader className="py-2 px-4 border-b border-border">
+              <CardTitle className="text-[10px] font-mono tracking-widest text-muted-foreground uppercase">
+                Live screen
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="p-3 space-y-2">
+              {liveShots.length === 0 ? (
+                <p className="text-[11px] font-mono text-muted-foreground">Chrome khulte hi yahi screen update hogi, step by step.</p>
+              ) : (
+                <>
+                  <p className="text-[11px] font-mono text-primary">
+                    {liveShots.length}. {liveShots[liveShots.length - 1].label}
+                  </p>
+                  <img
+                    src={liveShots[liveShots.length - 1].image}
+                    alt={liveShots[liveShots.length - 1].label}
+                    className="rounded border border-border max-w-[320px] w-full cursor-pointer"
+                    onClick={() => window.open(liveShots[liveShots.length - 1].image)}
+                  />
+                  <div className="flex gap-2 overflow-x-auto pb-1">
+                    {liveShots.map((shot, shotIndex) => (
+                      <button
+                        key={`${shot.label}-${shotIndex}`}
+                        type="button"
+                        className="shrink-0 w-[84px] text-left"
+                        onClick={() => window.open(shot.image)}
+                      >
+                        <img src={shot.image} alt={shot.label} className="rounded border border-border w-full" />
+                        <span className="block text-[9px] font-mono text-muted-foreground mt-1 leading-tight">
+                          {shotIndex + 1}. {shot.label}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         {(browserLogs.length > 0 || isChecking) && (
           <Card className="border-border bg-card/40">
@@ -1204,9 +1332,9 @@ function BrowserChecker() {
                   <Download className="w-3 h-3 mr-1" />.TXT
                 </Button>
                 <Button variant="outline" size="sm"
-                  onClick={() => downloadCSV(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
+                  onClick={() => downloadExcel(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
                   disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
-                  <Download className="w-3 h-3 mr-1" />.CSV
+                  <Download className="w-3 h-3 mr-1" />.XLSX
                 </Button>
                 <Button variant="outline" size="sm"
                   onClick={() => downloadJSON(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
@@ -1395,6 +1523,27 @@ function BrowserChecker() {
                         {r.status === "checking"
                           ? <span className="text-blue-400/70 text-[11px] flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />Chrome launching…</span>
                           : r.reason}
+                        {Array.isArray((r as any).stepScreenshots) && (r as any).stepScreenshots.length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            <p className="text-[10px] font-mono text-yellow-400/80">Har step ka screenshot</p>
+                            <div className="flex gap-2 overflow-x-auto pb-1 max-w-[640px]">
+                              {(r as any).stepScreenshots.map((shot: { label?: string; image?: string }, shotIndex: number) => (
+                                <button
+                                  key={`${r.email}-${shotIndex}`}
+                                  type="button"
+                                  className="shrink-0 w-[116px] text-left"
+                                  onClick={() => shot.image && window.open(shot.image)}
+                                >
+                                  <img src={shot.image} alt={shot.label || `step ${shotIndex + 1}`}
+                                    className="rounded border border-border w-full" />
+                                  <span className="block text-[9px] font-mono text-muted-foreground mt-1 leading-tight">
+                                    {shotIndex + 1}. {shot.label}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                         {(r as any).debugScreenshot && (
                           <div className="mt-2">
                             <p className={`text-[10px] font-mono mb-1 ${r.status === "opened" ? "text-green-400/70" : "text-yellow-400/70"}`}>
@@ -1810,8 +1959,8 @@ function DeviceChecker() {
         </div>
         <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
           {freshProfile
-            ? "Naya Chrome profile aur naya canvas. Browser Check ka Fresh on bhi agle account par yahi naya fingerprint use karega. Timezone, language aur keyboard us IP par rahenge jo Chrome use kare."
-            : "Yahi fingerprint Browser Check use karega jab Fresh off ho. Timezone, language aur keyboard Chrome ke exit IP se match honge."}
+            ? "Naya Chrome profile aur naya canvas. Sign-in real Linux Chrome se hota hai, fake phone nahi. Timezone, language aur keyboard us IP par rahenge jo Chrome use kare."
+            : "Yahi profile reuse hoga. Sign-in real Linux Chrome se hota hai. Timezone, language aur keyboard Chrome ke exit IP se match honge."}
         </p>
       </button>
 
