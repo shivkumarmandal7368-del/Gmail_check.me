@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react"
+import * as XLSX from "xlsx"
 import type { BrowserLoginResult } from "@workspace/api-client-react"
 import { getBrowserResultCategory } from "@/lib/browserResultCategory"
 
@@ -784,13 +785,28 @@ function BrowserChecker() {
     return map[status] ?? status;
   };
 
-  const downloadCSV = (rows: ExtBrowserResult[], name: string) => {
-    const csv = (s: string) => `"${String(s ?? "").replace(/"/g, '""')}"`;
-    const header = "Email,Password,2FA Secret,Result";
-    const body = rows.map(r =>
-      [csv(r.email), csv(r.password ?? ""), csv(r.totpSecret ?? ""), csv(statusLabel(r.status))].join(",")
-    ).join("\n");
-    download(header + "\n" + body, name + ".csv", "text/csv");
+  const downloadExcel = (rows: ExtBrowserResult[], name: string) => {
+    const header = ["#", "Gmail", "New Password", "2FA"];
+    const data = rows.map((r, i) => {
+      const fresh = (r as { newPassword?: string }).newPassword;
+      return [i + 1, r.email, fresh || r.password || "", r.totpSecret ?? ""];
+    });
+    const worksheet = XLSX.utils.aoa_to_sheet([header, ...data]);
+    worksheet["!cols"] = [{ wch: 6 }, { wch: 36 }, { wch: 22 }, { wch: 28 }];
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Gmail");
+    const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+    const blob = new Blob([buffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${name}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const downloadJSON = (rows: ExtBrowserResult[], name: string) => {
@@ -1316,9 +1332,9 @@ function BrowserChecker() {
                   <Download className="w-3 h-3 mr-1" />.TXT
                 </Button>
                 <Button variant="outline" size="sm"
-                  onClick={() => downloadCSV(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
+                  onClick={() => downloadExcel(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
                   disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
-                  <Download className="w-3 h-3 mr-1" />.CSV
+                  <Download className="w-3 h-3 mr-1" />.XLSX
                 </Button>
                 <Button variant="outline" size="sm"
                   onClick={() => downloadJSON(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}

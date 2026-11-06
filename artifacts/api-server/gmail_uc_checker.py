@@ -7019,7 +7019,7 @@ def _do_login(
                 f"naya password export — {len(new_pw)} chars)"
             )
         result_payload = {
-            "status": "opened" if signed_self else "unknown",
+            "status": "opened" if signed_self or change_password_after_login else "unknown",
             "reason": reason,
             "totpCode": totp_code,
             "debugScreenshot": shot,
@@ -7229,20 +7229,15 @@ def _do_login(
             except Exception as exc:
                 log(f"{email} — profile sign-out warning: {exc}")
             shot = screenshot_b64()
-            if not signed_self:
-                return {
-                    "status": "unknown",
-                    "reason": (
-                        f"Password changed ({len(new_pw)} chars) but this browser is still signed in."
-                    ),
-                    "totpCode": totp_code,
-                    "newPassword": new_pw,
-                    "debugScreenshot": shot,
-                }
+            signout_note = (
+                "current session signed out"
+                if signed_self
+                else "sign-out did not finish"
+            )
             return {
                 "status": "opened",
                 "reason": (
-                    f"Demo password changed, current session signed out ✅ "
+                    f"Demo password changed, {signout_note} ✅ "
                     f"(naya password export — {len(new_pw)} chars)"
                 ),
                 "totpCode": totp_code,
