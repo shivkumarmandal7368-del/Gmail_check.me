@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { Textarea } from "@/components/ui/textarea"
+import { NumberedPayloadEditor } from "@/components/smtp/NumberedPayloadEditor"
 import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -259,7 +260,27 @@ function BrowserChecker() {
 
   const parseCredentials = (text: string) =>
     text.split(/\n+/).map(l => l.trim()).filter(Boolean).map(line => {
-      const parts = line.split(":");
+      // Pasted list numbers ("1. email" or "1) email") are not part of the account.
+      const cleaned = line
+        .replace(/^\d+[\.\)\:\-]\s+/, "")
+        .replace(/^\d+\s+(?=\S+@)/, "")
+        .trim();
+      if (!cleaned) return null;
+
+      // email<tab or space>password<tab or space>2FA
+      // Colon form stays email:password:2FA, including a password that itself contains ":".
+      if (!cleaned.includes(":") && /\s/.test(cleaned)) {
+        const parts = cleaned.split(/\s+/).filter(Boolean);
+        const email = parts[0] ?? "";
+        if (!email.includes("@") || parts.length < 2) return null;
+        const totpRaw = parts.length >= 3 ? parts[parts.length - 1] : undefined;
+        const password = (parts.length >= 3 ? parts.slice(1, -1) : parts.slice(1)).join(" ");
+        const totp = totpRaw ? totpRaw.replace(/\s+/g, "") : undefined;
+        if (!password) return null;
+        return { email, password, ...(totp ? { totp } : {}) };
+      }
+
+      const parts = cleaned.split(":");
       if (parts.length < 2) return null;
       const email = parts[0].trim();
       const password = (parts.length > 3 ? parts.slice(1, -1).join(":") : parts[1] ?? "").trim();
@@ -855,13 +876,23 @@ function BrowserChecker() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <Textarea
-              placeholder={"email@gmail.com:password\nemail2@gmail.com:password:2FA_SECRET"}
-              className="min-h-[180px] resize-y bg-background/50 font-mono text-sm leading-relaxed"
+            <NumberedPayloadEditor
+              placeholder={"email@gmail.com:password:2FA_SECRET\nemail@gmail.com password 2FA_SECRET"}
+              className="min-h-[180px]"
+              minHeightClass="min-h-[180px]"
+              nowrap
               value={inputText}
-              onChange={e => setInputText(e.target.value)}
+              onChange={setInputText}
               disabled={isChecking}
             />
+            <p className="text-[10px] font-mono text-muted-foreground">
+              {(() => {
+                const n = parseCredentials(inputText).length;
+                return n > 0
+                  ? `${n} account${n === 1 ? "" : "s"}`
+                  : "Har line ek account. email:password:2FA ya email password 2FA";
+              })()}
+            </p>
 
             {jobStartError && (
               <div className="rounded-lg border border-red-500/50 bg-red-500/10 p-2.5 text-[11px] font-mono text-red-300">
