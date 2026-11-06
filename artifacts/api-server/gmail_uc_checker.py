@@ -653,6 +653,14 @@ def fast_paste(driver, element, text: str) -> None:
                 "windowsVirtualKeyCode": vk,
             })
         driver.execute_cdp_cmd("Input.insertText", {"text": text})
+        driver.execute_script(
+            """
+            var el = arguments[0];
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            """,
+            element,
+        )
     except Exception as exc:
         log(f"fast paste CDP failed ({exc}) — send_keys whole string")
         try:
@@ -7663,23 +7671,54 @@ def _do_login(
         rand_sleep(80, 160)
         clipboard_type(driver, pw_field, password)
         rand_sleep(100, 180)
-    # Click the "Next" button via touch — more human than Keys.ENTER (detectable as Selenium)
-    _pw_next = wait_for_any([
-        '#passwordNext button', '#passwordNext', '[jsname="LgbsSe"]',
-        'button[type="button"]', 'div[role="button"]',
-    ], timeout=4)
-    if _pw_next and _trusted_button_click(driver, _pw_next):
-        log(f"{email} — password Next clicked")
-    elif not _click_button_text(driver, ("Next",)):
-        pw_field.send_keys(Keys.ENTER)
-    else:
-        log(f"{email} — password Next clicked by label")
+    def _press_enter() -> None:
+        for typ in ("keyDown", "keyUp"):
+            driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                "type": typ,
+                "key": "Enter",
+                "code": "Enter",
+                "windowsVirtualKeyCode": 13,
+                "nativeVirtualKeyCode": 13,
+            })
 
-    # Wait for URL to advance past the password page (proxy latency can be 2-4s).
-    # Polling is more reliable than a fixed sleep — catches fast AND slow responses.
+    def _click_password_next() -> None:
+        try:
+            state = driver.execute_script(
+                """
+                var b = document.querySelector('#passwordNext button, #passwordNext [role="button"]');
+                if (!b) return 'missing';
+                return (b.disabled || b.getAttribute('aria-disabled') === 'true') ? 'disabled' : 'ready';
+                """
+            )
+            log(f"{email} — password Next {state}")
+        except Exception:
+            pass
+        nxt = wait_for_any(["#passwordNext button", "#passwordNext [role='button']", "#passwordNext"], timeout=2)
+        if nxt and _trusted_button_click(driver, nxt):
+            log(f"{email} — password Next clicked")
+        elif _click_button_text(driver, ("Next",)):
+            log(f"{email} — password Next clicked by label")
+        else:
+            log(f"{email} — password Next control not found")
+        try:
+            pw_field.click()
+        except Exception:
+            pass
+        try:
+            _press_enter()
+            log(f"{email} — password Enter pressed")
+        except Exception as exc:
+            log(f"{email} — password Enter failed: {exc}")
+
+    _click_password_next()
+
+    # The first Next on this proxy often lands before Google accepts the field.
+    # Email already retries; the password page was stopping after one click.
     _pre_pwd_url = driver.current_url
-    _pwd_wait_s = 20 if _phone_fast else 10
+    _pwd_wait_s = 22 if _phone_fast else 12
     _nav_deadline = time.time() + _pwd_wait_s
+    _pw_retried = False
+    _pw_next_at = time.time()
     while time.time() < _nav_deadline:
         try:
             _cur = driver.current_url
@@ -7693,6 +7732,26 @@ def _do_login(
                 break
         except Exception:
             pass
+        if (
+            not _pw_retried
+            and (time.time() - _pw_next_at) > 5
+            and "challenge/pwd" in (driver.current_url or "")
+        ):
+            log(f"{email} — password page still open, submitting again")
+            try:
+                pw_field = wait_for_any(PW_SELECTORS, timeout=2) or pw_field
+                filled = driver.execute_script(
+                    "return (arguments[0].value || '').length", pw_field,
+                ) or 0
+                if password and int(filled) < len(password):
+                    log(f"{email} — password field short ({filled}/{len(password)}), typing again")
+                    pw_field.click()
+                    pw_field.send_keys(password)
+            except Exception as exc:
+                log(f"{email} — password refill: {exc}")
+            _click_password_next()
+            _pw_retried = True
+            _nav_deadline = max(_nav_deadline, time.time() + 12)
         time.sleep(0.2)
     rand_sleep(150, 300) if _phone_fast else rand_sleep(300, 600)
 
