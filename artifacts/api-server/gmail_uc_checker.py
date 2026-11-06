@@ -8778,30 +8778,58 @@ def _do_login(
                 return clicked
 
             tmark("2fa start")
-            log(f"{email} — 2FA link: {challenge_kind(driver.current_url or '') or 'totp'}")
+            log(f"{email} — 2FA link: {challenge_kind(_live_url(driver) or '') or 'totp'}")
             _row_deadline = time.time() + 14
             _auth_clicks = 0
             _other_clicks = 0
+            _prompt_scrolled = False
+            _prompt_logged = False
             while time.time() < _row_deadline and totp_field is None:
-                _cur = driver.current_url or ""
+                _cur = _live_url(driver) or ""
                 if is_totp_challenge_url(_cur):
                     log(f"{email} — TOTP page link open, entering the code box")
                     totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2)
                     break
                 kind = challenge_kind(_cur)
+                # Device prompt ("Check your phone") has no Authenticator row.
+                # Try another way opens the list, then the TOTP page.
+                if kind == "dp" and _other_clicks < 2:
+                    more = _click_try_another_way()
+                    if not more and _click_visible_match("other"):
+                        more = "Try another way"
+                    if more:
+                        _other_clicks += 1
+                        log(f"{email} — clicked '{more}'")
+                        time.sleep(1.0)
+                        continue
+                    if not _prompt_scrolled:
+                        _prompt_scrolled = True
+                        try:
+                            driver.execute_script(
+                                "window.scrollTo(0, document.body.scrollHeight);"
+                            )
+                        except Exception:
+                            pass
+                        time.sleep(0.3)
+                        continue
+                    if not _prompt_logged:
+                        _prompt_logged = True
+                        log(f"{email} — Try another way not found on the device prompt")
                 # SMS page has its own code box. Open Authenticator before typing.
                 if kind in {"skotp", "ootp", "sms"} and _other_clicks < 2:
                     if _click_visible_match("other"):
                         _other_clicks += 1
                         time.sleep(1.0)
                         continue
-                if _auth_clicks < 3 and _click_visible_match("authenticator"):
-                    _auth_clicks += 1
-                    time.sleep(0.8)
-                    if is_totp_challenge_url(driver.current_url or ""):
-                        totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=3)
-                        break
-                    continue
+                if _auth_clicks < 3 and (kind != "dp" or _other_clicks):
+                    if _click_visible_match("authenticator") or _tap_labeled("auth"):
+                        _auth_clicks += 1
+                        log(f"{email} — Authenticator option clicked")
+                        time.sleep(0.8)
+                        if is_totp_challenge_url(_live_url(driver) or ""):
+                            totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=3)
+                            break
+                        continue
                 time.sleep(0.25)
 
         url, text = page_state()
@@ -9358,52 +9386,44 @@ def _do_login(
                 except Exception:
                     break
 
-        # challenge/dp or challenge/selection in interstitial loop
-        # = 2FA page that wasn't caught by Step 4 (safety net).
-        # Click Authenticator option instead of a generic submit button.
+        # challenge/dp is the phone prompt. Authenticator is behind Try another way.
         elif "accounts.google.com" in host and (
             "challenge/dp" in url or "challenge/selection" in url
         ):
-            log(f"{email} — 2FA page in interstitial loop ({url[:60]}), clicking Authenticator")
+            if "challenge/dp" in url and _attempt < 2:
+                more = ""
+                try:
+                    more = _click_try_another_way()
+                except Exception as exc:
+                    log(f"{email} — more-ways click: {exc}")
+                if more:
+                    log(f"{email} — clicked '{more}'")
+                    time.sleep(1.0)
+                else:
+                    log(f"{email} — Try another way not found on the device prompt")
+            auth = ""
             try:
-                driver.execute_script("""
-                    var byType = document.querySelector('[data-challengetype="6"]');
-                    if (byType) { byType.click(); return; }
-                    var allEls = Array.from(document.querySelectorAll(
-                        'li, div[role="listitem"], [data-challengetype]'));
-                    var found = allEls.find(function(el) {
-                        return el.innerText && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
-                    });
-                    if (found) { found.click(); return; }
-                    var broader = Array.from(document.querySelectorAll('*')).find(function(el) {
-                        return el.children.length === 0
-                            && el.innerText
-                            && el.innerText.toLowerCase().indexOf('authenticator') !== -1;
-                    });
-                    if (broader) broader.click();
-                """)
-                rand_sleep(700, 1200)
-                # Check if TOTP field appeared — if yes, enter code and submit
+                auth = _tap_labeled("auth")
+            except Exception as exc:
+                log(f"{email} — authenticator click: {exc}")
+            if auth:
+                log(f"{email} — clicked '{auth}'")
+            else:
+                log(f"{email} — Authenticator option not on this page yet")
+            time.sleep(0.6)
+            try:
                 if totp_secret or totp_code:
                     fresh_code = generate_totp(totp_secret) if totp_secret else totp_code
-                    if fresh_code:
-                        secs_left = 30 - (int(time.time()) % 30)
-                        if secs_left <= 4:
-                            time.sleep(secs_left + 1)
-                            fresh_code = generate_totp(totp_secret) if totp_secret else totp_code
                     tf = wait_for_any([
                         'input[name="totpPin"]', 'input[name="Pin"]',
                         'input[autocomplete="one-time-code"]', 'input[type="tel"]',
-                        'input[aria-label*="code"]', 'input[type="number"]',
-                    ], timeout=12)
+                        'input[aria-label*="code"]',
+                    ], timeout=4)
                     if tf and fresh_code:
-                        log(f"{email} — Entering TOTP in interstitial: {fresh_code}")
-                        tf.clear()
-                        rand_sleep(50, 100)
-                        human_type(tf, fresh_code)
-                        rand_sleep(150, 300)
-                        tf.send_keys(Keys.ENTER)
-                        rand_sleep(800, 1500)
+                        log(f"{email} — Entering TOTP in interstitial")
+                        fast_paste(driver, tf, fresh_code)
+                        if not _click_button_text(driver, ("Next", "Verify")):
+                            tf.send_keys(Keys.ENTER)
             except Exception as e:
                 log(f"2FA interstitial click error: {e}")
             dismissed = True
