@@ -1615,12 +1615,22 @@ def _click_recaptcha_from_frame(driver) -> str:
         })
         time.sleep(0.04)
     _cdp_click_xy(driver, x, y)
-    outcome = _poll_recaptcha_after_click(driver, 2.2)
+    outcome = _poll_recaptcha_after_click(driver, 4.0)
     if outcome != "pending":
         return outcome
-    # One more press on the same box. A single miss used to fall through to a 10s empty solver.
-    _cdp_click_xy(driver, x, y)
-    outcome = _poll_recaptcha_after_click(driver, 1.6)
+    # A second press only when the box is still painted. A 0-size box means the
+    # first click already started navigation, and another click was restarting it.
+    state_after = _read_recaptcha_anchor(driver, frame)
+    if float(state_after.get("w") or 0) < 8:
+        outcome = _poll_recaptcha_after_click(driver, 4.0)
+        if outcome != "pending":
+            return outcome
+        log(f"reCAPTCHA checkbox click did not open a challenge aria={state.get('aria')}")
+        return "miss"
+    point_again = _recaptcha_checkbox_viewport_point(driver, frame, state_after)
+    if point_again:
+        _cdp_click_xy(driver, point_again[0], point_again[1])
+    outcome = _poll_recaptcha_after_click(driver, 2.5)
     if outcome != "pending":
         return outcome
     log(f"reCAPTCHA checkbox click did not open a challenge aria={state.get('aria')}")
@@ -1812,7 +1822,7 @@ def handle_recaptcha_checkbox(
         wait_deadline = time.time() + _extra_wait
         while time.time() < wait_deadline and _rc_result != "passed":
             driver.switch_to.default_content()
-            if "challenge/recaptcha" not in (driver.current_url or ""):
+            if "challenge/recaptcha" not in _live_url(driver):
                 _rc_result = "passed"
                 break
             if _recaptcha_checkbox_ticked(driver):
@@ -1827,12 +1837,12 @@ def handle_recaptcha_checkbox(
             nav_deadline = time.time() + (5 if pace.get("fast") else 12)
             while time.time() < nav_deadline:
                 driver.switch_to.default_content()
-                cur = driver.current_url or ""
+                cur = _live_url(driver)
                 if "challenge/recaptcha" not in cur:
                     break
                 time.sleep(pace.get("rc_poll_s", 0.25))
             driver.switch_to.default_content()
-            if "challenge/recaptcha" in (driver.current_url or ""):
+            if "challenge/recaptcha" in _live_url(driver):
                 log(f"{email} — still on recaptcha URL after checkbox")
                 _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
         else:
@@ -1842,7 +1852,7 @@ def handle_recaptcha_checkbox(
         if _rc_result != "passed":
             try:
                 driver.switch_to.default_content()
-                if "challenge/recaptcha" not in (driver.current_url or ""):
+                if "challenge/recaptcha" not in _live_url(driver):
                     _rc_result = "passed"
                     log(f"{email} — left the robot page before the solver")
             except Exception:
@@ -2484,6 +2494,17 @@ def _geo_cache_key(proxy_url: str) -> str:
     return f"{parsed.hostname}:{parsed.port or 0}:{user}"
 
 
+def _tailscale_proxy(proxy_url: str) -> bool:
+    """Phone proxy on the Tailscale net (100.64.0.0/10). No country tag in the URL."""
+    try:
+        from urllib.parse import urlparse
+        import ipaddress
+        host = (urlparse(proxy_url if "://" in proxy_url else f"http://{proxy_url}").hostname or "")
+        return ipaddress.ip_address(host) in ipaddress.ip_network("100.64.0.0/10")
+    except Exception:
+        return False
+
+
 def _phone_proxy_fast(proxy_url: str | None) -> bool:
     """LocalToNet / phone exit: skip slow in-proxy geo loops (saves 20–40s per account)."""
     if not proxy_url:
@@ -2492,7 +2513,7 @@ def _phone_proxy_fast(proxy_url: str | None) -> bool:
     if mode in ("0", "false", "no", "off"):
         return False
     low = proxy_url.lower()
-    return "localtonet" in low or _proxy_implies_india(proxy_url)
+    return "localtonet" in low or _proxy_implies_india(proxy_url) or _tailscale_proxy(proxy_url)
 
 
 def _login_fast_mode(proxy_url: str | None) -> bool:
@@ -5499,7 +5520,9 @@ def _do_login(
     }
 
     def page_state():
-        url = driver.current_url
+        # current_url waits for onload. On this proxy that sat 8–10s after the
+        # next page was already on screen.
+        url = _live_url(driver)
         try:
             text = driver.find_element(By.TAG_NAME, "body").text.lower()
         except Exception:
@@ -5945,7 +5968,9 @@ def _do_login(
     def clear_totp_pages(max_rounds: int = 3, pause_label: str = "TOTP") -> None:
         """Google may show the TOTP page once or twice — same 30s code until window ends."""
         for round_i in range(max_rounds):
-            url_now = driver.current_url
+            # current_url waits for the page load and was re-submitting a code
+            # Google had already accepted.
+            url_now = _live_url(driver)
             if not is_totp_challenge_url(url_now):
                 return
             log(f"{email} — {pause_label} page round {round_i + 1}/{max_rounds}")
@@ -6705,7 +6730,7 @@ def _do_login(
                 pass
             log(f"{email} — opening the menu Sign out link")
             try:
-                driver.set_page_load_timeout(12)
+                driver.set_page_load_timeout(6)
                 driver.get(href)
             except Exception as exc:
                 log(f"{email} — Sign out link warning: {exc}")
@@ -6798,7 +6823,9 @@ def _do_login(
         """Open account home. Signed out only if Google no longer shows this account."""
         try:
             driver.switch_to.default_content()
-            driver.set_page_load_timeout(12)
+            # The about page often redirects before onload. A 12s load wait
+            # was the whole sign-out delay after the password had changed.
+            driver.set_page_load_timeout(5)
             driver.get("https://myaccount.google.com/?hl=en")
         except Exception as exc:
             log(f"{email} — sign-out check failed: {exc}")
@@ -7338,7 +7365,7 @@ def _do_login(
             confirmed = False
             while time.time() < deadline:
                 try:
-                    if not is_google_password_change_url(driver.current_url):
+                    if not is_google_password_change_url(_live_url(driver)):
                         return
                 except Exception:
                     pass
@@ -7395,7 +7422,18 @@ def _do_login(
             submit_password_change_form()
             clear_totp_pages(max_rounds=1, pause_label="After password change")
 
-            url_after, text_after = page_state()
+            def _left_password_form(seconds: float = 6.0) -> str:
+                deadline = time.time() + seconds
+                last = ""
+                while time.time() < deadline:
+                    last = _live_url(driver)
+                    if last and not is_google_password_change_url(last):
+                        return last
+                    time.sleep(0.25)
+                return last or _live_url(driver)
+
+            url_after = _left_password_form()
+            text_after = ""
             if is_google_password_change_url(url_after):
                 fields2 = wait_fields(3.5)
                 log(f"{email} — password change retry: {len(fields2)} input(s)")
@@ -7412,7 +7450,8 @@ def _do_login(
                     rand_sleep(150, 250)
                     submit_password_change_form()
                     clear_totp_pages(max_rounds=1, pause_label="After password change retry")
-                    url_after, text_after = page_state()
+                    url_after = _left_password_form()
+                    text_after = ""
 
             if is_google_password_change_url(url_after) and confirm_stay_signed_in_dialog():
                 log(f"{email} — clicked 'Change password' on stay-signed-in dialog")
@@ -7425,7 +7464,7 @@ def _do_login(
 
             def form_still_open() -> bool:
                 try:
-                    here = driver.current_url or ""
+                    here = _live_url(driver)
                 except Exception:
                     return False
                 if not is_google_password_change_url(here):
@@ -7622,7 +7661,7 @@ def _do_login(
         def _submit_reauth_totp(leave_url: str) -> str:
             nonlocal _reauth_totp_attempts
             try:
-                here = driver.current_url or ""
+                here = _live_url(driver)
             except Exception:
                 here = ""
             if here and not is_totp_challenge_url(here):
@@ -8332,7 +8371,7 @@ def _do_login(
     pw_field = None
     _pw_deadline = time.time() + (14 if _phone_fast else 8)
     while time.time() < _pw_deadline and pw_field is None:
-        _cur_pw = driver.current_url or ""
+        _cur_pw = _live_url(driver)
         if "challenge/recaptcha" in _cur_pw:
             log(f"{email} — robot page opened while waiting for password")
             _rc_result = handle_recaptcha_checkbox(
@@ -8435,14 +8474,14 @@ def _do_login(
 
     # The first Next on this proxy often lands before Google accepts the field.
     # Email already retries; the password page was stopping after one click.
-    _pre_pwd_url = driver.current_url
-    _pwd_wait_s = 22 if _phone_fast else 12
+    _pre_pwd_url = _live_url(driver)
+    _pwd_wait_s = 8
     _nav_deadline = time.time() + _pwd_wait_s
     _pw_retried = False
     _pw_next_at = time.time()
     while time.time() < _nav_deadline:
         try:
-            _cur = driver.current_url
+            _cur = _live_url(driver)
             if _cur != _pre_pwd_url and "challenge/pwd" not in _cur:
                 break
             _, _body = page_state()
@@ -8456,7 +8495,7 @@ def _do_login(
         if (
             not _pw_retried
             and (time.time() - _pw_next_at) > 5
-            and "challenge/pwd" in (driver.current_url or "")
+            and "challenge/pwd" in _live_url(driver)
         ):
             log(f"{email} — password page still open, submitting again")
             try:
