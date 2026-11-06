@@ -10,6 +10,7 @@ Logs   (stderr): progress lines prefixed with [UC]
 import sys
 import json
 import os
+import re
 import time
 import random
 import secrets
@@ -286,6 +287,14 @@ def _find_free_display() -> int:
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
+def _preload_whisper_bg() -> None:
+    try:
+        from recaptcha_audio_solver import preload_whisper
+        preload_whisper()
+    except Exception as exc:
+        log(f"Whisper preload skipped: {exc}")
+
+
 def log(msg: str):
     print(f"[UC] {msg}", file=sys.stderr, flush=True)
 
@@ -470,10 +479,23 @@ def find_totp_input(driver) -> object | None:
     return None
 
 
+def challenge_kind(url: str) -> str:
+    """The challenge path segment, so skotp is not treated as sk."""
+    match = re.search(r"challenge/([a-z0-9]+)", (url or "").lower())
+    return match.group(1) if match else ""
+
+
+def is_sms_code_url(url: str) -> bool:
+    """Phone text-message code. Not the Google Authenticator page."""
+    return challenge_kind(url) in {"skotp", "ootp", "sms"}
+
+
 def is_totp_challenge_url(url: str) -> bool:
     """True when the browser is on a Google Authenticator code entry page."""
+    if is_sms_code_url(url):
+        return False
     u = url.lower()
-    if "challenge/totp" in u or "challenge/ipp" in u:
+    if challenge_kind(url) in {"totp", "ipp"}:
         return True
     if "v3/signin" in u and "v3/signin/identifier" not in u and "challenge" not in u:
         return True
@@ -512,7 +534,9 @@ def next_fresh_totp(
         win = totp_current_window()
     else:
         secs_left = totp_window_remaining()
-        if secs_left <= 5:
+        # Google often takes 8–10s to accept the code. A code with only 8s
+        # left expires on the way and comes back as "wrong code".
+        if secs_left <= 12:
             time.sleep(secs_left + 1)
             win = totp_current_window()
 
@@ -643,6 +667,14 @@ def fast_paste(driver, element, text: str) -> None:
                 "windowsVirtualKeyCode": vk,
             })
         driver.execute_cdp_cmd("Input.insertText", {"text": text})
+        driver.execute_script(
+            """
+            var el = arguments[0];
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            """,
+            element,
+        )
     except Exception as exc:
         log(f"fast paste CDP failed ({exc}) — send_keys whole string")
         try:
@@ -650,11 +682,14 @@ def fast_paste(driver, element, text: str) -> None:
         except Exception:
             clipboard_type(driver, element, text)
     try:
-        field_type = (element.get_attribute("type") or "").lower()
-        if field_type != "password":
-            val = driver.execute_script("return arguments[0].value || ''", element) or ""
-            if text and len(val) < max(1, len(text) - 1):
-                element.send_keys(text)
+        val = driver.execute_script("return arguments[0].value || ''", element) or ""
+        if text and len(val) < max(1, len(text) - 1):
+            log(f"fast paste missed the field ({len(val)}/{len(text)}) — send_keys")
+            try:
+                element.clear()
+            except Exception:
+                pass
+            element.send_keys(text)
     except Exception:
         pass
     log(f"fast paste {len(text)} chars in {int((time.time() - t0) * 1000)}ms")
@@ -962,8 +997,72 @@ def _cdp_touch_xy(driver, x: float, y: float) -> None:
         log(f"reCAPTCHA touch click skipped: {exc}")
 
 
+def _cdp_click_element(driver, element) -> bool:
+    """Click the visible center of a control. ActionChains misses overlay buttons."""
+    try:
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block:'center', inline:'center'});",
+            element,
+        )
+    except Exception:
+        pass
+    try:
+        rect = driver.execute_script(
+            "var r = arguments[0].getBoundingClientRect();"
+            "return {x: r.left, y: r.top, w: r.width, h: r.height};",
+            element,
+        ) or {}
+        w = float(rect.get("w") or 0)
+        h = float(rect.get("h") or 0)
+        if w < 4 or h < 4:
+            return False
+        _cdp_click_xy(driver, float(rect["x"]) + w / 2, float(rect["y"]) + h / 2)
+        return True
+    except Exception as exc:
+        log(f"CDP element click failed: {exc}")
+        return False
+
+
+def _find_control_by_label(driver, labels: tuple[str, ...]):
+    """Button whose own text is one of the labels, including inside a shadow root."""
+    try:
+        return driver.execute_script(
+            """
+            var want = arguments[0];
+            function norm(el) {
+              return (el.innerText || el.textContent || '')
+                .replace(/\\s+/g, ' ').trim().toLowerCase();
+            }
+            function walk(root, hits) {
+              if (!root || !root.querySelectorAll) return;
+              var nodes = root.querySelectorAll('button, [role="button"], a, span, div');
+              for (var i = 0; i < nodes.length; i++) {
+                var el = nodes[i];
+                var t = norm(el);
+                if (t && want.indexOf(t) !== -1 && t.length < 28) hits.push(el);
+                if (el.shadowRoot) walk(el.shadowRoot, hits);
+              }
+            }
+            var hits = [];
+            walk(document, hits);
+            for (var j = 0; j < hits.length; j++) {
+              var n = hits[j];
+              var b = n.closest ? (n.closest('button, [role="button"], a') || n) : n;
+              var r = b.getBoundingClientRect();
+              if (r.width > 8 && r.height > 8) return b;
+            }
+            return null;
+            """,
+            [x.lower() for x in labels],
+        )
+    except Exception:
+        return None
+
+
 def _trusted_button_click(driver, element) -> bool:
     """Real pointer click. Google ignores the synthetic touch events on Next."""
+    if _cdp_click_element(driver, element):
+        return True
     from selenium.webdriver.common.action_chains import ActionChains
     try:
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
@@ -978,6 +1077,43 @@ def _trusted_button_click(driver, element) -> bool:
             return True
         except Exception:
             return False
+
+
+def _page_visible_text(driver) -> str:
+    try:
+        return (
+            driver.execute_script(
+                "return ((document.body && document.body.innerText) || '')"
+            )
+            or ""
+        ).lower()
+    except Exception:
+        return ""
+
+
+def _google_error_dialog_open(driver) -> bool:
+    return "something went wrong" in _page_visible_text(driver)
+
+
+def _clear_google_error_dialog(driver, email: str) -> bool:
+    """Dismiss Google's sign-in error. Next does nothing while that dialog is up."""
+    if not _google_error_dialog_open(driver):
+        return False
+    log(f"{email} — Google error dialog, clicking Restart")
+    el = _find_control_by_label(driver, ("Restart", "Try again"))
+    clicked = bool(el is not None and _cdp_click_element(driver, el))
+    if not clicked:
+        clicked = _click_button_text(driver, ("Restart", "Try again"))
+    time.sleep(1.1)
+    if not _google_error_dialog_open(driver):
+        log(f"{email} — error dialog closed")
+        return True
+    log(f"{email} — Restart did not close the dialog, reloading the sign-in page")
+    try:
+        driver.get(GOOGLE_EMAIL_SIGNIN)
+    except Exception as exc:
+        log(f"{email} — sign-in reload failed: {exc}")
+    return True
 
 
 def _click_button_text(driver, labels: tuple[str, ...]) -> bool:
@@ -1015,10 +1151,10 @@ def _cdp_find_recaptcha(driver) -> dict:
         return {}
     anchor = None
     checkbox = None
-    bframe = None
+    bframes: list[dict] = []
 
     def walk(node, in_anchor: bool = False):
-        nonlocal anchor, checkbox, bframe
+        nonlocal anchor, checkbox
         if not isinstance(node, dict):
             return
         attr = _cdp_node_attrs(node)
@@ -1035,7 +1171,7 @@ def _cdp_find_recaptcha(driver) -> dict:
             }
             child_anchor = True
         elif name == "iframe" and "bframe" in low:
-            bframe = {"backendNodeId": node.get("backendNodeId"), "src": src[:160]}
+            bframes.append({"backendNodeId": node.get("backendNodeId"), "src": src[:160]})
         if child_anchor and node_id == "recaptcha-anchor":
             checkbox = {
                 "backendNodeId": node.get("backendNodeId"),
@@ -1057,6 +1193,11 @@ def _cdp_find_recaptcha(driver) -> dict:
             walk(shadow, in_anchor)
 
     walk(doc.get("root") or {})
+    bframe = None
+    for candidate in bframes:
+        if _quad_visible(driver, _cdp_content_quad(driver, candidate.get("backendNodeId"))):
+            bframe = candidate
+            break
     return {"anchor": anchor, "checkbox": checkbox, "bframe": bframe}
 
 
@@ -1103,6 +1244,22 @@ def _cdp_content_quad(driver, backend_id):
 def _quad_bounds(quad):
     xs, ys = quad[0::2], quad[1::2]
     return min(xs), min(ys), max(xs), max(ys)
+
+
+def _quad_visible(driver, quad) -> bool:
+    """A parked reCAPTCHA bframe sits near y=-10000 and is not a real popup."""
+    if not quad:
+        return False
+    left, top, right, bottom = _quad_bounds(quad)
+    vw, vh, dpr = _viewport_css(driver)
+    rects = [(left, top, right, bottom)]
+    if dpr > 1.05:
+        rects.append(tuple(v / dpr for v in (left, top, right, bottom)))
+    for l, t, r, b in rects:
+        w, h = r - l, b - t
+        if w > 180 and h > 140 and t < vh - 8 and b > 24 and l < vw - 8 and r > 8:
+            return True
+    return False
 
 
 def _viewport_css(driver):
@@ -1196,12 +1353,7 @@ def _cdp_challenge_open(driver) -> bool:
     quad = _cdp_content_quad(driver, bf.get("backendNodeId"))
     if not quad:
         return False
-    left, top, right, bottom = _quad_bounds(quad)
-    vw, _vh, dpr = _viewport_css(driver)
-    w, h = right - left, bottom - top
-    if w > vw * 1.25 and dpr > 1.15:
-        w, h = w / dpr, h / dpr
-    return h > 140 and w > 180
+    return _quad_visible(driver, quad)
 
 
 def _cdp_click_recaptcha_checkbox(driver) -> bool:
@@ -1219,6 +1371,19 @@ def _cdp_click_recaptcha_checkbox(driver) -> bool:
     if not point:
         return False
     x, y, _how = point
+    # A real finger travels onto the box. One teleport is scored as a bot.
+    sx = max(12.0, x - random.randint(80, 160))
+    sy = max(12.0, y - random.randint(50, 120))
+    for step in range(1, 5):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": "mouseMoved",
+            "x": sx + (x - sx) * step / 4,
+            "y": sy + (y - sy) * step / 4,
+            "button": "none",
+            "buttons": 0,
+        })
+        time.sleep(0.045)
+    time.sleep(0.12)
     _cdp_click_xy(driver, x, y)
     time.sleep(0.45)
     aria = (_cdp_find_recaptcha(driver).get("checkbox") or {}).get("aria")
@@ -1334,6 +1499,12 @@ def handle_recaptcha_checkbox(
         found = {}
         _last_wait_log = 0.0
         while time.time() < ready_deadline:
+            if _google_error_dialog_open(driver):
+                _clear_google_error_dialog(driver, email)
+                ready_deadline = max(ready_deadline, time.time() + 12)
+                anchor_since = None
+                time.sleep(0.4)
+                continue
             found = _cdp_find_recaptcha(driver)
             if found.get("checkbox"):
                 break
@@ -1354,12 +1525,21 @@ def handle_recaptcha_checkbox(
                 f"{email} — reCAPTCHA widget in DOM "
                 f"aria={(found.get('checkbox') or {}).get('aria')}"
             )
+            capture_step(driver, "Robot checkbox")
         else:
             log(f"{email} — reCAPTCHA widget not in DOM")
             _cdp_log_frame_srcs(driver)
             _find_recaptcha_anchor_iframe(driver, log_miss=True)
 
         for attempt in range(1, 3):
+            try:
+                driver.switch_to.default_content()
+                if "challenge/recaptcha" not in (driver.current_url or ""):
+                    _rc_result = "passed"
+                    log(f"{email} — left the robot page")
+                    break
+            except Exception:
+                pass
             if _recaptcha_checkbox_ticked(driver):
                 _rc_result = "passed"
                 log(f"{email} — reCAPTCHA already ticked (attempt {attempt})")
@@ -1370,6 +1550,7 @@ def handle_recaptcha_checkbox(
                 break
             if _cdp_challenge_open(driver):
                 log(f"{email} — reCAPTCHA challenge is open")
+                capture_step(driver, "Robot challenge")
                 _rc_result = "image"
                 break
             if attempt < 2:
@@ -1412,12 +1593,20 @@ def handle_recaptcha_checkbox(
 
         if _rc_result != "passed":
             try:
+                driver.switch_to.default_content()
+                if "challenge/recaptcha" not in (driver.current_url or ""):
+                    _rc_result = "passed"
+                    log(f"{email} — left the robot page before the solver")
+            except Exception:
+                pass
+        if _rc_result != "passed":
+            try:
                 from recaptcha_free_solver import run_free_captcha_pipeline
                 from recaptcha_solver import captcha_solver_configured, try_solve_recaptcha_on_page
 
                 if _rc_result in ("image", "timeout", "missed"):
-                    log(f"{email} — free captcha pipeline (Whisper audio + YOLO vision)…")
-                    if run_free_captcha_pipeline(driver, _recaptcha_checkbox_ticked, max_cycles=3):
+                    log(f"{email} — free captcha pipeline (audio first, then vision)…")
+                    if run_free_captcha_pipeline(driver, _recaptcha_checkbox_ticked, max_cycles=1):
                         _rc_result = "passed"
                         log(f"{email} — free captcha pipeline OK")
 
@@ -2068,7 +2257,7 @@ def _login_pace(proxy_url: str | None) -> dict:
         "totp_after": (200, 350) if fast else (700, 1200),
         "totp_clear": (250, 450) if fast else (900, 1400),
         "signed_in": (80, 160) if fast else (400, 700),
-        "totp_wait_s": 8 if fast else 30,
+        "totp_wait_s": 12 if fast else 30,
         "totp_poll_s": 0.2 if fast else 0.5,
         "2fa_totp_wait": 1.2 if fast else 18,
         "skip_logout": fast,
@@ -4158,6 +4347,7 @@ def main():
     )
 
     _t0 = time.time()
+    threading.Thread(target=_preload_whisper_bg, daemon=True).start()
     result = check_gmail(
         email, password, totp_secret, proxy, fresh_profile,
         proxy_for_ip_check, device_index, change_password,
@@ -4218,7 +4408,7 @@ def main():
     if result["durationMs"] >= 45000:
         log(
             f"{email} — Slow check tip: sign-in nav + LocalToNet proxy dominate; "
-            "phone mode skips warmup/ipify; PHONE_WARMUP=1 only if captcha badho"
+            "google.com warmup stays on so the checkbox is not a cold profile"
         )
     print(json.dumps(result), flush=True)
 
@@ -4388,6 +4578,41 @@ def _proxy_without_unsupported_sticky(proxy_url: str | None) -> str | None:
     return f"{scheme}{cleaned}{rest}"
 
 
+def _compact_screenshot(driver) -> str | None:
+    """Small JPEG so a full step strip still fits in the job result."""
+    try:
+        png = driver.get_screenshot_as_png()
+    except Exception:
+        return None
+    try:
+        import io as _io
+        from PIL import Image
+
+        im = Image.open(_io.BytesIO(png)).convert("RGB")
+        if im.width > 420:
+            im = im.resize((420, max(1, int(im.height * 420 / im.width))), Image.Resampling.LANCZOS)
+        buf = _io.BytesIO()
+        im.save(buf, format="JPEG", quality=40, optimize=True)
+        raw = buf.getvalue()
+    except Exception:
+        raw = png
+    return "data:image/jpeg;base64," + base64.b64encode(raw).decode()
+
+
+def capture_step(driver, label: str) -> None:
+    shots = getattr(driver, "_step_shots", None)
+    if not isinstance(shots, list) or len(shots) >= 18:
+        return
+    image = _compact_screenshot(driver)
+    if not image:
+        return
+    shots.append({"label": label, "image": image})
+    b64 = image.split(",", 1)[1] if "," in image else image
+    safe = label.replace("\t", " ").replace("\n", " ")
+    print(f"STEP_SHOT\t{safe}\t{b64}", file=sys.stderr, flush=True)
+    log(f"step shot: {label}")
+
+
 def check_gmail(
     email: str,
     password: str,
@@ -4477,6 +4702,23 @@ def check_gmail(
         # Keep the emulated Android UA/client hints aligned with the actual
         # Chrome binary used by undetected-chromedriver.
         fp["chromeVersion"] = chrome_version_full
+    # A real new phone passes the checkbox because the browser matches the device.
+    # This host is Linux Chrome. Claiming a Pixel (Android UA, touch, Mali GPU)
+    # while the TLS fingerprint stays Linux is what makes Google open the puzzle.
+    consistent_browser = os.environ.get("CONSISTENT_BROWSER", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+    if consistent_browser:
+        fp["screenW"] = 1366
+        fp["screenH"] = 768
+        fp["availH"] = 728
+        fp["dpr"] = 1
+        fp["platform"] = "Linux x86_64"
+        fp["maxTouchPoints"] = 0
+        log(
+            "CONSISTENT_BROWSER — real Linux Chrome, fake Android off. "
+            "Phone model stays in the profile only; the sign-in browser matches this machine."
+        )
     fp_summary = (f"{fp['model']} | {fp['webglRenderer']} | "
                   f"{fp['screenW']}x{fp['screenH']} dpr={fp['dpr']} | canvas={fp['canvasSeed']}")
     geo_info = (f"tz={fp.get('timezone','?')} lang={fp.get('language','?')} "
@@ -4538,15 +4780,13 @@ def check_gmail(
     # Do not pass the usual Selenium flag bundle (--disable-component-update,
     # --disable-default-apps, --disable-background-networking, etc.). Google's
     # sign-in page treats that set as an insecure/automated browser.
-    options.add_argument(f"--user-agent={MOBILE_UA}")
-    options.add_argument("--touch-events=enabled")
+    if not consistent_browser:
+        options.add_argument(f"--user-agent={MOBILE_UA}")
+        options.add_argument("--touch-events=enabled")
+        options.add_argument(f"--force-device-memory={fp['deviceMemory']}")
     # DPR comes from Emulation.setDeviceMetricsOverride only. Combining it with
     # --force-device-scale-factor double-scales innerWidth vs outerWidth, which
     # fingerprint.com scores as Developer Tools + Tampering.
-    # Chrome 151 removed Emulation.setDeviceMemoryOverride CDP command.
-    # Use the Chrome flag instead so navigator.deviceMemory reports the correct
-    # spoofed value (instead of undefined which is a strong automation signal).
-    options.add_argument(f"--force-device-memory={fp['deviceMemory']}")
     # VM detection fix: SwiftShader renders via GPU-like pipeline instead of --disable-gpu
     # which exposes software rendering signals. These flags make WebGL work and match
     # what real Android Chrome reports (device_check.py uses the same set).
@@ -4624,6 +4864,8 @@ def check_gmail(
         _active_driver = driver
         _active_xvfb   = _xvfb_proc
         _active_locks  = [_session_lock_fd]
+        driver._step_shots = []
+        driver.capture_step = lambda label: capture_step(driver, label)
         # Reduced from 2.5s → 1.0s: Chrome process is already running, just
         # letting CDP settle.  Lock is released sooner so next account can start.
         time.sleep(0.35 if _phone_proxy_fast(proxy) else 1.0)
@@ -4736,93 +4978,96 @@ def check_gmail(
     except Exception as e:
         log(f"CDP timezone/locale warning (non-fatal): {e}")
 
-    # VM detection fix: override hardware concurrency at the CDP level so it matches
-    # the JS patch. Without this CDP override, browser internals still report real
-    # Replit VM thread count (16-32) which fingerprinters detect via timing attacks.
-    try:
-        driver.execute_cdp_cmd("Emulation.setHardwareConcurrencyOverride",
-                               {"hardwareConcurrency": fp["hwConcurrency"]})
-        log(f"CDP hwConcurrency set → {fp['hwConcurrency']}")
-    except Exception as e:
-        log(f"CDP hwConcurrency warning (non-fatal): {e}")
+    if consistent_browser:
+        log("CDP phone emulation skipped — real Chrome UA, window, and touch")
+    else:
+        # VM detection fix: override hardware concurrency at the CDP level so it matches
+        # the JS patch. Without this CDP override, browser internals still report real
+        # Replit VM thread count (16-32) which fingerprinters detect via timing attacks.
+        try:
+            driver.execute_cdp_cmd("Emulation.setHardwareConcurrencyOverride",
+                                   {"hardwareConcurrency": fp["hwConcurrency"]})
+            log(f"CDP hwConcurrency set → {fp['hwConcurrency']}")
+        except Exception as e:
+            log(f"CDP hwConcurrency warning (non-fatal): {e}")
 
-    # Touch BEFORE device metrics so the viewport is a phone, not a desktop
-    # window with a mobile UA (Google rejects that mix as an insecure browser).
-    try:
-        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
-            "enabled":        True,
-            "maxTouchPoints": fp["maxTouchPoints"],
-            "configuration":  "mobile",
-        })
-        log(f"CDP touch emulation set → maxTouchPoints={fp['maxTouchPoints']}")
-    except Exception as e:
-        log(f"CDP touch emulation warning (non-fatal): {e}")
+        # Touch BEFORE device metrics so the viewport is a phone, not a desktop
+        # window with a mobile UA (Google rejects that mix as an insecure browser).
+        try:
+            driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
+                "enabled":        True,
+                "maxTouchPoints": fp["maxTouchPoints"],
+                "configuration":  "mobile",
+            })
+            log(f"CDP touch emulation set → maxTouchPoints={fp['maxTouchPoints']}")
+        except Exception as e:
+            log(f"CDP touch emulation warning (non-fatal): {e}")
 
-    # Viewport height is the usable screen (availH), not the full panel height.
-    # Using screenH here makes innerHeight larger than a real phone and is scored
-    # as DevTools / tampering.
-    _view_h = int(fp.get("availH") or fp["screenH"])
-    try:
-        driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
-            "width":             fp["screenW"],
-            "height":            _view_h,
-            "deviceScaleFactor": fp["dpr"],
-            "mobile":            True,
-            "hasTouch":          True,
-            "screenWidth":       fp["screenW"],
-            "screenHeight":      fp["screenH"],
-        })
-        log(f"CDP deviceMetrics set → {fp['screenW']}x{_view_h} dpr={fp['dpr']}")
-    except Exception as e:
-        log(f"CDP deviceMetrics warning (non-fatal): {e}")
+        # Viewport height is the usable screen (availH), not the full panel height.
+        # Using screenH here makes innerHeight larger than a real phone and is scored
+        # as DevTools / tampering.
+        _view_h = int(fp.get("availH") or fp["screenH"])
+        try:
+            driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                "width":             fp["screenW"],
+                "height":            _view_h,
+                "deviceScaleFactor": fp["dpr"],
+                "mobile":            True,
+                "hasTouch":          True,
+                "screenWidth":       fp["screenW"],
+                "screenHeight":      fp["screenH"],
+            })
+            log(f"CDP deviceMetrics set → {fp['screenW']}x{_view_h} dpr={fp['dpr']}")
+        except Exception as e:
+            log(f"CDP deviceMetrics warning (non-fatal): {e}")
 
-    # deviceMemory override at C++ level — the JS prototype patch alone can be
-    # bypassed by fingerprint.com reading the CDP-reported value directly.
-    try:
-        driver.execute_cdp_cmd("Emulation.setDeviceMemoryOverride",
-                               {"memory": fp["deviceMemory"]})
-        log(f"CDP deviceMemory set → {fp['deviceMemory']} GiB")
-    except Exception as e:
-        log(f"CDP deviceMemory skipped: {str(e).splitlines()[0][:160]}")
+        # deviceMemory override at C++ level — the JS prototype patch alone can be
+        # bypassed by fingerprint.com reading the CDP-reported value directly.
+        try:
+            driver.execute_cdp_cmd("Emulation.setDeviceMemoryOverride",
+                                   {"memory": fp["deviceMemory"]})
+            log(f"CDP deviceMemory set → {fp['deviceMemory']} GiB")
+        except Exception as e:
+            log(f"CDP deviceMemory skipped: {str(e).splitlines()[0][:160]}")
 
-    # VM detection fix: Emulation.setUserAgentOverride sets navigator.userAgent and
-    # navigator.platform at the CDP emulation layer — deeper than Network.setUserAgentOverride.
-    # fingerprint.com compares the CDP-emulation-reported platform against the JS-reported
-    # platform; both must agree on "Linux armv8l" to avoid a VM mismatch signal.
-    # CRITICAL: Must include userAgentMetadata here too — calling Emulation.setUserAgentOverride
-    # WITHOUT userAgentMetadata causes Chrome 151 to clear navigator.userAgentData.brands to [],
-    # mobile to false, and platform to '' — a major Tampering signal that overrides both
-    # Network.setUserAgentOverride metadata AND our JS-level Navigator.prototype.userAgentData fix.
-    try:
-        driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
-            "userAgent":      MOBILE_UA,
-            "acceptLanguage": f"{fp['language']},en;q=0.9",
-            "platform":       fp["platform"],
-            "userAgentMetadata": {
-                "brands": [
-                    {"brand": "Not(A;Brand",   "version": "8"},
-                    {"brand": "Chromium",      "version": fp["chromeVersion"].split(".")[0]},
-                    {"brand": "Google Chrome", "version": fp["chromeVersion"].split(".")[0]},
-                ],
-                "fullVersionList": [
-                    {"brand": "Not(A;Brand",   "version": "8.0.0.0"},
-                    {"brand": "Chromium",      "version": fp["chromeVersion"]},
-                    {"brand": "Google Chrome", "version": fp["chromeVersion"]},
-                ],
-                "fullVersion": fp["chromeVersion"],
-                "platform": "Android",
-                "platformVersion": str(fp["androidVersion"]) + ".0.0",
-                "architecture": "",
-                "model": fp["model"],
-                "mobile": True,
-                "bitness": "",
-                "wow64": False,
-                "formFactors": ["Mobile"],
-            },
-        })
-        log(f"CDP Emulation UA override set → platform={fp['platform']} (with userAgentMetadata)")
-    except Exception as e:
-        log(f"CDP Emulation UA override warning (non-fatal): {e}")
+        # VM detection fix: Emulation.setUserAgentOverride sets navigator.userAgent and
+        # navigator.platform at the CDP emulation layer — deeper than Network.setUserAgentOverride.
+        # fingerprint.com compares the CDP-emulation-reported platform against the JS-reported
+        # platform; both must agree on "Linux armv8l" to avoid a VM mismatch signal.
+        # CRITICAL: Must include userAgentMetadata here too — calling Emulation.setUserAgentOverride
+        # WITHOUT userAgentMetadata causes Chrome 151 to clear navigator.userAgentData.brands to [],
+        # mobile to false, and platform to '' — a major Tampering signal that overrides both
+        # Network.setUserAgentOverride metadata AND our JS-level Navigator.prototype.userAgentData fix.
+        try:
+            driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
+                "userAgent":      MOBILE_UA,
+                "acceptLanguage": f"{fp['language']},en;q=0.9",
+                "platform":       fp["platform"],
+                "userAgentMetadata": {
+                    "brands": [
+                        {"brand": "Not(A;Brand",   "version": "8"},
+                        {"brand": "Chromium",      "version": fp["chromeVersion"].split(".")[0]},
+                        {"brand": "Google Chrome", "version": fp["chromeVersion"].split(".")[0]},
+                    ],
+                    "fullVersionList": [
+                        {"brand": "Not(A;Brand",   "version": "8.0.0.0"},
+                        {"brand": "Chromium",      "version": fp["chromeVersion"]},
+                        {"brand": "Google Chrome", "version": fp["chromeVersion"]},
+                    ],
+                    "fullVersion": fp["chromeVersion"],
+                    "platform": "Android",
+                    "platformVersion": str(fp["androidVersion"]) + ".0.0",
+                    "architecture": "",
+                    "model": fp["model"],
+                    "mobile": True,
+                    "bitness": "",
+                    "wow64": False,
+                    "formFactors": ["Mobile"],
+                },
+            })
+            log(f"CDP Emulation UA override set → platform={fp['platform']} (with userAgentMetadata)")
+        except Exception as e:
+            log(f"CDP Emulation UA override warning (non-fatal): {e}")
 
     _login_result: dict = {}
     try:
@@ -4872,6 +5117,13 @@ def check_gmail(
         log(f"Login exception: {e}")
         _login_result = {"status": "unknown", "reason": f"Login error: {str(e)[:300]}", "totpCode": totp_code}
     finally:
+        try:
+            capture_step(driver, "Last page")
+        except Exception:
+            pass
+        shots = getattr(driver, "_step_shots", None)
+        if isinstance(_login_result, dict) and isinstance(shots, list) and shots:
+            _login_result["stepScreenshots"] = list(shots)
         try:
             driver.quit()
         except Exception:
@@ -4975,9 +5227,11 @@ def _do_login(
     _pace = _login_pace(proxy_url)
     _phone_fast = _pace["fast"]
     _post_nav_sleep = _pace["post_nav"]
-    _use_warmup = not robot_check_only and (
-        not _phone_fast
-        or os.environ.get("PHONE_WARMUP", "").strip().lower() in ("1", "true", "yes")
+    # A new phone opens Google once before the sign-in form and already has
+    # cookies. A cold profile that lands straight on the email page is what
+    # makes the checkbox open a puzzle. PHONE_WARMUP=0 turns this off.
+    _use_warmup = os.environ.get("PHONE_WARMUP", "1").strip().lower() not in (
+        "0", "false", "no", "off",
     )
 
     # One TOTP code per 30s window — reuse across multiple prompts in the same window.
@@ -4996,10 +5250,15 @@ def _do_login(
         return url, text
 
     def screenshot_b64() -> str | None:
-        try:
-            return f"data:image/jpeg;base64,{base64.b64encode(driver.get_screenshot_as_png()).decode()}"
-        except Exception:
-            return None
+        return _compact_screenshot(driver)
+
+    def snap(label: str) -> None:
+        fn = getattr(driver, "capture_step", None)
+        if callable(fn):
+            try:
+                fn(label)
+            except Exception:
+                pass
 
     def get_hostname(url: str) -> str:
         """Return the actual hostname from the URL (not query string)."""
@@ -5351,8 +5610,29 @@ def _do_login(
             try:
                 if _pace.get("fast"):
                     fast_paste(driver, field, code)
-                    if not _click_button_text(driver, ("Next", "Verify")):
-                        field.send_keys(Keys.ENTER)
+                    nxt = wait_for_any([
+                        "#totpNext button", "#totpNext",
+                        "#idvPreregisteredPhoneNext button",
+                    ], timeout=2)
+                    if nxt and _trusted_button_click(driver, nxt):
+                        log(f"{email} — {label}: TOTP Next clicked")
+                    elif _click_button_text(driver, ("Next", "Verify")):
+                        log(f"{email} — {label}: TOTP Next clicked by label")
+                    else:
+                        log(f"{email} — {label}: TOTP Next control not found")
+                    try:
+                        field.click()
+                    except Exception:
+                        pass
+                    for typ in ("keyDown", "keyUp"):
+                        driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                            "type": typ,
+                            "key": "Enter",
+                            "code": "Enter",
+                            "windowsVirtualKeyCode": 13,
+                            "nativeVirtualKeyCode": 13,
+                        })
+                    log(f"{email} — {label}: TOTP Enter pressed")
                 else:
                     touch_click(driver, field)
                     rand_sleep(60, 120)
@@ -6791,7 +7071,22 @@ def _do_login(
     # profile that opens the sign-in form immediately is what makes the
     # checkbox escalate to a puzzle. One homepage load is enough; no search.
     if robot_check_only:
-        log(f"{email} — Robot check: skip warmup, open email sign-in")
+        if _use_warmup:
+            try:
+                log(f"{email} — Warmup: google.com")
+                driver.get("https://www.google.com")
+                _warm_deadline = time.time() + 3.5
+                while time.time() < _warm_deadline:
+                    try:
+                        if driver.execute_script("return document.readyState") in ("interactive", "complete"):
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.15)
+                rand_sleep(250, 450)
+            except Exception as _warm_err:
+                log(f"{email} — warmup skipped: {_warm_err}")
+        log(f"{email} — Robot check: open email sign-in")
         try:
             driver.get(_signin_entry)
             time.sleep(0.45)
@@ -6809,6 +7104,7 @@ def _do_login(
             }
         url, text = page_state()
         log(f"{email} — After nav: {url[:70]}")
+        snap("Sign-in page")
         tmark("robot sign-in nav")
     else:
         if not change_password_after_login:
@@ -6861,6 +7157,7 @@ def _do_login(
                 }
             url, text = page_state()
             log(f"{email} — After nav: {url[:70]}")
+            snap("Sign-in page")
             tmark("sign-in nav done")
         else:
             if _use_warmup:
@@ -6913,6 +7210,7 @@ def _do_login(
 
             url, text = page_state()
             log(f"{email} — After nav: {url[:70]}")
+            snap("Sign-in page")
             tmark("sign-in nav done")
 
     # Defined early so TOTP right after LOGIN_START is handled before email step.
@@ -7178,30 +7476,6 @@ def _do_login(
         except Exception:
             return False
 
-    def _restart_google_error() -> bool:
-        """Google's 'Something went wrong' dialog blocks Next until Restart is tapped."""
-        try:
-            body = (driver.find_element(By.TAG_NAME, "body").text or "").lower()
-        except Exception:
-            return False
-        if "something went wrong" not in body:
-            return False
-        log(f"{email} — Google error dialog, clicking Restart")
-        try:
-            el = driver.execute_script("""
-                var nodes = document.querySelectorAll('button, [role="button"], a, span');
-                for (var i = 0; i < nodes.length; i++) {
-                  var t = (nodes[i].innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                  if (t === 'restart' || t === 'try again') return nodes[i];
-                }
-                return null;
-            """)
-        except Exception:
-            el = None
-        if el is not None and _trusted_button_click(driver, el):
-            return True
-        return _click_button_text(driver, ("Restart", "Try again"))
-
     _click_email_next()
     # A slow phone proxy can take as long to leave this page as it took to open it.
     _nav_deadline = time.time() + (32 if _phone_fast else 12)
@@ -7228,22 +7502,25 @@ def _do_login(
                 break
         except Exception:
             pass
-        if _restarts < 2 and _restart_google_error():
+        if _restarts < 2 and _clear_google_error_dialog(driver, email):
             _restarts += 1
-            time.sleep(1.2)
             email_field = wait_for_any(EMAIL_SELECTORS, timeout=12) or email_field
-            if _phone_fast:
-                fast_paste(driver, email_field, email)
-            else:
-                clipboard_type(driver, email_field, email)
-            _click_email_next()
+            try:
+                if _phone_fast:
+                    fast_paste(driver, email_field, email)
+                else:
+                    clipboard_type(driver, email_field, email)
+                _click_email_next()
+            except Exception as exc:
+                log(f"{email} — resubmit after Restart failed: {exc}")
             _next_retried = False
             _next_at = time.time()
-            _nav_deadline = max(_nav_deadline, time.time() + 20)
+            _nav_deadline = max(_nav_deadline, time.time() + 24)
             continue
-        # First tap can land while the form is still painting. Click once more
-        # only if the email box is still on screen and no error dialog is up.
-        if not _next_retried and (time.time() - _next_at) > 4 and _email_box_visible():
+        # A second Next too soon interrupts the first request and Google
+        # opens "Something went wrong". Wait until that request has had a
+        # chance to leave the page.
+        if not _next_retried and (time.time() - _next_at) > 10 and _email_box_visible():
             log(f"{email} — email page still open, clicking Next again")
             _click_email_next()
             _next_retried = True
@@ -7251,6 +7528,7 @@ def _do_login(
 
     url, text = page_state()
     log(f"{email} — After email submit: {url[:70]}")
+    snap("After email")
     tmark("email step done")
 
     if "signin/rejected" in url:
@@ -7444,23 +7722,54 @@ def _do_login(
         rand_sleep(80, 160)
         clipboard_type(driver, pw_field, password)
         rand_sleep(100, 180)
-    # Click the "Next" button via touch — more human than Keys.ENTER (detectable as Selenium)
-    _pw_next = wait_for_any([
-        '#passwordNext button', '#passwordNext', '[jsname="LgbsSe"]',
-        'button[type="button"]', 'div[role="button"]',
-    ], timeout=4)
-    if _pw_next and _trusted_button_click(driver, _pw_next):
-        log(f"{email} — password Next clicked")
-    elif not _click_button_text(driver, ("Next",)):
-        pw_field.send_keys(Keys.ENTER)
-    else:
-        log(f"{email} — password Next clicked by label")
+    def _press_enter() -> None:
+        for typ in ("keyDown", "keyUp"):
+            driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                "type": typ,
+                "key": "Enter",
+                "code": "Enter",
+                "windowsVirtualKeyCode": 13,
+                "nativeVirtualKeyCode": 13,
+            })
 
-    # Wait for URL to advance past the password page (proxy latency can be 2-4s).
-    # Polling is more reliable than a fixed sleep — catches fast AND slow responses.
+    def _click_password_next() -> None:
+        try:
+            state = driver.execute_script(
+                """
+                var b = document.querySelector('#passwordNext button, #passwordNext [role="button"]');
+                if (!b) return 'missing';
+                return (b.disabled || b.getAttribute('aria-disabled') === 'true') ? 'disabled' : 'ready';
+                """
+            )
+            log(f"{email} — password Next {state}")
+        except Exception:
+            pass
+        nxt = wait_for_any(["#passwordNext button", "#passwordNext [role='button']", "#passwordNext"], timeout=2)
+        if nxt and _trusted_button_click(driver, nxt):
+            log(f"{email} — password Next clicked")
+        elif _click_button_text(driver, ("Next",)):
+            log(f"{email} — password Next clicked by label")
+        else:
+            log(f"{email} — password Next control not found")
+        try:
+            pw_field.click()
+        except Exception:
+            pass
+        try:
+            _press_enter()
+            log(f"{email} — password Enter pressed")
+        except Exception as exc:
+            log(f"{email} — password Enter failed: {exc}")
+
+    _click_password_next()
+
+    # The first Next on this proxy often lands before Google accepts the field.
+    # Email already retries; the password page was stopping after one click.
     _pre_pwd_url = driver.current_url
-    _pwd_wait_s = 20 if _phone_fast else 10
+    _pwd_wait_s = 22 if _phone_fast else 12
     _nav_deadline = time.time() + _pwd_wait_s
+    _pw_retried = False
+    _pw_next_at = time.time()
     while time.time() < _nav_deadline:
         try:
             _cur = driver.current_url
@@ -7474,11 +7783,32 @@ def _do_login(
                 break
         except Exception:
             pass
+        if (
+            not _pw_retried
+            and (time.time() - _pw_next_at) > 5
+            and "challenge/pwd" in (driver.current_url or "")
+        ):
+            log(f"{email} — password page still open, submitting again")
+            try:
+                pw_field = wait_for_any(PW_SELECTORS, timeout=2) or pw_field
+                filled = driver.execute_script(
+                    "return (arguments[0].value || '').length", pw_field,
+                ) or 0
+                if password and int(filled) < len(password):
+                    log(f"{email} — password field short ({filled}/{len(password)}), typing again")
+                    pw_field.click()
+                    pw_field.send_keys(password)
+            except Exception as exc:
+                log(f"{email} — password refill: {exc}")
+            _click_password_next()
+            _pw_retried = True
+            _nav_deadline = max(_nav_deadline, time.time() + 12)
         time.sleep(0.2)
     rand_sleep(150, 300) if _phone_fast else rand_sleep(300, 600)
 
     url, text = page_state()
     log(f"{email} — After password submit: {url[:70]}")
+    snap("After password")
     tmark("password step done")
     _log_login_timing_summary()
 
@@ -7570,6 +7900,9 @@ def _do_login(
     # challenge/totp / challenge/ipp = already on TOTP input page (handle separately below).
     # Text: "verify that it's you" is the page heading for the Google Authenticator
     # challenge page — distinct from "verify it's you" (method-selection heading).
+    if is_sms_code_url(url):
+        log(f"{email} — Phone SMS code page, not Google Authenticator ({url[:70]})")
+        totp_field = None
     is_2fa_select = (
         any(x in text for x in [
             "2-step verification",
@@ -7580,6 +7913,7 @@ def _do_login(
         ])
         or "challenge/dp" in url
         or "challenge/selection" in url
+        or is_sms_code_url(url)
         or _on_totp_url  # already on TOTP input page — treat as 2FA page
     )
 
@@ -7609,70 +7943,124 @@ def _do_login(
             # Method-selection page — click the Google Authenticator option.
             log(f"{email} — Clicking 'Google Authenticator' option")
 
-            def _click_authenticator():
-                """Real tap on the Authenticator row. The list paints a moment after the URL changes."""
+            def _click_visible_match(mode: str) -> bool:
+                """mode is 'other' or 'authenticator'. Walks closed shadow roots."""
                 try:
-                    el = driver.execute_script("""
-                        var byType = document.querySelector('[data-challengetype="6"]');
-                        if (byType) return byType;
-                        var nodes = document.querySelectorAll('li, [role="link"], [role="button"], [data-challengetype]');
-                        for (var i = 0; i < nodes.length; i++) {
-                          var t = (nodes[i].innerText || '').toLowerCase();
-                          if (t.indexOf('authenticator') !== -1 && t.length < 90) return nodes[i];
+                    el = driver.execute_script(
+                        """
+                        var mode = arguments[0];
+                        function norm(node) {
+                          return (node.innerText || node.textContent || '')
+                            .replace(/\\s+/g, ' ').trim().toLowerCase();
                         }
-                        return null;
-                    """)
+                        function visible(node) {
+                          if (!node || !node.getBoundingClientRect) return false;
+                          var r = node.getBoundingClientRect();
+                          return r.width > 8 && r.height > 8 && r.bottom > 0 && r.top < window.innerHeight;
+                        }
+                        var hits = [];
+                        function walk(root) {
+                          if (!root || !root.querySelectorAll) return;
+                          var nodes = root.querySelectorAll(
+                            'button, a, [role="button"], [role="link"], [data-challengetype], li'
+                          );
+                          for (var i = 0; i < nodes.length; i++) {
+                            hits.push(nodes[i]);
+                            if (nodes[i].shadowRoot) walk(nodes[i].shadowRoot);
+                          }
+                        }
+                        walk(document);
+                        var best = null;
+                        for (var j = 0; j < hits.length; j++) {
+                          var node = hits[j];
+                          var t = norm(node);
+                          if (!t || t.length > 120 || !visible(node)) continue;
+                          var ok = false;
+                          if (mode === 'authenticator') {
+                            ok = node.getAttribute('data-challengetype') === '6'
+                              || t.indexOf('authenticator') !== -1
+                              || t.indexOf('google authentication') !== -1;
+                          } else {
+                            ok = t.indexOf('try another way') !== -1
+                              || t.indexOf('another way') !== -1
+                              || t.indexOf('more ways') !== -1;
+                          }
+                          if (!ok) continue;
+                          var b = node.closest
+                            ? (node.closest('button, a, [role="button"], [role="link"], li') || node)
+                            : node;
+                          if (!visible(b)) b = node;
+                          if (!best || t.length < best.len) best = {el: b, len: t.length};
+                        }
+                        return best ? best.el : null;
+                        """,
+                        mode,
+                    )
                 except Exception:
                     el = None
                 if el is None:
                     return False
-                if _trusted_button_click(driver, el):
-                    log(f"{email} — Authenticator clicked")
-                    return True
-                try:
-                    el.click()
-                    log(f"{email} — Authenticator element click")
-                    return True
-                except Exception as exc:
-                    log(f"Authenticator click error: {exc}")
-                    return False
+                clicked = _cdp_click_element(driver, el)
+                if clicked:
+                    log(f"{email} — {'Authenticator' if mode == 'authenticator' else 'Try another way'} clicked")
+                return clicked
 
             tmark("2fa start")
-            _row_deadline = time.time() + (2.5 if _pace["fast"] else 8)
-            while time.time() < _row_deadline and not _click_authenticator():
-                time.sleep(0.2)
-
-            totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2.5 if _pace["fast"] else _pace["2fa_totp_wait"])
-            if totp_field is None and _pace["fast"]:
-                log(f"{email} — Authenticator tap missed, clicking again")
-                _click_authenticator()
-                totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2.0)
-
-            # Fallback: try "Try another way" → then click authenticator again
-            if totp_field is None:
-                log(f"{email} — TOTP not found after first click, trying 'Try another way'")
-                try:
-                    driver.execute_script("""
-                        var links = Array.from(document.querySelectorAll('a, button, [role="button"]'));
-                        var found = links.find(function(el) {
-                            var t = (el.innerText || '').toLowerCase();
-                            return t.indexOf('more ways') !== -1 || t.indexOf('another way') !== -1
-                                || t.indexOf('different') !== -1
-                                || t.indexOf('more options') !== -1 || t.indexOf('try again') !== -1;
-                        });
-                        if (found) found.click();
-                    """)
-                    rand_sleep(*_pace["medium"])
-                    _click_authenticator()
-                    rand_sleep(*_pace["medium"])
-                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2 if _pace["fast"] else 8)
-                except Exception as e:
-                    log(f"Try another way error: {e}")
+            log(f"{email} — 2FA link: {challenge_kind(driver.current_url or '') or 'totp'}")
+            _row_deadline = time.time() + 14
+            _auth_clicks = 0
+            _other_clicks = 0
+            while time.time() < _row_deadline and totp_field is None:
+                _cur = driver.current_url or ""
+                if is_totp_challenge_url(_cur):
+                    log(f"{email} — TOTP page link open, entering the code box")
+                    totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=2)
+                    break
+                kind = challenge_kind(_cur)
+                # SMS page has its own code box. Open Authenticator before typing.
+                if kind in {"skotp", "ootp", "sms"} and _other_clicks < 2:
+                    if _click_visible_match("other"):
+                        _other_clicks += 1
+                        time.sleep(1.0)
+                        continue
+                if _auth_clicks < 3 and _click_visible_match("authenticator"):
+                    _auth_clicks += 1
+                    time.sleep(0.8)
+                    if is_totp_challenge_url(driver.current_url or ""):
+                        totp_field = wait_for_any(TOTP_INPUT_SELECTORS, timeout=3)
+                        break
+                    continue
+                time.sleep(0.25)
 
         url, text = page_state()
         log(f"{email} — After 2FA handling: {url[:70]}, totp_field={'found' if totp_field else 'NOT found'}")
+        snap("2FA page")
         if totp_field is not None:
             tmark("totp field ready")
+
+    if totp_field is None and is_totp_challenge_url(driver.current_url or ""):
+        log(f"{email} — TOTP page open, waiting for the code box")
+        _box_deadline = time.time() + 10
+        while time.time() < _box_deadline and totp_field is None:
+            totp_field = find_totp_input(driver)
+            if totp_field is not None:
+                break
+            time.sleep(0.3)
+        log(f"{email} — TOTP code box {'found' if totp_field else 'still missing'}")
+
+    if is_sms_code_url(driver.current_url or ""):
+        totp_field = None
+        shot = screenshot_b64()
+        log(f"{email} — still on the phone SMS page, authenticator code not entered")
+        return {
+            "status": "verification_required",
+            "reason": (
+                "Google opened the phone SMS code page, not Google Authenticator. "
+                "The authenticator code was not entered."
+            ),
+            "totpCode": totp_code,
+            "debugScreenshot": shot,
+        }
 
     # ── Enter TOTP code (whether we just navigated here or were already here) ─
     if totp_field is not None:
@@ -7697,10 +8085,18 @@ def _do_login(
         rand_sleep(*_pace["totp_after"])
 
         log(f"{email} — Waiting for Google Account after TOTP…")
+        _wrong_totp_phrases = (
+            "wrong code", "that code didn't work", "code is incorrect",
+            "enter the code again", "code expired", "try again",
+            "didn't recognize that code",
+        )
         _totp_redirect_early = None
         deadline = time.time() + _pace["totp_wait_s"]
         while time.time() < deadline:
-            url = driver.current_url
+            try:
+                url = driver.execute_script("return location.href") or driver.current_url
+            except Exception:
+                url = driver.current_url
             if signed_in_host(url) or is_google_password_change_url(url):
                 break
             # Match the host only. The totp URL's continue= query contains
@@ -7715,14 +8111,48 @@ def _do_login(
                 log(f"{email} — left TOTP page → {url[:70]}")
                 break
 
-            _retry_after = 1.4 if _pace["fast"] else 6
+            _retry_after = 3.0 if _pace["fast"] else 6
+            _totp_still_shown = False
+            if is_totp_challenge_url(url):
+                try:
+                    for _sel in TOTP_INPUT_SELECTORS:
+                        _box = driver.find_element(By.CSS_SELECTOR, _sel)
+                        if _box.is_displayed():
+                            _totp_still_shown = True
+                            break
+                except Exception:
+                    _totp_still_shown = False
             if (
-                is_totp_challenge_url(url)
+                _totp_still_shown
                 and not _totp_next_retried
                 and (time.time() - _last_totp_submit) >= _retry_after
             ):
-                # The code is already in the box. Click Next again instead of
-                # waiting 6s and typing the same code a second time.
+                # The box stays visible while Google is still accepting the code
+                # (often 8–10s on this proxy). A second Next in that window
+                # resubmits a dying code. Only tap again when the box is empty,
+                # or when Google has already shown a wrong-code error.
+                _err_url, _err_text = page_state()
+                _specific_wrong = (
+                    "wrong code", "that code didn't work", "code is incorrect",
+                    "enter the code again", "code expired",
+                    "didn't recognize that code",
+                )
+                if any(x in _err_text for x in _specific_wrong):
+                    log(f"{email} — TOTP error already on screen, leaving it for a fresh code")
+                    break
+                _filled = False
+                try:
+                    for _sel in TOTP_INPUT_SELECTORS:
+                        _box = driver.find_element(By.CSS_SELECTOR, _sel)
+                        if _box.is_displayed():
+                            _val = _box.get_attribute("value") or ""
+                            _filled = sum(ch.isdigit() for ch in _val) >= 6
+                            break
+                except Exception:
+                    _filled = False
+                if _filled and (time.time() - _last_totp_submit) < 10:
+                    time.sleep(_pace["totp_poll_s"])
+                    continue
                 log(f"{email} — TOTP page still open, clicking Next again")
                 if not _click_button_text(driver, ("Next", "Verify")):
                     enter_fresh_totp_once("TOTP while waiting for redirect")
@@ -7767,6 +8197,7 @@ def _do_login(
         rand_sleep(*_pace["totp_after"])
         url, text = page_state()
         log(f"{email} — After TOTP submit (final): {url[:70]}")
+        snap("After authenticator code")
         tmark("totp done")
         _log_login_timing_summary()
         if "gds.google.com" in url and _pace["fast"]:
@@ -7777,36 +8208,46 @@ def _do_login(
             except Exception:
                 pass
 
-        # Wrong TOTP — auto-retry once with the next fresh 30s window
-        _wrong_totp_phrases = [
-            "wrong code", "that code didn't work", "code is incorrect",
-            "enter the code again", "code expired", "try again",
-            "didn't recognize that code",
-        ]
+        # Wrong TOTP — one retry on the next 30s window, then wait for Google's answer.
         if any(x in text for x in _wrong_totp_phrases):
             if totp_secret:
                 log(f"{email} — Wrong TOTP — waiting for next 30s window, then retry")
                 _totp_cache["code"] = None
                 _totp_cache["window"] = None
+                _text_before_retry = text
                 if enter_fresh_totp_once("TOTP wrong-code retry", force_new=True):
-                    rand_sleep(700, 1200)
+                    _retry_deadline = time.time() + max(_pace["totp_wait_s"], 12)
+                    while time.time() < _retry_deadline:
+                        url, text = page_state()
+                        if signed_in_host(url) or not is_totp_challenge_url(url):
+                            break
+                        if text != _text_before_retry and any(x in text for x in _wrong_totp_phrases):
+                            break
+                        time.sleep(_pace["totp_poll_s"])
                     url, text = page_state()
                     log(f"{email} — After TOTP retry: {url[:70]}")
                     retry_code = totp_code
-                    if any(x in text for x in _wrong_totp_phrases):
+                    _retry_still_wrong = (
+                        is_totp_challenge_url(url)
+                        and not signed_in_host(url)
+                        and any(x in text for x in _wrong_totp_phrases)
+                    )
+                    if _retry_still_wrong:
+                        shot = screenshot_b64()
                         if "v3/signin" in url and "challenge" not in url:
                             log(f"{email} — Wrong TOTP on v3/signin/TL page (2 attempts) → opened per user rule")
-                            shot = screenshot_b64()
                             return {
                                 "status": "opened",
                                 "reason": "Mailbox opened successfully ✅",
                                 "totpCode": retry_code,
                                 "debugScreenshot": shot,
                             }
+                        log(f"{email} — TOTP still wrong after fresh code — saving screenshot")
                         return {
                             "status": "wrong_password",
                             "reason": "TOTP codes wrong on 2 attempts — check 2FA secret",
                             "totpCode": retry_code,
+                            "debugScreenshot": shot,
                         }
             _cur_url_for_wrong = driver.current_url if hasattr(driver, 'current_url') else url
             if any(x in driver.page_source if hasattr(driver, 'page_source') else "" for x in _wrong_totp_phrases):
@@ -7820,10 +8261,13 @@ def _do_login(
                         "totpCode": totp_code,
                         "debugScreenshot": shot,
                     }
+                shot = screenshot_b64()
+                log(f"{email} — TOTP rejected — saving screenshot")
                 return {
                     "status": "wrong_password",
-                    "reason": f"TOTP code {totp_code} was wrong or expired — check your TOTP secret",
+                    "reason": "Authenticator code was rejected. Check the 2FA secret.",
                     "totpCode": totp_code,
+                    "debugScreenshot": shot,
                 }
 
         _pc_after_totp = complete_password_change_if_needed(url)
@@ -8117,8 +8561,12 @@ def _do_login(
                     if tf:
                         if _pace.get("fast"):
                             fast_paste(driver, tf, fresh_code)
-                            if not _click_button_text(driver, ("Next", "Verify")):
+                            nxt = wait_for_any(["#totpNext button", "#totpNext"], timeout=2)
+                            if nxt and _trusted_button_click(driver, nxt):
+                                log(f"{email} — TOTP Next clicked")
+                            elif not _click_button_text(driver, ("Next", "Verify")):
                                 tf.send_keys(Keys.ENTER)
+                                log(f"{email} — TOTP Enter pressed")
                             _last_interstitial_totp = time.time()
                         else:
                             tf.clear()
@@ -8254,7 +8702,22 @@ def _do_login(
     # Google sometimes leaves the browser on the bare accounts host after a
     # successful sign-in/interstitial. Per the checker rules, this unexpected
     # page is an Open result rather than a verification failure.
-    if get_hostname(url) == "accounts.google.com":
+    if get_hostname(url) == "accounts.google.com" and challenge_kind(url):
+        kind = challenge_kind(url)
+        names = {
+            "totp": "Google Authenticator",
+            "ipp": "Google Authenticator",
+            "skotp": "phone SMS",
+            "pwd": "password",
+            "selection": "2FA choice",
+        }
+        return {
+            "status": "verification_required",
+            "reason": f"Still on the {names.get(kind, kind)} page. Login did not finish.",
+            "totpCode": totp_code,
+            "debugScreenshot": shot,
+        }
+    if get_hostname(url) == "accounts.google.com" and "/signin/" not in url:
         return {
             "status": "opened",
             "reason": "Unexpected page: https://accounts.google.com — classified as Open",

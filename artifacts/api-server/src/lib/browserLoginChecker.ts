@@ -82,6 +82,7 @@ export interface BrowserLoginResult {
   /** Robot check: not_robot | robot | unknown */
   robotOutcome?: string;
   debugScreenshot?: string;
+  stepScreenshots?: Array<{ label: string; image: string }>;
   exitIp?: string;
   ipInfo?: IpInfo;
   fingerprint?: string;
@@ -206,6 +207,7 @@ async function checkOneAccount(
 
     let stdout = "";
     let stderr = "";
+    let stderrLineBuf = "";
 
     let forceKillTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
@@ -232,13 +234,16 @@ async function checkOneAccount(
     proc.stderr.on("data", (chunk: Buffer) => {
       const line = chunk.toString();
       stderr += line;
-      // Forward Python logs to our server stdout
       process.stdout.write(line);
-      // Also stream the same progress into the browser-check terminal.
-      // Split chunks because stderr data events are not guaranteed to be line-delimited.
-      for (const raw of line.split(/\r?\n/)) {
+      stderrLineBuf += line;
+      const parts = stderrLineBuf.split(/\r?\n/);
+      stderrLineBuf = parts.pop() ?? "";
+      for (const raw of parts) {
         const trimmed = raw.trim();
-        if (trimmed) onLog?.(email, redactBrowserLog(trimmed));
+        if (!trimmed) continue;
+        // Keep the screenshot line intact. The redactor would chew digits inside the image.
+        if (trimmed.startsWith("STEP_SHOT\t")) onLog?.(email, trimmed);
+        else onLog?.(email, redactBrowserLog(trimmed));
       }
     });
 
@@ -261,6 +266,12 @@ async function checkOneAccount(
           reason: parsed.reason ?? "No reason returned",
           totpCode: parsed.totpCode ?? totpCode,
           debugScreenshot: parsed.debugScreenshot ?? undefined,
+          stepScreenshots: Array.isArray(parsed.stepScreenshots)
+            ? parsed.stepScreenshots.filter(
+                (shot: { label?: unknown; image?: unknown }) =>
+                  typeof shot?.label === "string" && typeof shot?.image === "string",
+              )
+            : undefined,
           exitIp: parsed.exitIp ?? undefined,
           ipInfo: parsed.ipInfo ?? undefined,
           fingerprint: parsed.fingerprint ?? undefined,

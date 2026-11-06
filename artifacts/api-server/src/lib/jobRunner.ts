@@ -185,6 +185,19 @@ async function runBackground(
     // Python's stderr is forwarded to the browser UI terminal without
     // persisting credentials or proxy passwords.
     (email, line) => {
+      if (line.startsWith("STEP_SHOT\t")) {
+        const [, label, b64] = line.split("\t");
+        if (label && b64) {
+          emitJobEvent(jobId, {
+            type: "screen",
+            timestamp: Date.now(),
+            email,
+            label,
+            image: `data:image/jpeg;base64,${b64}`,
+          });
+        }
+        return;
+      }
       emitJobEvent(jobId, {
         type: "log",
         timestamp: Date.now(),
