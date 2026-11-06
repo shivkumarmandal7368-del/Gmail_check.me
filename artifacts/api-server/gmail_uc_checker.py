@@ -1114,12 +1114,39 @@ def _google_error_dialog_open(driver) -> bool:
 
 
 def _clear_google_error_dialog(driver, email: str) -> bool:
-    """Dismiss Google's sign-in error. Next does nothing while that dialog is up."""
+    """Dismiss Google's sign-in error. The page Next does nothing while that dialog is up."""
     if not _google_error_dialog_open(driver):
         return False
-    log(f"{email} — Google error dialog, clicking Restart")
-    el = _find_control_by_label(driver, ("Restart", "Try again"))
+    log(f"{email} — Google error dialog, clicking its Next")
+    try:
+        el = driver.execute_script(
+            """
+            var labels = ['next', 'restart', 'try again'];
+            var roots = document.querySelectorAll(
+              '[role="dialog"], [role="alertdialog"], [aria-modal="true"], div');
+            for (var i = 0; i < roots.length; i++) {
+              var root = roots[i];
+              var t = (root.innerText || '').toLowerCase();
+              if (t.indexOf('something went wrong') === -1) continue;
+              if (t.length > 500) continue;
+              var btns = root.querySelectorAll('button, [role="button"]');
+              for (var j = 0; j < btns.length; j++) {
+                var label = (btns[j].innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                if (labels.indexOf(label) === -1) continue;
+                var r = btns[j].getBoundingClientRect();
+                if (r.width < 8 || r.height < 8) continue;
+                return btns[j];
+              }
+            }
+            return null;
+            """
+        )
+    except Exception:
+        el = None
     clicked = bool(el is not None and _cdp_click_element(driver, el))
+    if not clicked:
+        el = _find_control_by_label(driver, ("Restart", "Try again"))
+        clicked = bool(el is not None and _cdp_click_element(driver, el))
     if not clicked:
         clicked = _click_button_text(driver, ("Restart", "Try again"))
     time.sleep(1.1)
@@ -1404,6 +1431,9 @@ def _cdp_click_recaptcha_checkbox(driver) -> bool:
     time.sleep(0.12)
     _cdp_click_xy(driver, x, y)
     time.sleep(0.45)
+    if _google_error_dialog_open(driver):
+        log("reCAPTCHA click opened an error dialog")
+        return False
     aria = (_cdp_find_recaptcha(driver).get("checkbox") or {}).get("aria")
     log(f"reCAPTCHA aria after mouse click: {aria}")
     if aria == "true":
@@ -1426,6 +1456,8 @@ def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
     driver.switch_to.default_content()
     if _cdp_click_recaptcha_checkbox(driver):
         return True
+    if _google_error_dialog_open(driver):
+        return False
     if _cdp_challenge_open(driver):
         log("reCAPTCHA challenge popup is open — solver will run")
         return False
@@ -1564,7 +1596,7 @@ def handle_recaptcha_checkbox(
             capture_step(driver, "Robot checkbox")
             return "loading"
 
-        for attempt in range(1, 3):
+        for attempt in range(1, 4):
             try:
                 driver.switch_to.default_content()
                 if "challenge/recaptcha" not in (driver.current_url or ""):
@@ -1573,6 +1605,11 @@ def handle_recaptcha_checkbox(
                     break
             except Exception:
                 pass
+            if _google_error_dialog_open(driver):
+                log(f"{email} — robot page said something went wrong")
+                _clear_google_error_dialog(driver, email)
+                _wait_widget(8)
+                continue
             if _recaptcha_checkbox_ticked(driver):
                 _rc_result = "passed"
                 log(f"{email} — reCAPTCHA already ticked (attempt {attempt})")
@@ -1586,7 +1623,12 @@ def handle_recaptcha_checkbox(
                 capture_step(driver, "Robot challenge")
                 _rc_result = "image"
                 break
-            if attempt < 2:
+            if _google_error_dialog_open(driver):
+                log(f"{email} — robot page said something went wrong")
+                _clear_google_error_dialog(driver, email)
+                _wait_widget(8)
+                continue
+            if attempt < 3:
                 log(f"{email} — reCAPTCHA click attempt {attempt} did not tick — retry")
                 rand_sleep(200, 400)
             else:
@@ -1632,7 +1674,14 @@ def handle_recaptcha_checkbox(
                     log(f"{email} — left the robot page before the solver")
             except Exception:
                 pass
-        if _rc_result != "passed":
+        if (
+            _rc_result != "passed"
+            and _google_error_dialog_open(driver)
+            and not _cdp_challenge_open(driver)
+        ):
+            log(f"{email} — error dialog is not a puzzle, skipping the captcha solver")
+            _rc_result = "timeout"
+        elif _rc_result != "passed":
             try:
                 from recaptcha_free_solver import run_free_captcha_pipeline
                 from recaptcha_solver import captcha_solver_configured, try_solve_recaptcha_on_page
