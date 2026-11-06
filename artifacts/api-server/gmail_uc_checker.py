@@ -1532,6 +1532,14 @@ def handle_recaptcha_checkbox(
             _find_recaptcha_anchor_iframe(driver, log_miss=True)
 
         for attempt in range(1, 3):
+            try:
+                driver.switch_to.default_content()
+                if "challenge/recaptcha" not in (driver.current_url or ""):
+                    _rc_result = "passed"
+                    log(f"{email} — left the robot page")
+                    break
+            except Exception:
+                pass
             if _recaptcha_checkbox_ticked(driver):
                 _rc_result = "passed"
                 log(f"{email} — reCAPTCHA already ticked (attempt {attempt})")
@@ -1583,6 +1591,14 @@ def handle_recaptcha_checkbox(
             driver.switch_to.default_content()
             _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
 
+        if _rc_result != "passed":
+            try:
+                driver.switch_to.default_content()
+                if "challenge/recaptcha" not in (driver.current_url or ""):
+                    _rc_result = "passed"
+                    log(f"{email} — left the robot page before the solver")
+            except Exception:
+                pass
         if _rc_result != "passed":
             try:
                 from recaptcha_free_solver import run_free_captcha_pipeline
@@ -7946,7 +7962,7 @@ def _do_login(
                         function walk(root) {
                           if (!root || !root.querySelectorAll) return;
                           var nodes = root.querySelectorAll(
-                            'button, a, [role="button"], [role="link"], [data-challengetype], li, div, span'
+                            'button, a, [role="button"], [role="link"], [data-challengetype], li'
                           );
                           for (var i = 0; i < nodes.length; i++) {
                             hits.push(nodes[i]);
@@ -8077,7 +8093,10 @@ def _do_login(
         _totp_redirect_early = None
         deadline = time.time() + _pace["totp_wait_s"]
         while time.time() < deadline:
-            url = driver.current_url
+            try:
+                url = driver.execute_script("return location.href") or driver.current_url
+            except Exception:
+                url = driver.current_url
             if signed_in_host(url) or is_google_password_change_url(url):
                 break
             # Match the host only. The totp URL's continue= query contains

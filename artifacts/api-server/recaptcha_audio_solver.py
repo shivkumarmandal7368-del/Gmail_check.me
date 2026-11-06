@@ -485,7 +485,9 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
 
     for attempt in range(1, attempts + 1):
         try:
-            if "challenge/recaptcha" not in (driver.current_url or ""):
+            driver.switch_to.default_content()
+            href = driver.execute_script("return location.href") or driver.current_url or ""
+            if "challenge/recaptcha" not in href:
                 _log("left recaptcha page")
                 return True
         except Exception:
@@ -535,7 +537,8 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             while time.time() < clip_deadline and not audio_path:
                 try:
                     driver.switch_to.default_content()
-                    if "challenge/recaptcha" not in (driver.current_url or ""):
+                    href = driver.execute_script("return location.href") or driver.current_url or ""
+                    if "challenge/recaptcha" not in href:
                         _log("left recaptcha page")
                         return True
                 except Exception:
