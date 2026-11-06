@@ -660,11 +660,14 @@ def fast_paste(driver, element, text: str) -> None:
         except Exception:
             clipboard_type(driver, element, text)
     try:
-        field_type = (element.get_attribute("type") or "").lower()
-        if field_type != "password":
-            val = driver.execute_script("return arguments[0].value || ''", element) or ""
-            if text and len(val) < max(1, len(text) - 1):
-                element.send_keys(text)
+        val = driver.execute_script("return arguments[0].value || ''", element) or ""
+        if text and len(val) < max(1, len(text) - 1):
+            log(f"fast paste missed the field ({len(val)}/{len(text)}) — send_keys")
+            try:
+                element.clear()
+            except Exception:
+                pass
+            element.send_keys(text)
     except Exception:
         pass
     log(f"fast paste {len(text)} chars in {int((time.time() - t0) * 1000)}ms")
@@ -1126,10 +1129,10 @@ def _cdp_find_recaptcha(driver) -> dict:
         return {}
     anchor = None
     checkbox = None
-    bframe = None
+    bframes: list[dict] = []
 
     def walk(node, in_anchor: bool = False):
-        nonlocal anchor, checkbox, bframe
+        nonlocal anchor, checkbox
         if not isinstance(node, dict):
             return
         attr = _cdp_node_attrs(node)
@@ -1146,7 +1149,7 @@ def _cdp_find_recaptcha(driver) -> dict:
             }
             child_anchor = True
         elif name == "iframe" and "bframe" in low:
-            bframe = {"backendNodeId": node.get("backendNodeId"), "src": src[:160]}
+            bframes.append({"backendNodeId": node.get("backendNodeId"), "src": src[:160]})
         if child_anchor and node_id == "recaptcha-anchor":
             checkbox = {
                 "backendNodeId": node.get("backendNodeId"),
@@ -1168,6 +1171,11 @@ def _cdp_find_recaptcha(driver) -> dict:
             walk(shadow, in_anchor)
 
     walk(doc.get("root") or {})
+    bframe = None
+    for candidate in bframes:
+        if _quad_visible(driver, _cdp_content_quad(driver, candidate.get("backendNodeId"))):
+            bframe = candidate
+            break
     return {"anchor": anchor, "checkbox": checkbox, "bframe": bframe}
 
 
@@ -1214,6 +1222,22 @@ def _cdp_content_quad(driver, backend_id):
 def _quad_bounds(quad):
     xs, ys = quad[0::2], quad[1::2]
     return min(xs), min(ys), max(xs), max(ys)
+
+
+def _quad_visible(driver, quad) -> bool:
+    """A parked reCAPTCHA bframe sits near y=-10000 and is not a real popup."""
+    if not quad:
+        return False
+    left, top, right, bottom = _quad_bounds(quad)
+    vw, vh, dpr = _viewport_css(driver)
+    rects = [(left, top, right, bottom)]
+    if dpr > 1.05:
+        rects.append(tuple(v / dpr for v in (left, top, right, bottom)))
+    for l, t, r, b in rects:
+        w, h = r - l, b - t
+        if w > 180 and h > 140 and t < vh - 8 and b > 24 and l < vw - 8 and r > 8:
+            return True
+    return False
 
 
 def _viewport_css(driver):
@@ -1307,12 +1331,7 @@ def _cdp_challenge_open(driver) -> bool:
     quad = _cdp_content_quad(driver, bf.get("backendNodeId"))
     if not quad:
         return False
-    left, top, right, bottom = _quad_bounds(quad)
-    vw, _vh, dpr = _viewport_css(driver)
-    w, h = right - left, bottom - top
-    if w > vw * 1.25 and dpr > 1.15:
-        w, h = w / dpr, h / dpr
-    return h > 140 and w > 180
+    return _quad_visible(driver, quad)
 
 
 def _cdp_click_recaptcha_checkbox(driver) -> bool:

@@ -147,10 +147,13 @@ def _switch_challenge_frame(driver: "WebDriver") -> bool:
             if "bframe" not in src and "challenge" not in title:
                 continue
             size = fr.size or {}
+            loc = fr.location or {}
             width = float(size.get("width") or 0)
             height = float(size.get("height") or 0)
-            # A hidden bframe can be 400x0. Both sides must be on screen.
-            if width < 80 or height < 80:
+            top = float(loc.get("y") or 0)
+            left = float(loc.get("x") or 0)
+            # Google keeps a full-size bframe parked near y=-10000.
+            if width < 80 or height < 80 or top < -20 or left < -20:
                 continue
             area = width * height
             if area > best_area:
