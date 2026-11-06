@@ -5612,6 +5612,12 @@ def _do_login(
             deadline = time.time() + field_timeout
             field = None
             while time.time() < deadline:
+                try:
+                    if not is_totp_challenge_url(driver.current_url or ""):
+                        log(f"{email} — {label}: left the authenticator page")
+                        return True
+                except Exception:
+                    pass
                 field = find_totp_input(driver)
                 if field:
                     break
@@ -6895,79 +6901,58 @@ def _do_login(
             log(f"{email} — could not store new password file: {_pe}")
 
         def fill_field(el, value: str) -> None:
+            fast_paste(driver, el, value)
             try:
-                touch_click(driver, el)
-                rand_sleep(80, 160)
-                try:
-                    el.clear()
-                except Exception:
-                    pass
-                clipboard_type(driver, el, value)
+                filled = driver.execute_script(
+                    "return (arguments[0].value || '').length", el,
+                ) or 0
+                if int(filled) < len(value):
+                    el.click()
+                    el.send_keys(value)
             except Exception:
-                driver.execute_script(
-                    """
-                    const el = arguments[0], val = arguments[1];
-                    el.focus();
-                    el.value = val;
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                    """,
-                    el,
-                    value,
-                )
+                pass
 
         def click_password_form_continue() -> bool:
-            """Primary form button — not the post-fill 'stay signed in' dialog."""
-            clicked = bool(driver.execute_script(
-                """
-                var labels = ['change password', 'save password', 'save', 'next', 'continue', 'done', 'update'];
-                var btns = Array.from(document.querySelectorAll('button, [role="button"], div[role="button"]'));
-                for (var label of labels) {
-                    var hit = btns.find(function(b) {
-                        var t = (b.innerText || b.textContent || '').trim().toLowerCase();
-                        return t === label || t.indexOf(label) === 0;
-                    });
-                    if (hit && !hit.disabled) { hit.click(); return true; }
-                }
-                var submit = document.querySelector('button[type="submit"]');
-                if (submit && !submit.disabled) { submit.click(); return true; }
-                return false;
-                """
-            ))
-            if clicked:
-                return True
+            """Real pointer click. A script click on Change password does not submit."""
             control = _find_control_by_label(
-                driver, ("Change password", "Save password", "Save"),
+                driver, ("Change password", "Save password", "Save", "Next"),
             )
-            return bool(control and _trusted_button_click(driver, control))
+            if control and _trusted_button_click(driver, control):
+                log(f"{email} — password form button clicked")
+                return True
+            return _click_button_text(driver, ("Change password", "Save", "Next"))
 
         def confirm_stay_signed_in_dialog() -> bool:
-            """Dialog: 'You'll stay signed in on these devices after changing your password'."""
-            return bool(driver.execute_script(
-                """
-                function walk(root) {
-                  var btns = Array.from(root.querySelectorAll('button, [role="button"]'));
-                  for (var b of btns) {
-                    var t = (b.innerText || b.textContent || '').trim().toLowerCase();
-                    if (t === 'change password' && !b.disabled) {
-                      b.click();
-                      return true;
+            """Only the open modal, not the form button on the password page itself."""
+            try:
+                el = driver.execute_script(
+                    """
+                    var dialogs = document.querySelectorAll(
+                      '[role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+                    var root = null;
+                    for (var i = 0; i < dialogs.length; i++) {
+                      var t = (dialogs[i].innerText || '').toLowerCase();
+                      if (t.indexOf('stay signed in') === -1
+                          && t.indexOf('after changing') === -1) continue;
+                      var r = dialogs[i].getBoundingClientRect();
+                      if (r.width < 40 || r.height < 40) continue;
+                      root = dialogs[i];
+                      break;
                     }
-                  }
-                  for (var n of root.querySelectorAll('*')) {
-                    if (n.shadowRoot && walk(n.shadowRoot)) return true;
-                  }
-                  return false;
-                }
-                var body = (document.body.innerText || '').toLowerCase();
-                if (body.indexOf('stay signed in') === -1
-                    && body.indexOf('changing your password') === -1
-                    && body.indexOf('after changing your') === -1) {
-                  return false;
-                }
-                return walk(document);
-                """
-            ))
+                    if (!root) return null;
+                    var btns = root.querySelectorAll('button, [role="button"]');
+                    for (var j = 0; j < btns.length; j++) {
+                      var label = (btns[j].innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                      if (label === 'change password') return btns[j];
+                    }
+                    return null;
+                    """
+                )
+            except Exception:
+                el = None
+            if el is None:
+                return False
+            return bool(_trusted_button_click(driver, el) or _cdp_click_element(driver, el))
 
         def submit_password_change_form() -> None:
             click_password_form_continue()
@@ -7051,28 +7036,37 @@ def _do_login(
                     clear_totp_pages(max_rounds=1, pause_label="After password change retry")
                     url_after, text_after = page_state()
 
-            if is_google_password_change_url(url_after):
-                for _dlg in range(3):
-                    if confirm_stay_signed_in_dialog():
-                        log(f"{email} — dialog confirm pass {_dlg + 1}")
-                        _left = time.time() + 4.0
-                        while time.time() < _left:
-                            url_after, text_after = page_state()
-                            if not is_google_password_change_url(url_after):
-                                break
-                            time.sleep(0.3)
-                        if not is_google_password_change_url(url_after):
-                            break
-                    else:
+            if is_google_password_change_url(url_after) and confirm_stay_signed_in_dialog():
+                log(f"{email} — clicked 'Change password' on stay-signed-in dialog")
+                _left = time.time() + 6.0
+                while time.time() < _left:
+                    url_after, text_after = page_state()
+                    if not is_google_password_change_url(url_after):
                         break
+                    time.sleep(0.3)
 
-            if is_google_password_change_url(url_after):
+            def form_still_open() -> bool:
+                try:
+                    here = driver.current_url or ""
+                except Exception:
+                    return False
+                if not is_google_password_change_url(here):
+                    return False
+                return len(collect_password_fields(driver)) > 0
+
+            if form_still_open():
+                log(f"{email} — password form still open, signing out this session")
+                try:
+                    driver.get("https://accounts.google.com/Logout?continue=https://accounts.google.com/ServiceLogin")
+                    rand_sleep(600, 900)
+                    _tap_profile_sign_out()
+                except Exception as exc:
+                    log(f"{email} — Logout URL warning: {exc}")
                 shot = screenshot_b64()
                 return {
                     "status": "unknown",
-                    "reason": "Password change page still showing — check screenshot / try manually",
+                    "reason": "Password form was still open, so the new password was not saved. This session was signed out.",
                     "totpCode": totp_code,
-                    "newPassword": new_pw,
                     "debugScreenshot": shot,
                 }
 
@@ -7257,12 +7251,27 @@ def _do_login(
 
         def _submit_reauth_totp(leave_url: str) -> str:
             nonlocal _reauth_totp_attempts
+            try:
+                here = driver.current_url or ""
+            except Exception:
+                here = ""
+            if here and not is_totp_challenge_url(here):
+                return here
             _reauth_totp_attempts += 1
+            wrong = False
+            try:
+                _, body = page_state()
+                wrong = any(x in body for x in (
+                    "wrong code", "didn't work", "code is incorrect", "try again",
+                ))
+            except Exception:
+                pass
             enter_fresh_totp_once(
                 "Password page re-auth",
-                force_new=_reauth_totp_attempts > 1 or totp_window_remaining() <= 12,
+                force_new=wrong or totp_window_remaining() <= 8,
+                field_timeout=5,
             )
-            return _wait_land(8, leave=leave_url)
+            return _wait_land(12, leave=leave_url)
 
         target = current_url
         if not is_google_password_change_url(target):
