@@ -957,6 +957,24 @@ def _recaptcha_checkbox_ticked(driver) -> bool:
         return False
 
 
+def _live_url(driver) -> str:
+    """Current URL without waiting for the page load. current_url blocks on slow navigations."""
+    try:
+        res = driver.execute_cdp_cmd(
+            "Runtime.evaluate",
+            {"expression": "location.href", "returnByValue": True},
+        )
+        value = ((res or {}).get("result") or {}).get("value")
+        if isinstance(value, str) and value:
+            return value
+    except Exception:
+        pass
+    try:
+        return driver.current_url or ""
+    except Exception:
+        return ""
+
+
 def _cdp_click_xy(driver, x: float, y: float) -> None:
     """Trusted press on the phone viewport. A 0ms touchEnd was ignored by reCAPTCHA."""
     x, y = float(x), float(y)
@@ -5628,7 +5646,7 @@ def _do_login(
             field = None
             while time.time() < deadline:
                 try:
-                    if not is_totp_challenge_url(driver.current_url or ""):
+                    if not is_totp_challenge_url(_live_url(driver)):
                         log(f"{email} — {label}: left the authenticator page")
                         return True
                 except Exception:
@@ -5656,10 +5674,8 @@ def _do_login(
                         log(f"{email} — {label}: TOTP Next clicked by label")
                     else:
                         log(f"{email} — {label}: TOTP Next control not found")
-                    try:
-                        field.click()
-                    except Exception:
-                        pass
+                    # Do not click the field again. That call waits for the
+                    # navigation Next already started, and sat here for ~56s.
                     for typ in ("keyDown", "keyUp"):
                         driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
                             "type": typ,
@@ -6435,7 +6451,12 @@ def _do_login(
                 if (r.top > window.innerHeight - 4 || r.left > window.innerWidth - 4) continue;
                 try { el.scrollIntoView({block:'center', inline:'center'}); } catch (e) {}
                 r = el.getBoundingClientRect();
-                return {x: r.left, y: r.top, w: r.width, h: r.height, t: t};
+                var link = el.closest ? el.closest('a') : null;
+                return {
+                  el: el,
+                  x: r.left, y: r.top, w: r.width, h: r.height, t: t,
+                  href: (link && link.href) || el.href || el.getAttribute('href') || ''
+                };
               }
               var kids = root.querySelectorAll('*');
               for (var k = 0; k < kids.length; k++) {
@@ -6450,12 +6471,48 @@ def _do_login(
         )
         if not isinstance(info, dict):
             return False
+        href = str(info.get("href") or "")
         x = origin_x + float(info["x"]) + float(info["w"]) / 2
         y = origin_y + float(info["y"]) + float(info["h"]) / 2
+        # The menu link carries the real logout token. A coordinate past the
+        # window edge hits nothing, which is what left the session signed in.
+        if "logout" in href.lower() and "signoutoptions" not in href.lower():
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+            log(f"{email} — opening the menu Sign out link")
+            try:
+                driver.set_page_load_timeout(12)
+                driver.get(href)
+            except Exception as exc:
+                log(f"{email} — Sign out link warning: {exc}")
+            return True
+        clicked = False
+        try:
+            driver.set_page_load_timeout(8)
+            info["el"].click()
+            clicked = True
+        except Exception:
+            clicked = False
+        if clicked:
+            log(f"{email} — Sign out button clicked")
+            return True
         try:
             driver.switch_to.default_content()
         except Exception:
             pass
+        try:
+            view = driver.execute_script(
+                "return {w: window.innerWidth, h: window.innerHeight};"
+            ) or {}
+            vw = float(view.get("w") or 0)
+            vh = float(view.get("h") or 0)
+        except Exception:
+            vw, vh = 0.0, 0.0
+        if vw and (x < 0 or y < 0 or x >= vw or y >= vh):
+            log(f"{email} — Sign out control is off screen at {int(x)},{int(y)}")
+            return False
         log(f"{email} — Sign out click at {int(x)},{int(y)}")
         try:
             _cdp_click_xy(driver, x, y)
@@ -6496,26 +6553,51 @@ def _do_login(
                 pass
         return False
 
+    def _account_avatar_visible() -> bool:
+        try:
+            return bool(driver.execute_script(
+                """
+                var nodes = document.querySelectorAll('a, button, img, [aria-label]');
+                for (var i = 0; i < nodes.length; i++) {
+                  var el = nodes[i];
+                  var r = el.getBoundingClientRect();
+                  if (r.width < 8 || r.height < 8) continue;
+                  var aria = ((el.getAttribute('aria-label') || '') + ' '
+                    + (el.getAttribute('alt') || '')).toLowerCase();
+                  if (aria.indexOf('google account') !== -1) return true;
+                }
+                return false;
+                """
+            ))
+        except Exception:
+            return False
+
     def _prove_signed_out() -> bool:
-        """Open account home. Signed out only if Google sends us to a sign-in page."""
+        """Open account home. Signed out only if Google no longer shows this account."""
         try:
             driver.switch_to.default_content()
+            driver.set_page_load_timeout(12)
             driver.get("https://myaccount.google.com/?hl=en")
         except Exception as exc:
             log(f"{email} — sign-out check failed: {exc}")
-            return False
-        deadline = time.time() + 8
+        deadline = time.time() + 6
         last = ""
         while time.time() < deadline:
-            try:
-                last = driver.current_url or ""
-            except Exception:
-                time.sleep(0.3)
-                continue
+            last = _live_url(driver)
             if _signed_out_url(last):
                 log(f"{email} — session is signed out ({last[:70]})")
                 return True
-            time.sleep(0.35)
+            if "myaccount.google.com" in last and "servicelogin" not in last:
+                if _account_avatar_visible() or time.time() > deadline - 2:
+                    log(f"{email} — session still signed in ({last[:70]})")
+                    return False
+            time.sleep(0.3)
+        if _account_avatar_visible():
+            log(f"{email} — session still signed in ({(last or '')[:70]})")
+            return False
+        if any(part in (last or "") for part in ("account/about", "about.google", "accounts.google.com")):
+            log(f"{email} — session is signed out ({last[:70]})")
+            return True
         log(f"{email} — session still signed in ({(last or '')[:70]})")
         return False
 
@@ -6548,6 +6630,7 @@ def _do_login(
         """Profile photo → Sign out, then prove account home asks us to sign in again."""
         try:
             driver.switch_to.default_content()
+            driver.set_window_size(1440, 900)
         except Exception:
             pass
         avatar = driver.execute_script(
@@ -6593,7 +6676,7 @@ def _do_login(
             while time.time() < deadline:
                 if _tap_profile_sign_out():
                     log(f"{email} — profile menu: Sign out")
-                    time.sleep(2.0)
+                    time.sleep(0.8)
                     _tap_profile_sign_out()
                     break
                 time.sleep(0.3)
@@ -7211,12 +7294,9 @@ def _do_login(
 
         def _wait_land(timeout: float, leave: str | None = None) -> str:
             deadline = time.time() + timeout
-            last = driver.current_url
+            last = _live_url(driver)
             while time.time() < deadline:
-                try:
-                    last = driver.execute_script("return location.href") or driver.current_url
-                except Exception:
-                    last = driver.current_url
+                last = _live_url(driver)
                 if leave and last == leave:
                     time.sleep(0.3)
                     continue
