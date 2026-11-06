@@ -1491,35 +1491,48 @@ def handle_recaptcha_checkbox(
     _rc_result = "missed"
 
     try:
-        # The recaptcha URL often shows "Loading" for a long time on a phone
-        # proxy. The checkbox iframe is injected only after that script arrives.
-        ready_deadline = time.time() + (22 if pace.get("fast") else 15)
-        ready_started = time.time()
-        anchor_since = None
-        found = {}
-        _last_wait_log = 0.0
-        while time.time() < ready_deadline:
-            if _google_error_dialog_open(driver):
-                _clear_google_error_dialog(driver, email)
-                ready_deadline = max(ready_deadline, time.time() + 12)
-                anchor_since = None
-                time.sleep(0.4)
-                continue
-            found = _cdp_find_recaptcha(driver)
-            if found.get("checkbox"):
-                break
-            if found.get("anchor"):
-                if anchor_since is None:
-                    anchor_since = time.time()
-                elif time.time() - anchor_since >= 0.6:
-                    break
-            else:
-                anchor_since = None
-            waited = time.time() - ready_started
-            if waited - _last_wait_log >= 5:
-                _last_wait_log = waited
-                log(f"{email} — waiting for the robot checkbox ({int(waited)}s)")
-            time.sleep(0.3)
+        # A person waits a few seconds. If the box is still "Loading", they
+        # reload once. Sitting there 20s and then solving an empty page does not.
+        def _wait_widget(seconds: float) -> dict:
+            deadline = time.time() + seconds
+            started = time.time()
+            anchor_since = None
+            found_now = {}
+            last_log = -5.0
+            while time.time() < deadline:
+                if _google_error_dialog_open(driver):
+                    _clear_google_error_dialog(driver, email)
+                    deadline = max(deadline, time.time() + 8)
+                    anchor_since = None
+                    time.sleep(0.4)
+                    continue
+                found_now = _cdp_find_recaptcha(driver)
+                if found_now.get("checkbox"):
+                    return found_now
+                if found_now.get("anchor"):
+                    if anchor_since is None:
+                        anchor_since = time.time()
+                    elif time.time() - anchor_since >= 0.6:
+                        return found_now
+                else:
+                    anchor_since = None
+                waited = time.time() - started
+                if waited - last_log >= 4:
+                    last_log = waited
+                    log(f"{email} — waiting for the robot checkbox ({int(waited)}s)")
+                time.sleep(0.3)
+            return found_now
+
+        found = _wait_widget(8 if pace.get("fast") else 12)
+        if not (found.get("anchor") or found.get("checkbox")):
+            log(f"{email} — robot box still loading, reloading the page once")
+            capture_step(driver, "Robot checkbox")
+            try:
+                driver.switch_to.default_content()
+                driver.refresh()
+            except Exception as exc:
+                log(f"{email} — robot page reload failed: {exc}")
+            found = _wait_widget(12)
         if found.get("anchor") or found.get("checkbox"):
             log(
                 f"{email} — reCAPTCHA widget in DOM "
@@ -1530,6 +1543,8 @@ def handle_recaptcha_checkbox(
             log(f"{email} — reCAPTCHA widget not in DOM")
             _cdp_log_frame_srcs(driver)
             _find_recaptcha_anchor_iframe(driver, log_miss=True)
+            capture_step(driver, "Robot checkbox")
+            return "loading"
 
         for attempt in range(1, 3):
             try:
@@ -7873,20 +7888,22 @@ def _do_login(
             _rc_result = "passed"
         if _rc_result != "passed":
             shot = screenshot_b64()
-            _why = (
-                "Google asked for an image puzzle after I'm not a robot."
-                if _rc_result == "image"
-                else "Google showed I'm not a robot and the checkbox did not open the password page."
-            )
-            try:
-                from recaptcha_solver import captcha_solver_configured as _csc
-                if not _csc():
-                    _why += (
-                        " Free path: pip install faster-whisper on VPS (audio captcha), "
-                        "or set CAPTCHA_API_KEY for paid image solve."
-                    )
-            except Exception:
-                pass
+            if _rc_result == "loading":
+                _why = "Verify it's you stayed on Loading. The robot checkbox never appeared."
+            elif _rc_result == "image":
+                _why = "Google asked for an image puzzle after I'm not a robot."
+            else:
+                _why = "Google showed I'm not a robot and the checkbox did not open the password page."
+            if _rc_result == "image":
+                try:
+                    from recaptcha_solver import captcha_solver_configured as _csc
+                    if not _csc():
+                        _why += (
+                            " Free path: pip install faster-whisper on VPS (audio captcha), "
+                            "or set CAPTCHA_API_KEY for paid image solve."
+                        )
+                except Exception:
+                    pass
             _fail = {
                 "status": "verification_required",
                 "reason": _why,
