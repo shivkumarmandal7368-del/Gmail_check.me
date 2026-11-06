@@ -6719,8 +6719,28 @@ def _do_login(
         if not isinstance(info, dict):
             return False
         href = str(info.get("href") or "")
+        el = info.get("el")
         x = origin_x + float(info["x"]) + float(info["w"]) / 2
         y = origin_y + float(info["y"]) + float(info["h"]) / 2
+        log_href = ""
+        if href:
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(href)
+                log_href = f"{parsed.netloc}{parsed.path}"[:80]
+            except Exception:
+                log_href = "logout-link"
+        # Click the profile Sign out control itself. driver.get() of the href
+        # alone cleared this browser and opened the about page, but the other
+        # phone still showed the session.
+        before = _live_url(driver)
+        if el is not None and (_trusted_tap(el) or _cdp_click_element(driver, el)):
+            log(f"{email} — profile Sign out clicked ({log_href or 'menu item'})")
+            deadline = time.time() + 2.5
+            while time.time() < deadline:
+                if _live_url(driver) != before:
+                    return True
+                time.sleep(0.2)
         # The menu link carries the real logout token. A coordinate past the
         # window edge hits nothing, which is what left the session signed in.
         if "logout" in href.lower() and "signoutoptions" not in href.lower():
@@ -6728,9 +6748,9 @@ def _do_login(
                 driver.switch_to.default_content()
             except Exception:
                 pass
-            log(f"{email} — opening the menu Sign out link")
+            log(f"{email} — opening the menu Sign out link {log_href}")
             try:
-                driver.set_page_load_timeout(6)
+                driver.set_page_load_timeout(15)
                 driver.get(href)
             except Exception as exc:
                 log(f"{email} — Sign out link warning: {exc}")
@@ -6884,6 +6904,113 @@ def _do_login(
                 return
             time.sleep(0.3)
 
+    def _settle_profile_sign_out() -> None:
+        """Stay on the profile Sign out page until Google finishes it.
+
+        Opening myaccount immediately cancels the sign-out, so this browser
+        looks logged out while the other phone still lists the session.
+        """
+        deadline = time.time() + 10
+        last = ""
+        while time.time() < deadline:
+            here = _live_url(driver)
+            low = (here or "").lower()
+            try:
+                text = (
+                    driver.execute_script(
+                        "return ((document.body && document.body.innerText) || '').slice(0, 500);"
+                    )
+                    or ""
+                ).lower()
+            except Exception:
+                text = ""
+            if here != last:
+                log(f"{email} — profile sign-out page: {(here or '')[:90]}")
+                last = here
+            if "/logout" in low or "signout" in low:
+                hit = _tap_sign_out_button(dialog_only=True)
+                if not hit and "sign out" in text:
+                    hit = _tap_sign_out_button(dialog_only=False)
+                if hit:
+                    log(f"{email} — profile sign-out confirmed ({hit})")
+                    time.sleep(1.2)
+                    continue
+            if (
+                _signed_out_url(here)
+                or "account/about" in low
+                or "about.google" in low
+                or "signed out" in text
+            ):
+                time.sleep(2.0)
+                log(f"{email} — profile sign-out settled")
+                return
+            time.sleep(0.35)
+        log(f"{email} — profile sign-out page did not settle ({(last or '')[:80]})")
+
+    def sign_out_leftover_checker_sessions() -> int:
+        """Remove earlier checker logins. Those are Linux rows, not the phone.
+
+        The current session has no Sign out button on its device page.
+        That one is signed out from the profile menu afterwards.
+        """
+        use_desktop_device_list()
+        if not ensure_device_activity_list("Before profile sign-out"):
+            return 0
+        removed = 0
+        for _round in range(6):
+            if _device_url_kind() != "list":
+                if not return_to_device_list():
+                    break
+            sessions = collect_active_device_sessions(thorough=True)
+            target = None
+            names = []
+            for session in sessions:
+                label = session.get("label") or ""
+                kind = session.get("kind") or detect_session_kind(label)
+                names.append(f"{kind}:{(label.splitlines() or [''])[0][:36]}")
+                low = label.lower()
+                current = (
+                    "this device" in low
+                    or "current session" in low
+                    or "your current" in low
+                )
+                if current or kind != "linux_computer" or target is not None:
+                    continue
+                target = session
+            if target is None:
+                log(f"{email} — device rows before profile sign-out: {names}")
+                break
+            log(f"{email} — signing out leftover checker session: {(target.get('label') or '')[:80]}")
+            if not open_device_session(target):
+                log(f"{email} — could not open leftover checker session")
+                break
+            time.sleep(0.6)
+            handle_totp_if_prompted("Leftover session TOTP", max_rounds=2, quick=True)
+            clicked = _tap_sign_out_button() or click_sign_out_on_device_detail() or ""
+            if not clicked:
+                log(f"{email} — leftover session has no Sign out button")
+                return_to_device_list()
+                break
+            log(f"{email} — leftover session Sign out clicked")
+            time.sleep(0.4)
+            confirm_deadline = time.time() + 6
+            while time.time() < confirm_deadline:
+                if _device_url_kind() == "list":
+                    break
+                if _tap_sign_out_button(dialog_only=True):
+                    log(f"{email} — confirmed leftover sign-out")
+                    time.sleep(0.8)
+                    break
+                time.sleep(0.3)
+            return_to_device_list()
+            removed += 1
+        try:
+            driver.get("https://myaccount.google.com/?hl=en")
+        except Exception as exc:
+            log(f"{email} — return to account home warning: {exc}")
+        time.sleep(0.8)
+        return removed
+
     def sign_out_via_profile_icon() -> bool:
         """Profile photo → Sign out, then prove account home asks us to sign in again."""
         try:
@@ -6934,12 +7061,13 @@ def _do_login(
             while time.time() < deadline:
                 if _tap_profile_sign_out():
                     log(f"{email} — profile menu: Sign out")
-                    time.sleep(0.8)
-                    _tap_profile_sign_out()
+                    _settle_profile_sign_out()
                     break
                 time.sleep(0.3)
         else:
             log(f"{email} — profile icon not found")
+            _logout_url_and_confirm()
+            _settle_profile_sign_out()
         if _prove_signed_out():
             return True
         _logout_url_and_confirm()
@@ -7492,9 +7620,10 @@ def _do_login(
             if sign_out_sessions:
                 log(f"{email} — Password change done — starting device activity sign-outs")
                 return run_device_activity_signouts(new_pw)
-            log(f"{email} — Password change done — signing out this session only")
+            log(f"{email} — Password change done — signing out this session from the profile")
             signed_self = False
             try:
+                sign_out_leftover_checker_sessions()
                 signed_self = sign_out_via_profile_icon()
             except Exception as exc:
                 log(f"{email} — profile sign-out warning: {exc}")
