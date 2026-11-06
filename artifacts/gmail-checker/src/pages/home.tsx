@@ -807,13 +807,13 @@ function BrowserChecker() {
   };
 
   const downloadExcel = (rows: ExtBrowserResult[], name: string) => {
-    const header = ["#", "Gmail", "New Password", "2FA"];
-    const data = rows.map((r, i) => {
+    const header = ["Gmail", "Password", "2FA"];
+    const data = rows.map(r => {
       const fresh = (r as { newPassword?: string }).newPassword;
-      return [i + 1, r.email, fresh || r.password || "", r.totpSecret ?? ""];
+      return [r.email, fresh || r.password || "", r.totpSecret ?? ""];
     });
     const worksheet = XLSX.utils.aoa_to_sheet([header, ...data]);
-    worksheet["!cols"] = [{ wch: 6 }, { wch: 36 }, { wch: 22 }, { wch: 28 }];
+    worksheet["!cols"] = [{ wch: 36 }, { wch: 22 }, { wch: 28 }];
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Gmail");
     const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
