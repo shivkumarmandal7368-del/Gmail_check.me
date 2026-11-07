@@ -25,7 +25,7 @@ import { Progress } from "@/components/ui/progress"
 import {
   Download, Terminal, CheckCircle2, XCircle, AlertTriangle,
   HelpCircle, Activity, ShieldAlert, Smartphone,
-  Lock, LogOut, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle, Zap, Bot
+  Lock, LogOut, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle, Zap, Bot, KeyRound
 } from "lucide-react"
 import { RobotChecker } from "@/pages/RobotChecker";
 
@@ -103,7 +103,7 @@ function BrowserChecker() {
   // ── localStorage keys ────────────────────────────────────────────────────
   const LS = {
     input: "vbc_input", proxy: "vbc_proxy", proxyMode: "vbc_proxy_mode", concurrency: "vbc_conc",
-    fresh: "vbc_fresh", changePw: "vbc_change_pw", deviceLogout: "vbc_device_logout", device: "vbc_device", results: "vbc_results", total: "vbc_total",
+    fresh: "vbc_fresh", changePw: "vbc_change_pw", deviceLogout: "vbc_device_logout", passwordOnly: "vbc_password_only", device: "vbc_device", results: "vbc_results", total: "vbc_total",
     active: "vbc_active", savedAt: "vbc_saved_at", jobId: "vbc_job_id",
     creds: "vbc_creds",
   } as const;
@@ -118,6 +118,7 @@ function BrowserChecker() {
   const [freshProfile, setFreshProfile] = useState<boolean>(() => lsGet(LS.fresh, false));
   const [changePasswordAfterLogin, setChangePasswordAfterLogin] = useState<boolean>(() => lsGet(LS.changePw, false));
   const [deviceLogout, setDeviceLogout] = useState<boolean>(() => lsGet(LS.deviceLogout, false));
+  const [passwordOnly, setPasswordOnly] = useState<boolean>(() => lsGet(LS.passwordOnly, false));
   const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
 
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
@@ -185,6 +186,7 @@ function BrowserChecker() {
   useEffect(() => { try { localStorage.setItem(LS.fresh,       JSON.stringify(freshProfile)); } catch {} }, [freshProfile]);
   useEffect(() => { try { localStorage.setItem(LS.changePw, JSON.stringify(changePasswordAfterLogin)); } catch {} }, [changePasswordAfterLogin]);
   useEffect(() => { try { localStorage.setItem(LS.deviceLogout, JSON.stringify(deviceLogout)); } catch {} }, [deviceLogout]);
+  useEffect(() => { try { localStorage.setItem(LS.passwordOnly, JSON.stringify(passwordOnly)); } catch {} }, [passwordOnly]);
   useEffect(() => { try { localStorage.setItem(LS.device,      JSON.stringify(deviceIndex));  } catch {} }, [deviceIndex]);
   useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
   useEffect(() => { try { localStorage.setItem(LS.total,       JSON.stringify(total));        } catch {} }, [total]);
@@ -536,8 +538,9 @@ function BrowserChecker() {
       credentials: creds,
       ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
       concurrency: 1, freshProfile, deviceIndex,
-      ...(changePasswordAfterLogin ? { changePasswordAfterLogin: true } : {}),
-      ...(deviceLogout ? { signOutSessions: true } : {}),
+      ...(passwordOnly ? { passwordOnly: true } : {}),
+      ...(!passwordOnly && changePasswordAfterLogin ? { changePasswordAfterLogin: true } : {}),
+      ...(!passwordOnly && deviceLogout ? { signOutSessions: true } : {}),
     });
   };
 
@@ -797,7 +800,8 @@ function BrowserChecker() {
   const statusLabel = (status: ExtBrowserResult["status"]): string => {
     const map: Record<string, string> = {
       opened: "Opened", verification_required: "Verify Required",
-      wrong_password: "Wrong Password", "2fa_required": "2FA Required",
+      wrong_password: "Password wrong", "2fa_required": "2FA Required",
+      password_ok: "Password sahi", password_changed: "Password changed",
       unknown: "Unknown", checking: "Checking",
     };
     return map[status] ?? status;
@@ -1074,7 +1078,25 @@ function BrowserChecker() {
               </p>
             </button>
 
-            <button onClick={() => !isChecking && setChangePasswordAfterLogin(v => !v)} disabled={isChecking}
+            <button onClick={() => !isChecking && setPasswordOnly(v => !v)} disabled={isChecking}
+              className={cn("w-full rounded-lg border p-3 text-left transition-colors",
+                passwordOnly ? "border-emerald-500/40 bg-emerald-500/5" : "border-border bg-card/30 opacity-60")}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-400/80 flex items-center gap-1">
+                  <KeyRound className="w-3 h-3" /> Sirf password
+                </span>
+                <div className={cn("w-8 h-4 rounded-full transition-colors relative", passwordOnly ? "bg-emerald-500" : "bg-border")}>
+                  <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", passwordOnly ? "left-4" : "left-0.5")} />
+                </div>
+              </div>
+              <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
+                {passwordOnly
+                  ? "Password ke baad ruk jaata hai. Result: Password sahi, Password changed, ya Password wrong. 2FA, password change, aur device logout nahi chalenge."
+                  : "Off: password ke baad 2FA aur baaki steps chalte hain."}
+              </p>
+            </button>
+
+            <button onClick={() => !isChecking && setChangePasswordAfterLogin(v => !v)} disabled={isChecking || passwordOnly}
               className={cn("w-full rounded-lg border p-3 text-left transition-colors",
                 changePasswordAfterLogin ? "border-amber-500/40 bg-amber-500/5" : "border-border bg-card/30 opacity-60")}>
               <div className="flex items-center justify-between mb-1">
@@ -1092,7 +1114,7 @@ function BrowserChecker() {
               </p>
             </button>
 
-            <button onClick={() => !isChecking && setDeviceLogout(v => !v)} disabled={isChecking}
+            <button onClick={() => !isChecking && setDeviceLogout(v => !v)} disabled={isChecking || passwordOnly}
               className={cn("w-full rounded-lg border p-3 text-left transition-colors",
                 deviceLogout ? "border-rose-500/40 bg-rose-500/5" : "border-border bg-card/30 opacity-60")}>
               <div className="flex items-center justify-between mb-1">
@@ -2330,12 +2352,14 @@ function EmptyState({ icon, label }: { icon?: React.ReactNode; label?: string } 
   );
 }
 
-function BrowserStatusBadge({ status }: { status: BrowserLoginResult["status"] | "checking" }) {
+function BrowserStatusBadge({ status }: { status: string }) {
   const map: Record<string, { label: string; className: string; icon: React.ReactNode }> = {
     checking:              { label: "CHECKING",  className: "border-blue-500/40 text-blue-400 bg-blue-400/10",      icon: <Loader2 className="w-3 h-3 animate-spin" /> },
     opened:                { label: "OPENED",    className: "border-green-500/50 text-green-400 bg-green-400/10",   icon: <MailCheck className="w-3 h-3" /> },
+    password_ok:           { label: "SAHI",      className: "border-green-500/50 text-green-400 bg-green-400/10",   icon: <MailCheck className="w-3 h-3" /> },
+    password_changed:      { label: "CHANGED",   className: "border-amber-500/50 text-amber-300 bg-amber-400/10",   icon: <KeyRound className="w-3 h-3" /> },
     verification_required: { label: "VERIFY",    className: "border-yellow-500/50 text-yellow-400 bg-yellow-400/10", icon: <Smartphone className="w-3 h-3" /> },
-    wrong_password:        { label: "BAD PASS",  className: "border-red-500/50 text-red-400 bg-red-400/10",         icon: <XCircle className="w-3 h-3" /> },
+    wrong_password:        { label: "WRONG",     className: "border-red-500/50 text-red-400 bg-red-400/10",         icon: <XCircle className="w-3 h-3" /> },
     "2fa_required":        { label: "2FA NEEDED",className: "border-blue-500/50 text-blue-400 bg-blue-400/10",      icon: <Lock className="w-3 h-3" /> },
     unknown:               { label: "UNKNOWN",   className: "border-border text-muted-foreground",                  icon: <HelpCircle className="w-3 h-3" /> },
   };
