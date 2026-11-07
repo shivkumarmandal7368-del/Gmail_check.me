@@ -91,6 +91,8 @@ export interface BrowserLoginResult {
   fingerprintData?: FingerprintData;
   proxySession?: string;   // unique sticky-session ID → proof of different IP per account
   durationMs?: number;     // how long this account took end-to-end (ms)
+  /** True when Google showed I'm not a robot during this check. */
+  captcha?: boolean;
 }
 
 function getPython3(): string {
@@ -285,6 +287,7 @@ async function checkOneAccount(
           durationMs: typeof parsed.durationMs === "number" ? parsed.durationMs : undefined,
           newPassword: typeof parsed.newPassword === "string" ? parsed.newPassword : undefined,
           robotOutcome: typeof parsed.robotOutcome === "string" ? parsed.robotOutcome : undefined,
+          captcha: parsed.captcha === true,
         });
       } catch {
         const snippet = (stderr || stdout).slice(-400);

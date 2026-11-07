@@ -55,9 +55,9 @@ assert.equal(
   "not_open",
 );
 assert.equal(getBrowserResultCategory({ status: "opened", category: "open", reason: "Mailbox opened" }), "open");
-assert.equal(getBrowserResultCategory({ status: "wrong_password", category: "unknown", reason: "Wrong password" }), "not_open");
+assert.equal(getBrowserResultCategory({ status: "wrong_password", category: "unknown", reason: "Wrong password" }), "delete");
 assert.equal(getBrowserResultCategory({ status: "password_ok", reason: "Password sahi" }), "open");
-assert.equal(getBrowserResultCategory({ status: "password_changed", reason: "Password changed" }), "not_open");
+assert.equal(getBrowserResultCategory({ status: "password_changed", reason: "Password changed" }), "delete");
 
 // Legacy persisted results without the stable signal retain the same rules.
 assert.equal(
