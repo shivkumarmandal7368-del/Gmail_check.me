@@ -30,6 +30,13 @@ export function getBrowserResultCategory(result: BrowserResultForCategory): Brow
 
   if (result.status === "2fa_required") return "not_open";
 
+  if (result.status === "unknown") {
+    if (
+      reasonLower.includes("password page did not say")
+      && reasonLower.includes("changed")
+    ) return "delete";
+  }
+
   if (result.status !== "verification_required") return "unknown";
 
   const reason = reasonLower;

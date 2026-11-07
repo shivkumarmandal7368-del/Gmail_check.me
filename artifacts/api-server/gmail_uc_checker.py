@@ -571,6 +571,14 @@ def _password_changed_signal(text: str) -> bool:
         return True
     if re.search(r"password.{0,80}changed", low):
         return True
+    if re.search(r"changed.{0,40}\s+ago", low) and "password" in low:
+        return True
+    if (
+        "couldn't sign you in" in low or "couldn’t sign you in" in low
+    ) and "changed" in low:
+        return True
+    if "sign-in password" in low and "changed" in low:
+        return True
     return False
 
 
@@ -634,6 +642,12 @@ def password_stop_verdict(url: str, text: str) -> dict:
             "status": "password_ok",
             "reason": "Password sahi",
             "category": "open",
+        }
+    if on_password and _password_changed_signal(low):
+        return {
+            "status": "password_changed",
+            "reason": "Password changed",
+            "category": "delete",
         }
     return {
         "status": "unknown",
@@ -731,6 +745,65 @@ def _get_chrome_win_id() -> str | None:
         except Exception:
             continue
     return None
+
+
+def fill_password_input(driver, element, password: str) -> int:
+    """Fill Google's password field and return how many characters stuck."""
+    if not password:
+        return 0
+    for label, fn in (
+        ("fast_paste", lambda: fast_paste(driver, element, password)),
+        ("native_setter", lambda: driver.execute_script(
+            """
+            var el = arguments[0], pw = arguments[1];
+            try { el.focus(); el.click(); } catch (e) {}
+            try {
+              var desc = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value');
+              if (desc && desc.set) desc.set.call(el, pw);
+              else el.value = pw;
+            } catch (e) { el.value = pw; }
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            """,
+            element,
+            password,
+        )),
+        ("send_keys", lambda: (
+            element.clear() if hasattr(element, "clear") else None,
+            element.send_keys(password),
+        )),
+        ("clipboard", lambda: clipboard_type(driver, element, password)),
+    ):
+        try:
+            fn()
+        except Exception as exc:
+            log(f"password fill via {label} failed: {exc}")
+            continue
+        try:
+            n = driver.execute_script(
+                """
+                var el = arguments[0];
+                var v = el.value || el.getAttribute('value') || '';
+                if (!v && el.shadowRoot) {
+                  var i = el.shadowRoot.querySelector('input');
+                  if (i) v = i.value || '';
+                }
+                return (v || '').length;
+                """,
+                element,
+            ) or 0
+            n = int(n)
+        except Exception:
+            n = 0
+        if n >= max(1, len(password) - 1):
+            log(f"password fill OK via {label} ({n}/{len(password)})")
+            return n
+        log(f"password fill via {label} short ({n}/{len(password)})")
+    try:
+        return int(driver.execute_script("return (arguments[0].value || '').length", element) or 0)
+    except Exception:
+        return 0
 
 
 def fast_paste(driver, element, text: str) -> None:
@@ -1756,6 +1829,9 @@ _PW_FIELD_SELECTORS = (
     'input[name="Passwd"]',
     'input[type="password"]:not([name="hiddenPassword"])',
     'input[name="password"]',
+    'input[autocomplete="current-password"]',
+    'input[aria-label*="password" i]',
+    '#password input[type="password"]',
     '#password input',
 )
 
@@ -8367,12 +8443,7 @@ def _do_login(
         'input[name="Email"]',
     ]
 
-    PW_SELECTORS = [
-        'input[name="Passwd"]',
-        'input[type="password"]:not([name="hiddenPassword"])',
-        'input[name="password"]',
-        '#password input',
-    ]
+    PW_SELECTORS = list(_PW_FIELD_SELECTORS)
 
     # ── Step 2: Enter email ───────────────────────────────────────────────────
     log(f"{email} — Step 2: typing email")
@@ -8667,9 +8738,8 @@ def _do_login(
     log(f"{email} — Step 3: typing password")
     tmark("password step start")
     pw_field = None
-    _pw_deadline = time.time() + (
-        10 if (password_only and _phone_fast) else (14 if _phone_fast else 8)
-    )
+    _pw_pick_s = 16 if password_only else (14 if _phone_fast else 8)
+    _pw_deadline = time.time() + _pw_pick_s
     while time.time() < _pw_deadline and pw_field is None:
         _cur_pw = _live_url(driver)
         if "challenge/recaptcha" in _cur_pw:
@@ -8718,6 +8788,31 @@ def _do_login(
             if "challenge/recaptcha" not in (driver.current_url or ""):
                 pw_field = wait_for_any(PW_SELECTORS, timeout=10)
         if not pw_field:
+            pw_field = wait_for_any(PW_SELECTORS, timeout=8)
+        if not pw_field and "challenge/pwd" in (url or "").lower():
+            try:
+                pw_field = driver.execute_script("""
+                    var sels = arguments[0];
+                    for (var i = 0; i < sels.length; i++) {
+                      var el = document.querySelector(sels[i]);
+                      if (el && el.offsetParent !== null) return el;
+                    }
+                    var any = document.querySelector('input[type="password"]');
+                    if (any && (any.name || '') !== 'hiddenPassword') return any;
+                    return null;
+                """, list(PW_SELECTORS))
+            except Exception:
+                pw_field = None
+        if not pw_field:
+            if password_only and "challenge/pwd" in (url or "").lower():
+                extra = _password_visible_messages(driver)
+                _, body = page_state()
+                verdict = password_stop_verdict(url, f"{body} {extra}")
+                if verdict.get("status") != "unknown":
+                    verdict["totpCode"] = totp_code
+                    verdict["debugScreenshot"] = screenshot_b64()
+                    verdict["category"] = browser_result_category(verdict)
+                    return verdict
             result = classify(url, text)
             if result:
                 return result
@@ -8729,17 +8824,13 @@ def _do_login(
                 "debugScreenshot": shot,
             }
 
-    if _phone_fast:
-        try:
-            driver.execute_script("arguments[0].focus(); arguments[0].click();", pw_field)
-        except Exception:
-            pass
-        fast_paste(driver, pw_field, password)
-    else:
-        touch_click(driver, pw_field)
-        rand_sleep(80, 160)
-        clipboard_type(driver, pw_field, password)
-        rand_sleep(100, 180)
+    _filled = fill_password_input(driver, pw_field, password or "")
+    if _filled < max(1, len(password or "") - 1):
+        log(f"{email} — password not in field ({_filled}/{len(password or '')}), retry find")
+        pw_field = wait_for_any(PW_SELECTORS, timeout=4) or pw_field
+        _filled = fill_password_input(driver, pw_field, password or "")
+    if _filled < max(1, len(password or "") - 1):
+        log(f"{email} — password still short after fill ({_filled})")
     def _press_enter() -> None:
         for typ in ("keyDown", "keyUp"):
             driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
@@ -8814,8 +8905,7 @@ def _do_login(
                 ) or 0
                 if password and int(filled) < len(password):
                     log(f"{email} — password field short ({filled}/{len(password)}), typing again")
-                    pw_field.click()
-                    pw_field.send_keys(password)
+                    fill_password_input(driver, pw_field, password)
             except Exception as exc:
                 log(f"{email} — password refill: {exc}")
             _click_password_next()
@@ -8829,6 +8919,8 @@ def _do_login(
 
     if password_only:
         _pwd_poll = float(_pace.get("pwd_poll_s", 5))
+        if "challenge/pwd" in (_live_url(driver) or "").lower():
+            _pwd_poll = max(_pwd_poll, 8.0)
         _verdict_deadline = time.time() + _pwd_poll
         verdict = None
         while time.time() < _verdict_deadline:
@@ -8849,6 +8941,13 @@ def _do_login(
                 log(f"{email} — password-only: post-password robot ({_rc_result})")
             verdict = password_stop_verdict(url, combined)
             if verdict.get("status") != "unknown":
+                break
+            if "challenge/pwd" in (url or "").lower() and _password_changed_signal(combined):
+                verdict = {
+                    "status": "password_changed",
+                    "reason": "Password changed",
+                    "category": "delete",
+                }
                 break
             if any(x in (url or "").lower() for x in (
                 "challenge/dp", "challenge/totp", "challenge/ipp", "challenge/selection",
