@@ -548,10 +548,8 @@ def next_fresh_totp(
     return code
 
 
-def password_stop_verdict(url: str, text: str) -> dict:
-    """Stop at the password page: sahi, changed, or wrong."""
+def _password_changed_signal(text: str) -> bool:
     low = (text or "").lower()
-    href = (url or "").lower()
     changed_bits = (
         "password was changed",
         "password has been changed",
@@ -560,7 +558,41 @@ def password_stop_verdict(url: str, text: str) -> dict:
         "changed your password",
         "changed the password",
         "password changed",
+        "password last changed",
+        "sign-in password was changed",
     )
+    if any(bit in low for bit in changed_bits):
+        return True
+    if "password" in low and any(p in low for p in (
+        "was changed", "has been changed", "last changed", "recently changed",
+    )):
+        return True
+    if "password" in low and "changed" in low and "ago" in low:
+        return True
+    if re.search(r"password.{0,80}changed", low):
+        return True
+    return False
+
+
+def _password_visible_messages(driver) -> str:
+    try:
+        return driver.execute_script("""
+            var parts = [];
+            var sels = '[jsname], [role="alert"], .OyEfVb, .dEOOab, .Ekjuhf, div[aria-live]';
+            document.querySelectorAll(sels).forEach(function(el) {
+                var t = (el.innerText || el.textContent || '').trim();
+                if (t && t.length < 600) parts.push(t);
+            });
+            return parts.join(' ');
+        """) or ""
+    except Exception:
+        return ""
+
+
+def password_stop_verdict(url: str, text: str) -> dict:
+    """Stop at the password page: sahi, changed, or wrong."""
+    low = (text or "").lower()
+    href = (url or "").lower()
     wrong_bits = (
         "wrong password",
         "didn't recognize",
@@ -568,17 +600,17 @@ def password_stop_verdict(url: str, text: str) -> dict:
         "incorrect password",
         "password you entered",
     )
-    if any(bit in low for bit in changed_bits):
+    if _password_changed_signal(low):
         return {
             "status": "password_changed",
             "reason": "Password changed",
-            "category": "not_open",
+            "category": "delete",
         }
     if any(bit in low for bit in wrong_bits) or "wrongpassword" in href:
         return {
             "status": "wrong_password",
             "reason": "Password wrong",
-            "category": "not_open",
+            "category": "delete",
         }
     kind = challenge_kind(url)
     on_password = "challenge/pwd" in href or kind == "pwd"
@@ -1772,7 +1804,7 @@ def handle_recaptcha_checkbox(
                 time.sleep(0.3)
             return found_now
 
-        found = _wait_widget(6 if pace.get("fast") else 8)
+        found = _wait_widget(float(pace.get("rc_wait_s", 6 if pace.get("fast") else 8)))
         if not (found.get("anchor") or found.get("checkbox")):
             log(f"{email} — robot box still loading, reloading the page once")
             capture_step(driver, "Robot checkbox")
@@ -2589,22 +2621,27 @@ def _login_fast_mode(proxy_url: str | None) -> bool:
     return mode not in ("0", "false", "no", "off")
 
 
-def _login_pace(proxy_url: str | None) -> dict:
+def _login_pace(proxy_url: str | None, password_only: bool = False) -> dict:
     fast = _login_fast_mode(proxy_url)
+    turbo = fast and password_only
     return {
         "fast": fast,
-        "post_nav": (120, 280) if fast else (600, 1000),
-        "medium": (200, 400) if fast else (700, 1200),
-        "totp_after": (200, 350) if fast else (700, 1200),
-        "totp_clear": (250, 450) if fast else (900, 1400),
-        "signed_in": (80, 160) if fast else (400, 700),
-        "totp_wait_s": 12 if fast else 30,
-        "totp_poll_s": 0.2 if fast else 0.5,
-        "2fa_totp_wait": 1.2 if fast else 18,
+        "password_only": password_only,
+        "post_nav": (60, 120) if turbo else ((120, 280) if fast else (600, 1000)),
+        "medium": (120, 220) if turbo else ((200, 400) if fast else (700, 1200)),
+        "totp_after": (150, 280) if turbo else ((200, 350) if fast else (700, 1200)),
+        "totp_clear": (200, 350) if turbo else ((250, 450) if fast else (900, 1400)),
+        "signed_in": (50, 100) if turbo else ((80, 160) if fast else (400, 700)),
+        "totp_wait_s": 8 if turbo else (12 if fast else 30),
+        "totp_poll_s": 0.15 if turbo else (0.2 if fast else 0.5),
+        "2fa_totp_wait": 0.8 if turbo else (1.2 if fast else 18),
         "skip_logout": fast,
-        "rc_pre_click": (250, 500) if fast else (1200, 2200),
-        "rc_poll_s": 0.2 if fast else 0.4,
-        "rc_wait_s": 6 if fast else 10,
+        "rc_pre_click": (120, 280) if turbo else ((250, 500) if fast else (1200, 2200)),
+        "rc_poll_s": 0.15 if turbo else (0.2 if fast else 0.4),
+        "rc_wait_s": 4 if turbo else (6 if fast else 10),
+        "email_nav_s": 14 if turbo else (22 if fast else 12),
+        "pwd_nav_s": 5 if turbo else (8 if fast else 8),
+        "pwd_poll_s": 4 if turbo else (5 if fast else 8),
     }
 
 
@@ -4946,6 +4983,8 @@ def _compact_screenshot(driver) -> str | None:
 
 
 def capture_step(driver, label: str) -> None:
+    if getattr(driver, "_password_only", False):
+        return
     shots = getattr(driver, "_step_shots", None)
     if not isinstance(shots, list) or len(shots) >= 18:
         return
@@ -5249,7 +5288,7 @@ def check_gmail(
 
     # Locale follows the IP Chrome is actually using, not the preflight request.
     # Phone/LocalToNet: preflight already locked geo + IP — skip 3–8s ipify tab loads.
-    if _phone_fast and fp.get("geoLocked") and fp.get("ip"):
+    if (password_only or _phone_fast) and fp.get("geoLocked") and fp.get("ip"):
         exit_ip = str(fp["ip"])
         if not fp.get("keyboard"):
             fp["keyboard"] = keyboard_layout_for_language(fp.get("language") or "en-IN")
@@ -5432,7 +5471,7 @@ def check_gmail(
         # Chrome just proved the proxy works. Driver is still open so CDP re-injection
         # actually takes effect for this session (not after quit like before).
         # Use _retries=1: one round tries all 3 services — no need for more.
-        if not fp.get("ip") and (proxy_for_ip_check or proxy):
+        if not password_only and not fp.get("ip") and (proxy_for_ip_check or proxy):
             _fb_proxy = proxy_for_ip_check or proxy
             log("Post-login geo fallback: fingerprint has no IP, retrying geo lookup now…")
             _fallback_geo = geo_lookup_proxy(_fb_proxy, _label="post-login", _retries=1)
@@ -5470,7 +5509,12 @@ def check_gmail(
         except Exception:
             pass
         shots = getattr(driver, "_step_shots", None)
-        if isinstance(_login_result, dict) and isinstance(shots, list) and shots:
+        if (
+            isinstance(_login_result, dict)
+            and isinstance(shots, list)
+            and shots
+            and not password_only
+        ):
             _login_result["stepScreenshots"] = list(shots)
         if isinstance(_login_result, dict):
             _login_result["captcha"] = bool(getattr(driver, "_saw_captcha", False))
@@ -5581,7 +5625,11 @@ def _do_login(
             prev = ms
         log(f"[timing summary login] " + " | ".join(parts))
 
-    _pace = _login_pace(proxy_url)
+    try:
+        driver._password_only = password_only
+    except Exception:
+        pass
+    _pace = _login_pace(proxy_url, password_only)
     _phone_fast = _pace["fast"]
     _post_nav_sleep = _pace["post_nav"]
     # A new phone opens Google once before the sign-in form and already has
@@ -8246,6 +8294,13 @@ def _do_login(
         'input[name="Email"]',
     ]
 
+    PW_SELECTORS = [
+        'input[name="Passwd"]',
+        'input[type="password"]:not([name="hiddenPassword"])',
+        'input[name="password"]',
+        '#password input',
+    ]
+
     # ── Step 2: Enter email ───────────────────────────────────────────────────
     log(f"{email} — Step 2: typing email")
     tmark("email step start")
@@ -8327,7 +8382,7 @@ def _do_login(
 
     _click_email_next()
     # A slow phone proxy can take as long to leave this page as it took to open it.
-    _nav_deadline = time.time() + (32 if _phone_fast else 12)
+    _nav_deadline = time.time() + float(_pace.get("email_nav_s", 22 if _phone_fast else 12))
     _next_retried = False
     _restarts = 0
     _next_at = time.time()
@@ -8453,18 +8508,25 @@ def _do_login(
             }
             if robot_check_only:
                 _fail["robotOutcome"] = "robot"
-            return _fail
+            if password_only:
+                if wait_for_any(PW_SELECTORS, timeout=1.2) or "challenge/pwd" in (url or "").lower():
+                    log(f"{email} — password-only: robot page messy but password reachable, continuing")
+                else:
+                    return _fail
+            else:
+                return _fail
 
     result = classify(url, text)
     if result and not robot_check_only:
-        return result
-
-    PW_SELECTORS = [
-        'input[name="Passwd"]',
-        'input[type="password"]:not([name="hiddenPassword"])',
-        'input[name="password"]',
-        '#password input',
-    ]
+        if password_only and result.get("status") == "verification_required":
+            href = (url or "").lower()
+            pw_visible = wait_for_any(PW_SELECTORS, timeout=0.6)
+            if pw_visible or "challenge/pwd" in href or "challenge/recaptcha" in href:
+                log(f"{email} — password-only: early verify screen ignored, continuing to password")
+            else:
+                return result
+        else:
+            return result
 
     if robot_check_only:
         log(f"{email} — Robot check: looking for password page (no password typed)")
@@ -8626,7 +8688,7 @@ def _do_login(
     # The first Next on this proxy often lands before Google accepts the field.
     # Email already retries; the password page was stopping after one click.
     _pre_pwd_url = _live_url(driver)
-    _pwd_wait_s = 8
+    _pwd_wait_s = float(_pace.get("pwd_nav_s", 8))
     _nav_deadline = time.time() + _pwd_wait_s
     _pw_retried = False
     _pw_next_at = time.time()
@@ -8645,7 +8707,7 @@ def _do_login(
             pass
         if (
             not _pw_retried
-            and (time.time() - _pw_next_at) > 5
+            and (time.time() - _pw_next_at) > (2.5 if password_only and _phone_fast else 5)
             and "challenge/pwd" in _live_url(driver)
         ):
             log(f"{email} — password page still open, submitting again")
@@ -8662,22 +8724,54 @@ def _do_login(
                 log(f"{email} — password refill: {exc}")
             _click_password_next()
             _pw_retried = True
-            _nav_deadline = max(_nav_deadline, time.time() + 12)
-        time.sleep(0.2)
-    rand_sleep(150, 300) if _phone_fast else rand_sleep(300, 600)
+            _nav_deadline = max(_nav_deadline, time.time() + (6 if password_only and _phone_fast else 12))
+        time.sleep(0.15 if password_only and _phone_fast else 0.2)
+    rand_sleep(80, 150) if (password_only and _phone_fast) else (rand_sleep(150, 300) if _phone_fast else rand_sleep(300, 600))
 
-    url, text = page_state()
-    log(f"{email} — After password submit: {url[:70]}")
-    snap("After password")
     tmark("password step done")
     _log_login_timing_summary()
 
     if password_only:
-        verdict = password_stop_verdict(url, text)
+        _pwd_poll = float(_pace.get("pwd_poll_s", 5))
+        _verdict_deadline = time.time() + _pwd_poll
+        verdict = None
+        while time.time() < _verdict_deadline:
+            url, text = page_state()
+            extra = _password_visible_messages(driver)
+            combined = f"{text} {extra}".strip()
+            if "challenge/recaptcha" in (url or "").lower():
+                try:
+                    driver._saw_captcha = True
+                except Exception:
+                    pass
+                _rc_result = handle_recaptcha_checkbox(
+                    driver, email, pace=_pace, proxy_url=proxy_url, page_state=page_state,
+                )
+                url, text = page_state()
+                extra = _password_visible_messages(driver)
+                combined = f"{text} {extra}".strip()
+                log(f"{email} — password-only: post-password robot ({_rc_result})")
+            verdict = password_stop_verdict(url, combined)
+            if verdict.get("status") != "unknown":
+                break
+            if any(x in (url or "").lower() for x in (
+                "challenge/dp", "challenge/totp", "challenge/ipp", "challenge/selection",
+                "mail.google.com", "myaccount.google.com",
+            )):
+                verdict = password_stop_verdict(url, combined)
+                break
+            time.sleep(0.12)
+        if verdict is None:
+            verdict = password_stop_verdict("", "")
         verdict["totpCode"] = totp_code
         verdict["debugScreenshot"] = screenshot_b64()
+        verdict["category"] = browser_result_category(verdict)
         log(f"{email} — password-only stop: {verdict['reason']}")
         return verdict
+
+    url, text = page_state()
+    log(f"{email} — After password submit: {url[:70]}")
+    snap("After password")
 
     # ── Quick wrong-password check (before anything else) ─────────────────────
     if any(x in text for x in [
