@@ -5110,24 +5110,41 @@ def _proxy_without_unsupported_sticky(proxy_url: str | None) -> str | None:
     return f"{scheme}{cleaned}{rest}"
 
 
+def _screenshot_encode_limits() -> tuple[int, int]:
+    try:
+        max_w = int(os.environ.get("SCREENSHOT_MAX_WIDTH", "1280"))
+    except ValueError:
+        max_w = 1280
+    try:
+        quality = int(os.environ.get("SCREENSHOT_JPEG_QUALITY", "88"))
+    except ValueError:
+        quality = 88
+    return max(640, min(1920, max_w)), max(50, min(95, quality))
+
+
 def _compact_screenshot(driver) -> str | None:
-    """Small JPEG so a full step strip still fits in the job result."""
+    """JPEG preview for job results — readable text at a glance (not tiny 420px)."""
     try:
         png = driver.get_screenshot_as_png()
     except Exception:
         return None
+    max_w, quality = _screenshot_encode_limits()
     try:
         import io as _io
         from PIL import Image
 
         im = Image.open(_io.BytesIO(png)).convert("RGB")
-        if im.width > 420:
-            im = im.resize((420, max(1, int(im.height * 420 / im.width))), Image.Resampling.LANCZOS)
+        if im.width > max_w:
+            im = im.resize(
+                (max_w, max(1, int(im.height * max_w / im.width))),
+                Image.Resampling.LANCZOS,
+            )
         buf = _io.BytesIO()
-        im.save(buf, format="JPEG", quality=40, optimize=True)
+        im.save(buf, format="JPEG", quality=quality, optimize=True, subsampling=0)
         raw = buf.getvalue()
     except Exception:
         raw = png
+        return "data:image/png;base64," + base64.b64encode(raw).decode()
     return "data:image/jpeg;base64," + base64.b64encode(raw).decode()
 
 

@@ -1610,7 +1610,7 @@ function BrowserChecker() {
                               {r.status === "opened" ? "📸 Account screenshot:" : "📸 Google ne kya dikhaya:"}
                             </p>
                             <img src={(r as any).debugScreenshot} alt="screenshot"
-                              className="rounded border border-border max-w-[320px] w-full cursor-pointer hover:opacity-90 transition-opacity"
+                              className="rounded border border-border max-w-[min(100%,640px)] w-full cursor-pointer hover:opacity-90 transition-opacity image-rendering-auto"
                               onClick={() => window.open((r as any).debugScreenshot)} />
                           </div>
                         )}
