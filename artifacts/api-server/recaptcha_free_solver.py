@@ -69,6 +69,7 @@ def run_free_captcha_pipeline(
     checkbox_ticked: Callable[[], bool],
     max_cycles: int = 3,
     grace_s: float = 2.2,
+    skip_vision: bool = False,
 ) -> bool:
     """Try audio → vision → audio retries. Returns True if captcha cleared."""
     if not free_audio_enabled() and not free_vision_enabled():
@@ -100,7 +101,7 @@ def run_free_captcha_pipeline(
                     return True
                 solved = True
 
-        if free_vision_enabled() and not _parent_left_recaptcha(driver):
+        if free_vision_enabled() and not skip_vision and not _parent_left_recaptcha(driver):
             _log("try image (YOLO)")
             if try_solve_recaptcha_image_page(driver, rounds=2):
                 if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):

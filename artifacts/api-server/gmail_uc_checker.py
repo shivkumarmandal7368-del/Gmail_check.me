@@ -1185,7 +1185,13 @@ def _widen_clipped_signin(driver) -> None:
             """
             var next = Array.from(document.querySelectorAll('button, [role="button"]'))
               .find(function(b) { return (b.innerText || '').trim() === 'Next'; });
-            var r = next ? next.getBoundingClientRect() : {left:0, top:0, width:0, height:0, right:0};
+            var frame = Array.from(document.querySelectorAll('iframe')).find(function(f) {
+              var s = ((f.src || '') + ' ' + (f.title || '')).toLowerCase();
+              return s.indexOf('recaptcha') !== -1 || s.indexOf('robot') !== -1;
+            });
+            var r = (frame || next)
+              ? (frame || next).getBoundingClientRect()
+              : {left:0, top:0, width:0, height:0, right:0};
             return {
               right: r.right, left: r.left, iw: window.innerWidth, ih: window.innerHeight,
               sw: document.documentElement.scrollWidth
@@ -1852,6 +1858,7 @@ def _click_recaptcha_from_frame(driver) -> str:
     Returns passed | challenge | notready | error | miss.
     """
     driver.switch_to.default_content()
+    _widen_clipped_signin(driver)
     meta = _recaptcha_anchor_meta(driver)
     frame = _top_recaptcha_anchor_iframe(driver)
     if frame is None and not meta:
@@ -1896,14 +1903,11 @@ def _click_recaptcha_from_frame(driver) -> str:
         })
         time.sleep(0.02)
     _cdp_click_xy(driver, x, y)
-    # One click, then wait. A second click is what opened the image puzzle.
-    outcome = _poll_recaptcha_after_click(driver, 0.8)
+    # One trusted click. element.click() inside the iframe opens the image
+    # puzzle and the account lands in NOT OPEN.
+    outcome = _poll_recaptcha_after_click(driver, 1.2)
     if outcome != "pending":
         return outcome
-    if not _cdp_challenge_open(driver) and _click_anchor_element(driver):
-        outcome = _poll_recaptcha_after_click(driver, 1.2)
-        if outcome != "pending":
-            return outcome
     log(f"reCAPTCHA checkbox click did not open a challenge aria={state.get('aria')}")
     return "miss"
 
@@ -2077,8 +2081,8 @@ def _password_only_recaptcha_recover(
 
     puzzle = _cdp_challenge_open(driver)
     if pace.get("password_only") and not puzzle:
-        log(f"{email} — password-only: checkbox still open, clicking it inside the frame")
-        _click_anchor_element(driver)
+        log(f"{email} — password-only: checkbox still open, one more trusted click")
+        _click_recaptcha_from_frame(driver)
         return _wait_password_after_recaptcha_tick(driver, page_state, pace) or _pwd_ready()
 
     if puzzle:
@@ -2087,6 +2091,7 @@ def _password_only_recaptcha_recover(
             from recaptcha_free_solver import run_free_captcha_pipeline
             run_free_captcha_pipeline(
                 driver, _recaptcha_checkbox_ticked, max_cycles=1, grace_s=0.3,
+                skip_vision=True,
             )
         except Exception as exc:
             log(f"{email} — audio try skipped: {exc}")

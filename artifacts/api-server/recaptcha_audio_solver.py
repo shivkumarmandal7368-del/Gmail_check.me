@@ -105,9 +105,7 @@ def _transcribe_audio(path: str) -> str | None:
             break
         cleaned = re.sub(r"[^a-zA-Z0-9\s]", "", text)
         cleaned = " ".join(cleaned.split())
-        best = cleaned or text
-        _log(f"Whisper (beam={beam}) heard: {cleaned[:80]}")
-        break
+        _log(f"Whisper (beam={beam}) heard no digits: {cleaned[:80]}")
     return best
 
 
