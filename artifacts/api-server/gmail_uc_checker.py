@@ -2042,8 +2042,10 @@ def _password_page_ready(driver, page_state) -> bool:
     href = (url or "").lower()
     if "challenge/pwd" in href:
         return True
+    # The captcha page keeps a hidden password input. Treating that as the
+    # password page types too early and the verdict stays unknown.
     if "challenge/recaptcha" in href:
-        return _password_field_visible(driver, 0.12)
+        return False
     if "identifier" in href:
         return False
     return _password_field_visible(driver, 0.15)
@@ -2376,7 +2378,24 @@ def handle_recaptcha_checkbox(
                 log(f"{email} — reCAPTCHA click attempts exhausted")
                 break
             if outcome == "miss" and pace.get("password_only"):
-                time.sleep(0.35)
+                # Google often ticks the box a few seconds after the click.
+                # Sitting in the slow retry loop is what pushed captcha runs past 20s.
+                tick_until = time.time() + 5.5
+                while time.time() < tick_until and _rc_result not in ("passed", "image"):
+                    driver.switch_to.default_content()
+                    if "challenge/recaptcha" not in (_live_url(driver) or ""):
+                        _rc_result = "passed"
+                        break
+                    if _recaptcha_checkbox_ticked(driver):
+                        _rc_result = "passed"
+                        log(f"{email} — checkbox ticked after the click")
+                        break
+                    if _captcha_puzzle_visible(driver):
+                        _rc_result = "image"
+                        break
+                    time.sleep(0.12)
+                if _rc_result in ("passed", "image"):
+                    break
                 continue
             log(f"{email} — reCAPTCHA click attempt {attempt} did not tick — retry")
             time.sleep(0.3)
@@ -9371,8 +9390,29 @@ def _do_login(
                 if not _conn_wait:
                     log(f"{email} — password request still checking the connection")
                     _conn_wait = True
-                    _nav_deadline = max(_nav_deadline, time.time() + 4)
-                time.sleep(0.15)
+                    _nav_deadline = max(
+                        _nav_deadline,
+                        time.time() + (1.4 if password_only else 4),
+                    )
+                try:
+                    _err = driver.execute_script(
+                        "return ((document.body && document.body.innerText) || '').slice(0, 500).toLowerCase()"
+                    ) or ""
+                except Exception:
+                    _err = ""
+                if any(x in _err for x in (
+                    "wrong password", "didn't recognize", "incorrect password",
+                    "password changed", "couldn't sign you in", "couldn’t sign you in",
+                )):
+                    break
+                if (
+                    password_only
+                    and "challenge/pwd" not in _cur
+                    and "recaptcha" not in _cur
+                    and not _password_field_visible(driver, 0.05)
+                ):
+                    break
+                time.sleep(0.12)
                 continue
             # A new query string on the same Welcome card is not a result.
             # Leave only when the password box itself is gone.

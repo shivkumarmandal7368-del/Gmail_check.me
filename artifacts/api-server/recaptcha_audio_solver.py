@@ -906,7 +906,7 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
         _snap(driver, "Captcha audio")
 
         # The phone proxy often takes several seconds to paint the audio clip.
-        clip_deadline = time.time() + 3.2
+        clip_deadline = time.time() + 1.6
         session = req.Session()
         audio_path = None
         try:
