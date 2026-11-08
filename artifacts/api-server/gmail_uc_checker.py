@@ -8795,7 +8795,7 @@ def _do_login(
         if _rc_result != "passed" and "challenge/recaptcha" not in url:
             log(f"{email} — left the robot page, continuing")
             _rc_result = "passed"
-        if _rc_result != "passed" and pace.get("password_only") and _recaptcha_checkbox_ticked(driver):
+        if _rc_result != "passed" and _pace.get("password_only") and _recaptcha_checkbox_ticked(driver):
             if _wait_password_after_recaptcha_tick(driver, page_state, _pace):
                 log(f"{email} — password-only: ticked, password page ready after wait")
                 _rc_result = "passed"
