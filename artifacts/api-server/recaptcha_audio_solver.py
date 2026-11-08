@@ -81,13 +81,13 @@ def _transcribe_audio(path: str) -> str | None:
         _log(f"loading Whisper model {model_name} (first run downloads model weights)…")
         _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
     best: str | None = None
-    for beam in (5, 3, 1):
+    for beam in (1,):
         try:
             segments, _ = _whisper_model.transcribe(
                 path,
                 language="en",
                 beam_size=beam,
-                best_of=3,
+                best_of=1,
                 temperature=0.0,
                 initial_prompt="The numbers are spoken clearly for a captcha.",
                 vad_filter=True,

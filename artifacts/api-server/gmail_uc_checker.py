@@ -2285,15 +2285,11 @@ def handle_recaptcha_checkbox(
                     )
         else:
             driver.switch_to.default_content()
-            _rc_result = (
-                "image"
-                if (
-                    _cdp_challenge_open_stable(driver)
-                    if pace.get("password_only")
-                    else _cdp_challenge_open(driver)
-                )
-                else "timeout"
-            )
+            if pace.get("password_only"):
+                # CDP puzzle probe was ~2s and audio runs either way.
+                _rc_result = "image"
+            else:
+                _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
 
         if _rc_result != "passed":
             try:
@@ -2992,7 +2988,7 @@ def _login_pace(proxy_url: str | None, password_only: bool = False) -> dict:
         "rc_poll_s": 0.15 if turbo else (0.2 if fast else 0.4),
         "rc_wait_s": 3 if turbo else (4 if fast else 8),
         "email_nav_s": 14 if turbo else (22 if fast else 12),
-        "pwd_nav_s": 3 if turbo else (8 if fast else 8),
+        "pwd_nav_s": 2 if turbo else (8 if fast else 8),
         "pwd_poll_s": 4 if turbo else (5 if fast else 8),
         "rc_click_s": 8 if turbo else (16 if fast else 18),
         "rc_recover_s": 6 if turbo else (16 if fast else 18),
@@ -3025,8 +3021,9 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
 
     if _phone_proxy_fast(proxy_url):
         _ck = _geo_cache_key(proxy_url)
-        _hit = _GEO_CACHE.get(_ck)
+        _hit = _GEO_CACHE.get(_ck) or _read_geo_file(_ck)
         if _hit and (time.time() - _hit[0]) < _geo_cache_ttl():
+            _GEO_CACHE[_ck] = _hit
             log(f"{tag} phone-proxy geo cache hit ({int(time.time() - _hit[0])}s old)")
             return dict(_hit[1])
 
@@ -3204,11 +3201,38 @@ def geo_lookup_proxy(proxy_url: str, _label: str = "", _retries: int = 3) -> dic
     return None
 
 
+_GEO_FILE = "/tmp/vanguard-mx-geo-cache.json"
+
+
+def _read_geo_file(key: str):
+    try:
+        with open(_GEO_FILE) as handle:
+            row = json.load(handle).get(key) or {}
+        geo = row.get("geo")
+        ts = float(row.get("t") or 0)
+        if isinstance(geo, dict) and ts:
+            return ts, geo
+    except Exception:
+        return None
+    return None
+
+
 def _store_geo_cache(proxy_url: str, geo: dict | None) -> None:
     if not geo or not _phone_proxy_fast(proxy_url):
         return
     try:
-        _GEO_CACHE[_geo_cache_key(proxy_url)] = (time.time(), dict(geo))
+        key = _geo_cache_key(proxy_url)
+        stamped = (time.time(), dict(geo))
+        _GEO_CACHE[key] = stamped
+        blob = {}
+        try:
+            with open(_GEO_FILE) as handle:
+                blob = json.load(handle)
+        except Exception:
+            blob = {}
+        blob[key] = {"t": stamped[0], "geo": stamped[1]}
+        with open(_GEO_FILE, "w") as handle:
+            json.dump(blob, handle)
     except Exception:
         pass
 

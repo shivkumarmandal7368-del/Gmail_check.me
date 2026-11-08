@@ -25,21 +25,22 @@ def _wait_recaptcha_cleared(
     while time.time() < deadline:
         try:
             driver.switch_to.default_content()
-            url = driver.current_url or ""
+            url = driver.execute_script("return location.href") or ""
             if "challenge/recaptcha" not in url:
                 return True
             if checkbox_ticked():
                 return True
         except Exception:
             pass
-        time.sleep(0.45)
+        time.sleep(0.2)
     return False
 
 
 def _parent_left_recaptcha(driver: "WebDriver") -> bool:
     try:
         driver.switch_to.default_content()
-        return "challenge/recaptcha" not in (driver.current_url or "")
+        href = driver.execute_script("return location.href") or ""
+        return "challenge/recaptcha" not in href
     except Exception:
         return False
 
