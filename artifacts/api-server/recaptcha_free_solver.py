@@ -92,23 +92,30 @@ def run_free_captcha_pipeline(
             _log("left recaptcha page")
             return True
         solved = False
-        # Spoken digits are one clip. The picture grid takes several rounds and
-        # was the slow path that still failed on cars and scooters.
-        if free_audio_enabled() and not _parent_left_recaptcha(driver):
+        grid_open = _image_grid_ready(driver)
+        # A visible tile grid is the page the user sees. Audio on that page
+        # hears noise and then the image solver was skipped.
+        if grid_open and free_vision_enabled() and not skip_vision:
+            _log("image grid is open, solving it")
+            if try_solve_recaptcha_image_page(driver, rounds=vision_rounds):
+                if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
+                    _log("cleared after vision")
+                    return True
+                solved = True
+        elif free_audio_enabled() and not _parent_left_recaptcha(driver):
             _log("try audio first")
             if try_solve_recaptcha_audio_page(driver):
                 if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
                     _log("cleared after audio")
                     return True
                 solved = True
-
-        if free_vision_enabled() and not skip_vision and not _parent_left_recaptcha(driver):
-            _log("try image (YOLO)")
-            if try_solve_recaptcha_image_page(driver, rounds=vision_rounds):
-                if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
-                    _log("cleared after vision")
-                    return True
-                solved = True
+            if free_vision_enabled() and not skip_vision and not _parent_left_recaptcha(driver):
+                _log("try image (YOLO)")
+                if try_solve_recaptcha_image_page(driver, rounds=vision_rounds):
+                    if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
+                        _log("cleared after vision")
+                        return True
+                    solved = True
 
         if not solved:
             break

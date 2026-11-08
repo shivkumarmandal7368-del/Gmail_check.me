@@ -1893,6 +1893,9 @@ def _click_recaptcha_from_frame(driver) -> str:
         log(f"reCAPTCHA anchor error: {(state.get('text') or '')[:120]}")
         return "error"
     point = _recaptcha_checkbox_viewport_point(driver, frame, state)
+    # A 28x28 inner box is the spinner. Click the left of the full row.
+    if float(state.get("w") or 0) < 40 and mw >= 200 and mh >= 20:
+        point = (float(meta["x"]) + 24.0, float(meta["y"]) + mh / 2.0)
     if not point:
         if mw >= 120 and mh >= 20:
             point = (float(meta["x"]) + 28.0, float(meta["y"]) + mh / 2.0)
