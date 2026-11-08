@@ -1564,6 +1564,17 @@ def _cdp_challenge_open(driver) -> bool:
     return _quad_visible(driver, quad)
 
 
+def _cdp_challenge_open_stable(driver, *, gap_s: float = 0.32) -> bool:
+    """Ignore the brief bframe flash right after a checkbox tick."""
+    if not _cdp_challenge_open(driver):
+        return False
+    if _recaptcha_checkbox_ticked(driver):
+        return False
+    time.sleep(gap_s)
+    driver.switch_to.default_content()
+    return _cdp_challenge_open(driver) and not _recaptcha_checkbox_ticked(driver)
+
+
 def _cdp_click_recaptcha_checkbox(driver) -> bool:
     found = _cdp_find_recaptcha(driver)
     anchor = found.get("anchor")
@@ -1790,6 +1801,8 @@ def _poll_recaptcha_after_click(driver, seconds: float = 2.8) -> str:
         # A bframe flashes during the tick. Checking it in the first 1.5s
         # marked real ticks as "image" and started the 50s puzzle path.
         if time.time() - started >= 1.6 and _cdp_challenge_open(driver):
+            if _recaptcha_checkbox_ticked(driver):
+                return "passed"
             return "challenge"
         time.sleep(0.1)
     return "pending"
@@ -1846,7 +1859,7 @@ def _click_recaptcha_from_frame(driver) -> str:
         time.sleep(0.02)
     _cdp_click_xy(driver, x, y)
     # One click, then wait. A second click is what opened the image puzzle.
-    outcome = _poll_recaptcha_after_click(driver, 2.8)
+    outcome = _poll_recaptcha_after_click(driver, 1.4)
     if outcome != "pending":
         return outcome
     log(f"reCAPTCHA checkbox click did not open a challenge aria={state.get('aria')}")
@@ -1882,6 +1895,27 @@ _PW_FIELD_SELECTORS = (
 )
 
 
+def _find_visible_password_field(driver):
+    """One JS lookup. Selector polling was spending 10s+ before Next."""
+    try:
+        return driver.execute_script(
+            """
+            var sels = arguments[0];
+            for (var i = 0; i < sels.length; i++) {
+              var el = document.querySelector(sels[i]);
+              if (!el) continue;
+              if ((el.name || '') === 'hiddenPassword') continue;
+              var r = el.getBoundingClientRect();
+              if (r.width > 2 && r.height > 2) return el;
+            }
+            return null;
+            """,
+            list(_PW_FIELD_SELECTORS),
+        )
+    except Exception:
+        return None
+
+
 def _password_field_visible(driver, timeout: float = 0.3) -> bool:
     from selenium.webdriver.common.by import By
     deadline = time.time() + timeout
@@ -1914,7 +1948,7 @@ def _password_page_ready(driver, page_state) -> bool:
 
 def _wait_password_after_recaptcha_tick(driver, page_state, pace: dict) -> bool:
     """Checkbox ticked; Google often stays on recaptcha URL several seconds."""
-    total = float(pace.get("rc_recover_s", 18)) + float(pace.get("rc_nav_s", 12))
+    total = float(pace.get("rc_post_tick_s", 9))
     deadline = time.time() + total
     last_nudge = 0.0
     while time.time() < deadline:
@@ -1926,7 +1960,7 @@ def _wait_password_after_recaptcha_tick(driver, page_state, pace: dict) -> bool:
         if "challenge/recaptcha" not in href and "identifier" not in href:
             if "challenge/pwd" in href or _password_field_visible(driver, 0.35):
                 return True
-        if time.time() - last_nudge > 2.2:
+        if time.time() - last_nudge > 1.4:
             last_nudge = time.time()
             try:
                 driver.switch_to.default_content()
@@ -1960,52 +1994,43 @@ def _password_only_recaptcha_recover(
             return True
         return False
 
-    wait_s = 12 if pace.get("password_only") else 5
-    deadline = time.time() + wait_s
-    while time.time() < deadline:
+    quick = time.time() + (2.5 if pace.get("password_only") else 5)
+    while time.time() < quick:
         if _pwd_ready():
             return True
-        time.sleep(0.12)
+        time.sleep(0.08)
 
     if _recaptcha_checkbox_ticked(driver):
-        log(f"{email} — password-only: checkbox already ticked, waiting for password page")
-        extra = time.time() + (18 if pace.get("password_only") else 6)
-        while time.time() < extra:
-            if _pwd_ready():
-                return True
-            href = (_live_url(driver) or "").lower()
-            if "challenge/recaptcha" not in href and "identifier" not in href:
-                return _pwd_ready() or _password_field_visible(driver, 0.4)
-            time.sleep(0.12)
-        return _pwd_ready()
+        log(f"{email} — password-only: checkbox ticked, short wait for password page")
+        return _wait_password_after_recaptcha_tick(driver, page_state, pace) or _pwd_ready()
 
-    if _cdp_challenge_open(driver):
-        log(f"{email} — password-only: image puzzle, one audio try")
+    if _cdp_challenge_open_stable(driver):
+        log(f"{email} — password-only: real image puzzle, one audio try")
         try:
             from recaptcha_free_solver import run_free_captcha_pipeline
             run_free_captcha_pipeline(driver, _recaptcha_checkbox_ticked, max_cycles=1)
         except Exception as exc:
             log(f"{email} — audio try skipped: {exc}")
-        extra = time.time() + (14 if pace.get("password_only") else 6)
+        extra = time.time() + (8 if pace.get("password_only") else 6)
         while time.time() < extra:
             if _pwd_ready():
                 return True
-            time.sleep(0.12)
+            time.sleep(0.1)
         return _pwd_ready()
 
-    if _recaptcha_checkbox_ticked(driver) and pace.get("password_only"):
-        if _wait_password_after_recaptcha_tick(driver, page_state, pace):
-            return True
-
-    log(f"{email} — password-only: one more checkbox click (no page reload)")
-    handle_recaptcha_checkbox(
-        driver, email, pace=pace, proxy_url=proxy_url, page_state=page_state,
-    )
-    extra = time.time() + (12 if pace.get("password_only") else 5)
+    if pace.get("password_only"):
+        outcome = _click_recaptcha_from_frame(driver)
+        if outcome == "passed" or _recaptcha_checkbox_ticked(driver):
+            return _wait_password_after_recaptcha_tick(driver, page_state, pace) or _pwd_ready()
+    else:
+        handle_recaptcha_checkbox(
+            driver, email, pace=pace, proxy_url=proxy_url, page_state=page_state,
+        )
+    extra = time.time() + (5 if pace.get("password_only") else 5)
     while time.time() < extra:
         if _pwd_ready():
             return True
-        time.sleep(0.12)
+        time.sleep(0.1)
     return _pwd_ready()
 
 
@@ -2063,14 +2088,14 @@ def handle_recaptcha_checkbox(
                 time.sleep(0.05)
             return found_now
 
-        _widget_wait = 10 if pace.get("password_only") else float(pace.get("rc_wait_s", 6 if pace.get("fast") else 8))
+        _widget_wait = 7 if pace.get("password_only") else float(pace.get("rc_wait_s", 6 if pace.get("fast") else 8))
         found = _wait_widget(_widget_wait)
         # Already on challenge/recaptcha: extra wait, no reload (reload restarts
         # enterprise.js — logs showed 10–15s extra on the 8th account).
         if not (found.get("anchor") or found.get("checkbox")):
             if "challenge/recaptcha" in (_live_url(driver) or "").lower():
                 log(f"{email} — recaptcha URL ready, waiting for iframe (no reload)")
-                found = _wait_widget(8)
+                found = _wait_widget(5 if pace.get("password_only") else 8)
         if not (found.get("anchor") or found.get("checkbox")):
             log(f"{email} — robot box still loading, reloading the page once")
             capture_step(driver, "Robot checkbox")
@@ -2121,7 +2146,12 @@ def handle_recaptcha_checkbox(
                 _rc_result = "passed"
                 log(f"{email} — reCAPTCHA already ticked (attempt {attempt})")
                 break
-            if _cdp_challenge_open(driver):
+            _image_open = (
+                _cdp_challenge_open_stable(driver)
+                if pace.get("password_only")
+                else _cdp_challenge_open(driver)
+            )
+            if _image_open:
                 log(f"{email} — reCAPTCHA challenge is open")
                 capture_step(driver, "Robot challenge")
                 _rc_result = "image"
@@ -2131,11 +2161,21 @@ def handle_recaptcha_checkbox(
                 _rc_result = "passed"
                 log(f"{email} — I'm not a robot checkbox clicked (attempt {attempt})")
                 break
-            if outcome == "challenge" or _cdp_challenge_open(driver):
-                log(f"{email} — reCAPTCHA challenge is open")
-                capture_step(driver, "Robot challenge")
-                _rc_result = "image"
-                break
+            if outcome == "challenge":
+                if pace.get("password_only") and _recaptcha_checkbox_ticked(driver):
+                    _rc_result = "passed"
+                    log(f"{email} — challenge flash ignored, checkbox ticked")
+                    break
+                _image_open = (
+                    _cdp_challenge_open_stable(driver)
+                    if pace.get("password_only")
+                    else _cdp_challenge_open(driver)
+                )
+                if _image_open:
+                    log(f"{email} — reCAPTCHA challenge is open")
+                    capture_step(driver, "Robot challenge")
+                    _rc_result = "image"
+                    break
             if outcome == "error" and not reloaded_for_error:
                 reloaded_for_error = True
                 log(f"{email} — robot widget failed to load, reloading once")
@@ -2200,38 +2240,58 @@ def handle_recaptcha_checkbox(
             time.sleep(pace.get("rc_poll_s", 0.25))
 
         if _rc_result == "passed":
-            # Leave only when Google actually drops the recaptcha URL.
-            # The recaptcha URL itself does not contain "identifier", so that
-            # check used to break immediately and the password step ran too early.
-            nav_deadline = time.time() + float(
-                pace.get("rc_nav_s", 8 if pace.get("fast") else 12)
+            # One short wait after the tick. A second full wait is what pushed
+            # captcha accounts from ~20s to 40s.
+            nav_cap = (
+                float(pace.get("rc_post_tick_s", 5))
+                if pace.get("password_only")
+                else float(pace.get("rc_nav_s", 8 if pace.get("fast") else 12))
             )
+            nav_deadline = time.time() + nav_cap
             while time.time() < nav_deadline:
                 driver.switch_to.default_content()
                 cur = _live_url(driver)
                 if "challenge/recaptcha" not in cur:
                     break
-                if pace.get("password_only") and _password_field_visible(driver, 0.1):
+                if pace.get("password_only") and _password_field_visible(driver, 0.08):
                     break
-                time.sleep(pace.get("rc_poll_s", 0.25))
+                time.sleep(pace.get("rc_poll_s", 0.12))
             driver.switch_to.default_content()
             if "challenge/recaptcha" in _live_url(driver):
                 if pace.get("password_only") and (
-                    _recaptcha_checkbox_ticked(driver)
-                    or _password_field_visible(driver, 0.2)
+                    _password_field_visible(driver, 0.15)
+                    or "challenge/pwd" in (_live_url(driver) or "").lower()
                 ):
-                    log(f"{email} — checkbox ticked, waiting for password page")
-                    if _wait_password_after_recaptcha_tick(driver, page_state, pace):
-                        _rc_result = "passed"
-                    else:
-                        log(f"{email} — still on recaptcha URL after checkbox")
-                        _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
+                    _rc_result = "passed"
+                elif pace.get("password_only") and _recaptcha_checkbox_ticked(driver):
+                    log(f"{email} — still on recaptcha URL after checkbox")
+                    _rc_result = (
+                        "image"
+                        if _cdp_challenge_open_stable(driver)
+                        else "timeout"
+                    )
                 else:
                     log(f"{email} — still on recaptcha URL after checkbox")
-                    _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
+                    _rc_result = (
+                        "image"
+                        if (
+                            _cdp_challenge_open_stable(driver)
+                            if pace.get("password_only")
+                            else _cdp_challenge_open(driver)
+                        )
+                        else "timeout"
+                    )
         else:
             driver.switch_to.default_content()
-            _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
+            _rc_result = (
+                "image"
+                if (
+                    _cdp_challenge_open_stable(driver)
+                    if pace.get("password_only")
+                    else _cdp_challenge_open(driver)
+                )
+                else "timeout"
+            )
 
         if _rc_result != "passed":
             try:
@@ -2930,13 +2990,14 @@ def _login_pace(proxy_url: str | None, password_only: bool = False) -> dict:
         "rc_poll_s": 0.15 if turbo else (0.2 if fast else 0.4),
         "rc_wait_s": 3 if turbo else (4 if fast else 8),
         "email_nav_s": 14 if turbo else (22 if fast else 12),
-        "pwd_nav_s": 5 if turbo else (8 if fast else 8),
+        "pwd_nav_s": 3 if turbo else (8 if fast else 8),
         "pwd_poll_s": 4 if turbo else (5 if fast else 8),
-        "rc_click_s": 16 if turbo else (16 if fast else 18),
-        "rc_recover_s": 18 if turbo else (16 if fast else 18),
-        "rc_blank_reload_s": 5.0 if turbo else (5.0 if fast else 7.0),
-        "rc_anchor_ready_s": 0.35 if turbo else (0.45 if fast else 0.6),
-        "rc_nav_s": 18 if turbo else (6 if fast else 12),
+        "rc_click_s": 8 if turbo else (16 if fast else 18),
+        "rc_recover_s": 6 if turbo else (16 if fast else 18),
+        "rc_post_tick_s": 5 if turbo else 8,
+        "rc_blank_reload_s": 4.0 if turbo else (5.0 if fast else 7.0),
+        "rc_anchor_ready_s": 0.25 if turbo else (0.45 if fast else 0.6),
+        "rc_nav_s": 5 if turbo else (6 if fast else 12),
     }
 
 
@@ -8795,12 +8856,6 @@ def _do_login(
         if _rc_result != "passed" and "challenge/recaptcha" not in url:
             log(f"{email} — left the robot page, continuing")
             _rc_result = "passed"
-        if _rc_result != "passed" and _pace.get("password_only") and _recaptcha_checkbox_ticked(driver):
-            if _wait_password_after_recaptcha_tick(driver, page_state, _pace):
-                log(f"{email} — password-only: ticked, password page ready after wait")
-                _rc_result = "passed"
-            elif "challenge/recaptcha" not in (_live_url(driver) or "").lower():
-                _rc_result = "passed"
         if _rc_result != "passed":
             shot = screenshot_b64()
             if _rc_result == "loading":
@@ -8829,14 +8884,10 @@ def _do_login(
                 _fail["robotOutcome"] = "robot"
             if password_only:
                 if (
-                    wait_for_any(PW_SELECTORS, timeout=3)
+                    _password_field_visible(driver, 0.3)
                     or "challenge/pwd" in (url or "").lower()
                     or _password_only_recaptcha_recover(
                         driver, email, _pace, proxy_url, page_state,
-                    )
-                    or (
-                        _recaptcha_checkbox_ticked(driver)
-                        and _wait_password_after_recaptcha_tick(driver, page_state, _pace)
                     )
                 ):
                     log(f"{email} — password-only: continuing past recaptcha ({_rc_result})")
@@ -8916,10 +8967,13 @@ def _do_login(
     # ── Step 3: Enter password ────────────────────────────────────────────────
     log(f"{email} — Step 3: typing password")
     tmark("password step start")
-    pw_field = None
-    _pw_pick_s = 16 if password_only else (14 if _phone_fast else 8)
+    pw_field = _find_visible_password_field(driver)
+    _pw_pick_s = 6 if password_only else (14 if _phone_fast else 8)
     _pw_deadline = time.time() + _pw_pick_s
     while time.time() < _pw_deadline and pw_field is None:
+        pw_field = _find_visible_password_field(driver)
+        if pw_field:
+            break
         _cur_pw = _live_url(driver)
         if "challenge/recaptcha" in _cur_pw:
             try:
@@ -9097,7 +9151,7 @@ def _do_login(
                 log(f"{email} — password refill: {exc}")
             _click_password_next()
             _pw_retried = True
-            _nav_deadline = max(_nav_deadline, time.time() + (6 if password_only and _phone_fast else 12))
+            _nav_deadline = max(_nav_deadline, time.time() + (3 if password_only and _phone_fast else 12))
         time.sleep(0.15 if password_only and _phone_fast else 0.2)
     rand_sleep(80, 150) if (password_only and _phone_fast) else (rand_sleep(150, 300) if _phone_fast else rand_sleep(300, 600))
 
@@ -9105,10 +9159,8 @@ def _do_login(
     _log_login_timing_summary()
 
     if password_only:
-        _pwd_poll = float(_pace.get("pwd_poll_s", 5))
-        if password_only:
-            _pwd_poll = max(_pwd_poll, 10.0)
-        if "challenge/pwd" in (_live_url(driver) or "").lower():
+        _pwd_poll = float(_pace.get("pwd_poll_s", 4))
+        if "challenge/pwd" in (_live_url(driver) or "").lower() and not password_only:
             _pwd_poll = max(_pwd_poll, 8.0)
         _verdict_deadline = time.time() + _pwd_poll
         verdict = None
