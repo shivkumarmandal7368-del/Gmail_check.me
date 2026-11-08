@@ -609,17 +609,17 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             _log("audio challenge already open")
         else:
             for sel in (
-            "#recaptcha-audio-button",
-            ".rc-button-audio",
-            "button#recaptcha-audio-button",
-            "button.rc-button-audio",
-        ):
-            try:
-                audio_btn = driver.find_element(By.CSS_SELECTOR, sel)
-                if audio_btn.is_displayed():
-                    break
-            except Exception:
-                audio_btn = None
+                "#recaptcha-audio-button",
+                ".rc-button-audio",
+                "button#recaptcha-audio-button",
+                "button.rc-button-audio",
+            ):
+                try:
+                    audio_btn = driver.find_element(By.CSS_SELECTOR, sel)
+                    if audio_btn.is_displayed():
+                        break
+                except Exception:
+                    audio_btn = None
         if not already_audio:
             if not audio_btn:
                 _log("audio button not in selenium frame — trying CDP")
