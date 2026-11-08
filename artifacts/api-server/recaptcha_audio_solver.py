@@ -110,9 +110,32 @@ def _audio_suffix(raw: bytes, url: str = "", ctype: str = "") -> str:
     return ".mp3"
 
 
+def _log_audio_level(path: str) -> None:
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        return
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-i", path, "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=8,
+        )
+        for line in (proc.stderr or "").splitlines():
+            if "mean_volume" in line or "max_volume" in line:
+                _log(line.strip())
+    except Exception as exc:
+        _log(f"volume check skipped: {exc}")
+
+
 def _transcribe_audio(path: str) -> str | None:
     global _whisper_model
     _patch_av_open()
+    try:
+        import shutil
+        shutil.copy(path, "/tmp/last-rc-audio" + os.path.splitext(path)[1])
+    except Exception:
+        pass
+    _log_audio_level(path)
     try:
         from faster_whisper import WhisperModel
     except ImportError:
@@ -629,6 +652,31 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
                 _log("audio headphone click missed — trying CDP frame search")
                 driver.switch_to.default_content()
                 return _try_audio_via_cdp(driver)
+            if not _switch_challenge_frame(driver):
+                driver.switch_to.default_content()
+                return False
+        # The clip stays silent until PLAY. Whisper then invents phrases like
+        # "magnetic lasso tool" and the answer is never digits.
+        try:
+            driver.execute_script(
+                """
+                var play = document.querySelector(
+                  '.rc-audiochallenge-play-button, button[title*="PLAY"], button[aria-label*="PLAY"]'
+                );
+                if (!play) {
+                  var buttons = document.querySelectorAll('button');
+                  for (var i = 0; i < buttons.length; i++) {
+                    var t = (buttons[i].innerText || '').trim().toUpperCase();
+                    if (t === 'PLAY') { play = buttons[i]; break; }
+                  }
+                }
+                if (play) play.click();
+                """
+            )
+            _log("audio PLAY clicked")
+        except Exception as exc:
+            _log(f"audio PLAY click failed: {exc}")
+        time.sleep(1.1)
         _snap(driver, "Captcha audio")
 
         # The phone proxy often takes several seconds to paint the audio clip.
