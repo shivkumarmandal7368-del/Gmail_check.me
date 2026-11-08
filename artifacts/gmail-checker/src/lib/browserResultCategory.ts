@@ -30,12 +30,9 @@ export function getBrowserResultCategory(result: BrowserResultForCategory): Brow
 
   if (result.status === "2fa_required") return "not_open";
 
-  if (result.status === "unknown") {
-    if (
-      reasonLower.includes("password page did not say")
-      && reasonLower.includes("changed")
-    ) return "delete";
-  }
+  // "did not say sahi, changed, or wrong" contains the word changed.
+  // That sentence means the page was unclear, so it stays unknown.
+  if (result.status === "unknown") return "unknown";
 
   if (result.status !== "verification_required") return "unknown";
 

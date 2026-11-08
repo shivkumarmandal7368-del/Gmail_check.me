@@ -651,7 +651,7 @@ def password_stop_verdict(url: str, text: str) -> dict:
         }
     return {
         "status": "unknown",
-        "reason": "Password page did not say sahi, changed, or wrong",
+        "reason": "Password page had no clear sahi or wrong message",
         "category": "unknown",
     }
 

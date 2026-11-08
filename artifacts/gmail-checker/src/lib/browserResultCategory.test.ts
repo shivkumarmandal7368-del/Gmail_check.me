@@ -62,6 +62,13 @@ assert.equal(
   getBrowserResultCategory({ status: "unknown", reason: "Your password was changed 2 days ago" }),
   "delete",
 );
+assert.equal(
+  getBrowserResultCategory({
+    status: "unknown",
+    reason: "Password page did not say sahi, changed, or wrong",
+  }),
+  "unknown",
+);
 
 // Legacy persisted results without the stable signal retain the same rules.
 assert.equal(
