@@ -85,6 +85,31 @@ def _digits_from_transcript(text: str) -> str:
     return "".join(out)
 
 
+def _plausible_captcha_digits(digits: str) -> bool:
+    """reCAPTCHA speaks 4–8 mixed digits. One repeated digit is a Whisper hallucination."""
+    if not digits or not digits.isdigit():
+        return False
+    if not 4 <= len(digits) <= 8:
+        return False
+    if len(set(digits)) < 2:
+        return False
+    return True
+
+
+def _audio_suffix(raw: bytes, url: str = "", ctype: str = "") -> str:
+    """Google's payload URL has no extension. Saving MP3 bytes as .wav makes Whisper hear noise."""
+    head = raw[:4]
+    low = (ctype or "").lower()
+    path = (url or "").lower().split("?")[0]
+    if head[:3] == b"ID3" or head[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2") or "mpeg" in low or "mp3" in low or path.endswith(".mp3"):
+        return ".mp3"
+    if head == b"RIFF":
+        return ".wav"
+    if head == b"OggS":
+        return ".ogg"
+    return ".mp3"
+
+
 def _transcribe_audio(path: str) -> str | None:
     global _whisper_model
     _patch_av_open()
@@ -108,22 +133,24 @@ def _transcribe_audio(path: str) -> str | None:
                 temperature=0.0,
                 vad_filter=False,
                 condition_on_previous_text=False,
-                initial_prompt="0 1 2 3 4 5 6 7 8 9",
             )
         except Exception as exc:
             _log(f"Whisper failed: {exc}")
             return None
-        text = " ".join(s.text for s in segments).strip()
+        segs = list(segments)
+        text = " ".join(s.text for s in segs).strip()
         if not text:
             continue
+        if segs and max(getattr(s, "avg_logprob", -9) for s in segs) < -1.05:
+            _log(f"Whisper low confidence, ignored: {text[:60]}")
+            continue
         digits = _digits_from_transcript(text)
-        if len(digits) >= 4:
+        if _plausible_captcha_digits(digits):
             best = digits
             _log(f"Whisper (beam={beam}) digits: {digits[:12]}")
             break
         cleaned = re.sub(r"[^a-zA-Z0-9\s]", "", text)
-        cleaned = " ".join(cleaned.split())
-        _log(f"Whisper (beam={beam}) heard no digits: {cleaned[:80]}")
+        _log(f"Whisper rejected: {digits or cleaned[:60]}")
     return best
 
 
@@ -386,7 +413,8 @@ def _try_audio_via_cdp(driver: "WebDriver") -> bool:
         _log("could not read audio from challenge frame")
         return False
     data, ctype = payload
-    suffix = ".mp3" if "mpeg" in ctype or "mp3" in ctype else ".wav"
+    suffix = _audio_suffix(data, "", ctype)
+    _log(f"audio clip {len(data)} bytes {suffix}")
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp.write(data)
     tmp.close()
@@ -474,7 +502,8 @@ def _download_challenge_audio(driver: "WebDriver", session) -> str | None:
             import base64
             raw = base64.b64decode(b64)
             if len(raw) > 8000:
-                suffix = ".mp3" if url.lower().split("?")[0].endswith(".mp3") else ".wav"
+                suffix = _audio_suffix(raw, url)
+                _log(f"audio clip {len(raw)} bytes {suffix}")
                 tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
                 tmp.write(raw)
                 tmp.close()
@@ -488,7 +517,8 @@ def _download_challenge_audio(driver: "WebDriver", session) -> str | None:
     if len(r.content) < 8000:
         _log(f"audio clip too small ({len(r.content)})")
         return None
-    suffix = ".mp3" if "mpeg" in (r.headers.get("content-type") or "") else ".wav"
+    suffix = _audio_suffix(r.content, url, r.headers.get("content-type") or "")
+    _log(f"audio clip {len(r.content)} bytes {suffix}")
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp.write(r.content)
     tmp.close()
@@ -563,8 +593,22 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             _log("no selenium challenge iframe — using CDP")
             return _try_audio_via_cdp(driver)
 
+        already_audio = False
+        try:
+            already_audio = bool(driver.execute_script(
+                """
+                return !!(
+                  document.querySelector('#audio-response, #audio-source, .rc-audiochallenge-tdownload-link')
+                );
+                """
+            ))
+        except Exception:
+            already_audio = False
         audio_btn = None
-        for sel in (
+        if already_audio:
+            _log("audio challenge already open")
+        else:
+            for sel in (
             "#recaptcha-audio-button",
             ".rc-button-audio",
             "button#recaptcha-audio-button",
@@ -576,18 +620,15 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
                     break
             except Exception:
                 audio_btn = None
-        if not audio_btn:
-            _log("audio button not in selenium frame — trying CDP")
-            driver.switch_to.default_content()
-            return _try_audio_via_cdp(driver)
-        try:
-            shown = audio_btn.is_displayed()
-        except Exception:
-            shown = False
-        if not _cdp_click_audio_button(driver):
-            _log("audio headphone click missed — trying CDP frame search")
-            driver.switch_to.default_content()
-            return _try_audio_via_cdp(driver)
+        if not already_audio:
+            if not audio_btn:
+                _log("audio button not in selenium frame — trying CDP")
+                driver.switch_to.default_content()
+                return _try_audio_via_cdp(driver)
+            if not _cdp_click_audio_button(driver):
+                _log("audio headphone click missed — trying CDP frame search")
+                driver.switch_to.default_content()
+                return _try_audio_via_cdp(driver)
         _snap(driver, "Captcha audio")
 
         # The phone proxy often takes several seconds to paint the audio clip.
