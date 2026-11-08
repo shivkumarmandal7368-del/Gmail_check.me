@@ -625,7 +625,19 @@ def _cdp_click_named_button(driver: "WebDriver", labels: tuple[str, ...]) -> boo
     from selenium.webdriver.common.by import By
 
     driver.switch_to.default_content()
-    frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+    try:
+        frames = driver.execute_script("""
+            const out = [];
+            function walk(root) {
+              if (!root || !root.querySelectorAll) return;
+              root.querySelectorAll('iframe').forEach(f => out.push(f));
+              root.querySelectorAll('*').forEach(n => { if (n.shadowRoot) walk(n.shadowRoot); });
+            }
+            walk(document);
+            return out;
+        """) or []
+    except Exception:
+        frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
     for frame in frames:
         try:
             rect = driver.execute_script(
@@ -644,13 +656,24 @@ def _cdp_click_named_button(driver: "WebDriver", labels: tuple[str, ...]) -> boo
             local = driver.execute_script(
                 """
                 var labels = arguments[0];
-                var nodes = document.querySelectorAll('button, div[role="button"]');
+                function box(el, name) {
+                  if (!el) return null;
+                  var r = el.getBoundingClientRect();
+                  if (r.width < 8 || r.height < 8) return null;
+                  return {x: r.left, y: r.top, w: r.width, h: r.height, t: name};
+                }
+                if (labels.indexOf('PLAY') !== -1) {
+                  var play = document.querySelector('.rc-audiochallenge-play-button, #audio-source');
+                  var hit = box(document.querySelector('.rc-audiochallenge-play-button'), 'PLAY');
+                  if (hit) return hit;
+                }
+                var nodes = document.querySelectorAll('button, div[role="button"], .rc-button');
                 for (var i = 0; i < nodes.length; i++) {
                   var t = ((nodes[i].innerText || nodes[i].getAttribute('aria-label') || nodes[i].getAttribute('title') || '') + '').trim().toUpperCase();
                   for (var j = 0; j < labels.length; j++) {
-                    if (t === labels[j] || t.indexOf(labels[j]) === 0) {
-                      var r = nodes[i].getBoundingClientRect();
-                      if (r.width > 8 && r.height > 8) return {x: r.left, y: r.top, w: r.width, h: r.height, t: t};
+                    if (t === labels[j] || t.indexOf(labels[j]) !== -1) {
+                      var hit = box(nodes[i], t.slice(0, 24));
+                      if (hit) return hit;
                     }
                   }
                 }
@@ -676,6 +699,18 @@ def _cdp_click_named_button(driver: "WebDriver", labels: tuple[str, ...]) -> boo
             })
         _log(f"audio {local.get('t')} click at {int(x)},{int(y)}")
         return True
+    try:
+        if _switch_challenge_frame(driver):
+            names = driver.execute_script(
+                """
+                return Array.from(document.querySelectorAll('button, .rc-button, [role="button"]')).slice(0, 8).map(function(el) {
+                  return ((el.className || '') + '|' + (el.innerText || el.getAttribute('title') || '')).slice(0, 60);
+                });
+                """
+            )
+            _log(f"audio buttons: {names}")
+    except Exception:
+        pass
     driver.switch_to.default_content()
     return False
 
