@@ -1845,23 +1845,24 @@ def _recaptcha_checkbox_viewport_point(driver, frame, state: dict):
     return None
 
 
-def _poll_recaptcha_after_click(driver, seconds: float = 2.8) -> str:
-    """passed | challenge | pending after a checkbox click."""
+def _poll_recaptcha_after_click(driver, seconds: float = 0.8) -> str:
+    """passed | challenge | pending after a checkbox click.
+
+    A full DOM pierce on every poll was taking several seconds, so the
+    checkbox loop expired before the real 304px row could be clicked.
+    """
     deadline = time.time() + seconds
-    started = time.time()
     while time.time() < deadline:
         driver.switch_to.default_content()
         if "challenge/recaptcha" not in _live_url(driver):
             return "passed"
         if _recaptcha_checkbox_ticked(driver):
             return "passed"
-        # A bframe flashes during the tick. Checking it in the first 1.5s
-        # marked real ticks as "image" and started the 50s puzzle path.
-        if time.time() - started >= 1.6 and _cdp_challenge_open(driver):
-            if _recaptcha_checkbox_ticked(driver):
-                return "passed"
-            return "challenge"
         time.sleep(0.1)
+    if _recaptcha_checkbox_ticked(driver):
+        return "passed"
+    if _cdp_challenge_open(driver):
+        return "challenge"
     return "pending"
 
 
@@ -1886,6 +1887,11 @@ def _click_recaptcha_from_frame(driver) -> str:
     # aria=None means the square is still the blue spinner. A click there
     # does not tick, and the log then says "I'm not a robot (timeout)".
     if state.get("aria") != "false" or state.get("loading") or mw < 200:
+        return "notready"
+    # One click on the 28px spinner is enough to wake the widget. Further
+    # clicks there open the image puzzle. Wait for the full ~304px row.
+    narrow = float(state.get("w") or 0) < 80
+    if narrow and getattr(driver, "_rc_narrow_clicked", False):
         return "notready"
     # Phone users click the painted box. Inner #recaptcha-anchor often
     # arrives a beat later; clicking the iframe is enough.
@@ -1920,9 +1926,11 @@ def _click_recaptcha_from_frame(driver) -> str:
         })
         time.sleep(0.02)
     _cdp_click_xy(driver, x, y)
+    if narrow:
+        driver._rc_narrow_clicked = True
     # One trusted click. element.click() inside the iframe opens the image
     # puzzle and the account lands in NOT OPEN.
-    outcome = _poll_recaptcha_after_click(driver, 1.6)
+    outcome = _poll_recaptcha_after_click(driver, 0.7)
     if outcome != "pending":
         return outcome
     if _recaptcha_checkbox_ticked(driver):
@@ -2129,16 +2137,27 @@ def _password_only_recaptcha_recover(
 
     puzzle = _captcha_puzzle_visible(driver)
     if pace.get("password_only") and not puzzle:
-        log(f"{email} — password-only: checkbox still open, one more trusted click")
-        _click_recaptcha_from_frame(driver)
-        return _wait_password_after_recaptcha_tick(driver, page_state, pace) or _pwd_ready()
+        log(f"{email} — password-only: checkbox still open, retry until the row is painted")
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            if _pwd_ready() or _recaptcha_checkbox_ticked(driver):
+                return _wait_password_after_recaptcha_tick(driver, page_state, pace) or _pwd_ready()
+            outcome = _click_recaptcha_from_frame(driver)
+            if outcome == "passed" or _recaptcha_checkbox_ticked(driver):
+                return _wait_password_after_recaptcha_tick(driver, page_state, pace) or _pwd_ready()
+            if outcome == "challenge" or _captcha_puzzle_visible(driver):
+                puzzle = True
+                break
+            time.sleep(0.15)
+        if not puzzle:
+            return _pwd_ready()
 
     if puzzle:
         log(f"{email} — password-only: one audio try")
         try:
             from recaptcha_free_solver import run_free_captcha_pipeline
             run_free_captcha_pipeline(
-                driver, _recaptcha_checkbox_ticked, max_cycles=2, grace_s=0.15,
+                driver, _recaptcha_checkbox_ticked, max_cycles=1, grace_s=0.1,
                 skip_vision=True,
             )
         except Exception as exc:
@@ -2348,9 +2367,9 @@ def handle_recaptcha_checkbox(
                     _wait_widget(3 if pace.get("password_only") else 6)
                     click_deadline = max(click_deadline, time.time() + 12)
                     continue
-                if attempt == 1 or attempt % 4 == 0:
+                if attempt == 1 or attempt % 6 == 0:
                     log(f"{email} — robot checkbox still loading")
-                time.sleep(0.18 if pace.get("password_only") else 0.35)
+                time.sleep(0.08 if pace.get("password_only") else 0.35)
                 continue
             misses += 1
             max_miss = 5 if pace.get("password_only") else 2
@@ -2456,8 +2475,8 @@ def handle_recaptcha_checkbox(
                         if run_free_captcha_pipeline(
                             driver,
                             _recaptcha_checkbox_ticked,
-                            max_cycles=2,
-                            grace_s=0.15,
+                            max_cycles=1,
+                            grace_s=0.1,
                             skip_vision=True,
                         ):
                             _rc_result = "passed"
