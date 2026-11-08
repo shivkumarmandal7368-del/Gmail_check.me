@@ -68,6 +68,23 @@ def preload_whisper() -> None:
     _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
 
 
+_NUMBER_WORDS = {
+    "zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+}
+
+
+def _digits_from_transcript(text: str) -> str:
+    parts = re.findall(r"[a-z]+|\d", (text or "").lower())
+    out = []
+    for part in parts:
+        if part.isdigit():
+            out.append(part)
+        elif part in _NUMBER_WORDS:
+            out.append(_NUMBER_WORDS[part])
+    return "".join(out)
+
+
 def _transcribe_audio(path: str) -> str | None:
     global _whisper_model
     _patch_av_open()
@@ -89,8 +106,9 @@ def _transcribe_audio(path: str) -> str | None:
                 beam_size=beam,
                 best_of=1,
                 temperature=0.0,
-                initial_prompt="The numbers are spoken clearly for a captcha.",
-                vad_filter=True,
+                vad_filter=False,
+                condition_on_previous_text=False,
+                initial_prompt="0 1 2 3 4 5 6 7 8 9",
             )
         except Exception as exc:
             _log(f"Whisper failed: {exc}")
@@ -98,7 +116,7 @@ def _transcribe_audio(path: str) -> str | None:
         text = " ".join(s.text for s in segments).strip()
         if not text:
             continue
-        digits = re.sub(r"\D", "", text)
+        digits = _digits_from_transcript(text)
         if len(digits) >= 4:
             best = digits
             _log(f"Whisper (beam={beam}) digits: {digits[:12]}")
@@ -433,7 +451,7 @@ def _download_challenge_audio(driver: "WebDriver", session) -> str | None:
             url = link.get_attribute("href")
         except Exception:
             pass
-    if not url:
+    if not url or ("payload" not in url and "/audio" not in url):
         return None
     try:
         driver.set_script_timeout(20)
@@ -573,7 +591,7 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
         _snap(driver, "Captcha audio")
 
         # The phone proxy often takes several seconds to paint the audio clip.
-        clip_deadline = time.time() + 8.0
+        clip_deadline = time.time() + 3.2
         session = req.Session()
         audio_path = None
         try:
@@ -597,10 +615,18 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
                 if not audio_path:
                     time.sleep(0.4)
             if not audio_path:
-                _log("could not download audio clip — trying the challenge frame")
-                _snap(driver, "Captcha audio missing")
+                _log("audio clip not ready, reloading the clip once")
+                try:
+                    driver.execute_script(
+                        """
+                        var b = document.querySelector('#recaptcha-reload-button, .rc-button-reload');
+                        if (b) b.click();
+                        """
+                    )
+                except Exception:
+                    pass
                 driver.switch_to.default_content()
-                return _try_audio_via_cdp(driver)
+                continue
             answer = _transcribe_audio(audio_path)
             if not answer:
                 driver.switch_to.default_content()
