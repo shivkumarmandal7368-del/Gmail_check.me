@@ -110,6 +110,28 @@ def _audio_suffix(raw: bytes, url: str = "", ctype: str = "") -> str:
     return ".mp3"
 
 
+def _audio_is_silent(path: str) -> bool:
+    """A silent mp3 means PLAY never loaded the spoken digits."""
+    try:
+        import av
+    except Exception:
+        return False
+    try:
+        container = av.open(path)
+        peak = 0
+        for frame in container.decode(audio=0):
+            arr = frame.to_ndarray()
+            if arr.size:
+                peak = max(peak, int(abs(arr).max()))
+            if peak > 400:
+                return False
+        _log(f"audio clip is silent peak={peak}")
+        return True
+    except Exception as exc:
+        _log(f"silence check failed: {exc}")
+        return False
+
+
 def _log_audio_level(path: str) -> None:
     import shutil
     import subprocess
@@ -135,6 +157,8 @@ def _transcribe_audio(path: str) -> str | None:
         shutil.copy(path, "/tmp/last-rc-audio" + os.path.splitext(path)[1])
     except Exception:
         pass
+    if _audio_is_silent(path):
+        return None
     _log_audio_level(path)
     try:
         from faster_whisper import WhisperModel
@@ -596,6 +620,65 @@ def _cdp_click_audio_button(driver: "WebDriver") -> bool:
     return True
 
 
+def _cdp_click_named_button(driver: "WebDriver", labels: tuple[str, ...]) -> bool:
+    """Trusted click on PLAY / reload inside the challenge iframe."""
+    from selenium.webdriver.common.by import By
+
+    driver.switch_to.default_content()
+    if not _switch_challenge_frame(driver):
+        return False
+    local = driver.execute_script(
+        """
+        var labels = arguments[0];
+        var nodes = document.querySelectorAll('button, div[role="button"]');
+        for (var i = 0; i < nodes.length; i++) {
+          var t = ((nodes[i].innerText || nodes[i].getAttribute('aria-label') || nodes[i].getAttribute('title') || '') + '').trim().toUpperCase();
+          for (var j = 0; j < labels.length; j++) {
+            if (t === labels[j] || t.indexOf(labels[j]) === 0) {
+              var r = nodes[i].getBoundingClientRect();
+              if (r.width > 8 && r.height > 8) return {x: r.left, y: r.top, w: r.width, h: r.height, t: t};
+            }
+          }
+        }
+        return null;
+        """,
+        list(labels),
+    ) or {}
+    driver.switch_to.default_content()
+    if float(local.get("w") or 0) < 8:
+        return False
+    outer = {"x": 0, "y": 0}
+    try:
+        frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+        for frame in frames:
+            src = ((frame.get_attribute("src") or "") + (frame.get_attribute("title") or "")).lower()
+            if "bframe" not in src and "challenge" not in src:
+                continue
+            rect = driver.execute_script(
+                "var r=arguments[0].getBoundingClientRect(); return {x:r.left,y:r.top,w:r.width,h:r.height};",
+                frame,
+            ) or {}
+            if float(rect.get("w") or 0) < 80 or float(rect.get("y") or 0) < -20:
+                continue
+            outer = rect
+            break
+    except Exception:
+        pass
+    x = float(outer.get("x") or 0) + float(local["x"]) + float(local["w"]) / 2
+    y = float(outer.get("y") or 0) + float(local["y"]) + float(local["h"]) / 2
+    for typ, buttons in (("mousePressed", 1), ("mouseReleased", 0)):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": typ,
+            "x": x,
+            "y": y,
+            "button": "left",
+            "buttons": buttons,
+            "clickCount": 1,
+        })
+    _log(f"audio {local.get('t')} click at {int(x)},{int(y)}")
+    return True
+
+
 def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bool:
     """Switch to audio challenge, transcribe locally, submit. Returns True if submitted."""
     if not free_audio_enabled():
@@ -655,28 +738,11 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             if not _switch_challenge_frame(driver):
                 driver.switch_to.default_content()
                 return False
-        # The clip stays silent until PLAY. Whisper then invents phrases like
-        # "magnetic lasso tool" and the answer is never digits.
-        try:
-            driver.execute_script(
-                """
-                var play = document.querySelector(
-                  '.rc-audiochallenge-play-button, button[title*="PLAY"], button[aria-label*="PLAY"]'
-                );
-                if (!play) {
-                  var buttons = document.querySelectorAll('button');
-                  for (var i = 0; i < buttons.length; i++) {
-                    var t = (buttons[i].innerText || '').trim().toUpperCase();
-                    if (t === 'PLAY') { play = buttons[i]; break; }
-                  }
-                }
-                if (play) play.click();
-                """
-            )
-            _log("audio PLAY clicked")
-        except Exception as exc:
-            _log(f"audio PLAY click failed: {exc}")
-        time.sleep(1.1)
+        # JS click does not count as a user gesture, so Google keeps a silent
+        # mp3 and Whisper invents a sentence. A real mouse click on PLAY loads digits.
+        if not _cdp_click_named_button(driver, ("PLAY",)):
+            _log("audio PLAY button not clicked")
+        time.sleep(1.3)
         _snap(driver, "Captcha audio")
 
         # The phone proxy often takes several seconds to paint the audio clip.
@@ -719,18 +785,18 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             answer = _transcribe_audio(audio_path)
             if not answer:
                 _log("bad transcript, reloading the audio clip")
-                try:
-                    if not _switch_challenge_frame(driver):
-                        driver.switch_to.default_content()
-                    driver.execute_script(
-                        """
-                        var b = document.querySelector('#recaptcha-reload-button, .rc-button-reload');
-                        if (b) b.click();
-                        """
-                    )
-                except Exception:
-                    pass
-                time.sleep(0.6)
+                if not _cdp_click_named_button(driver, ("GET A NEW CHALLENGE", "RELOAD")):
+                    try:
+                        if _switch_challenge_frame(driver):
+                            driver.execute_script(
+                                """
+                                var b = document.querySelector('#recaptcha-reload-button, .rc-button-reload');
+                                if (b) b.click();
+                                """
+                            )
+                    except Exception:
+                        pass
+                time.sleep(0.8)
                 driver.switch_to.default_content()
                 continue
             resp = None
