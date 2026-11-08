@@ -1881,18 +1881,18 @@ def _click_recaptcha_from_frame(driver) -> str:
         state = {}
     if state.get("aria") == "true":
         return "passed"
+    mw = float(meta.get("w") or 0)
+    mh = float(meta.get("h") or 0)
+    # aria=None means the square is still the blue spinner. A click there
+    # does not tick, and the log then says "I'm not a robot (timeout)".
+    if state.get("aria") != "false" or state.get("loading") or mw < 200:
+        return "notready"
     # Phone users click the painted box. Inner #recaptcha-anchor often
     # arrives a beat later; clicking the iframe is enough.
     if state.get("err"):
         log(f"reCAPTCHA anchor error: {(state.get('text') or '')[:120]}")
         return "error"
     point = _recaptcha_checkbox_viewport_point(driver, frame, state)
-    mw = float(meta.get("w") or 0)
-    mh = float(meta.get("h") or 0)
-    # 28x28 is the loading spinner. The real row is about 304x78.
-    # Clicking the spinner leaves the account in NOT OPEN.
-    if state.get("loading") or mw < 200:
-        return "notready"
     if not point:
         if mw >= 120 and mh >= 20:
             point = (float(meta["x"]) + 28.0, float(meta["y"]) + mh / 2.0)
@@ -2067,6 +2067,35 @@ def _wait_password_after_recaptcha_tick(driver, page_state, pace: dict) -> bool:
     return _password_page_ready(driver, page_state) or _password_field_visible(driver, 0.5)
 
 
+def _captcha_puzzle_visible(driver) -> bool:
+    """True only when the image grid or the headphone button is actually open."""
+    try:
+        from recaptcha_audio_solver import _switch_challenge_frame
+    except Exception:
+        return False
+    try:
+        driver.switch_to.default_content()
+        if not _switch_challenge_frame(driver):
+            return False
+        found = driver.execute_script(
+            """
+            return !!(
+              document.querySelector(
+                '.rc-imageselect-tile, td.rc-imageselect-tile, #recaptcha-audio-button, .rc-button-audio, #audio-source'
+              )
+            );
+            """
+        )
+        return bool(found)
+    except Exception:
+        return False
+    finally:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+
+
 def _password_only_recaptcha_recover(
     driver,
     email: str,
@@ -2093,7 +2122,7 @@ def _password_only_recaptcha_recover(
         log(f"{email} — password-only: checkbox ticked, short wait for password page")
         return _wait_password_after_recaptcha_tick(driver, page_state, pace) or _pwd_ready()
 
-    puzzle = _cdp_challenge_open(driver)
+    puzzle = _captcha_puzzle_visible(driver)
     if pace.get("password_only") and not puzzle:
         log(f"{email} — password-only: checkbox still open, one more trusted click")
         _click_recaptcha_from_frame(driver)
@@ -2297,7 +2326,11 @@ def handle_recaptcha_checkbox(
                         f"href={(state.get('href') or '-')[:90]} "
                         f"text={(state.get('text') or '-')[:80]}"
                     )
-                if time.time() - blank_since >= _blank_reload and not reloaded_for_error:
+                if (
+                    not pace.get("password_only")
+                    and time.time() - blank_since >= _blank_reload
+                    and not reloaded_for_error
+                ):
                     reloaded_for_error = True
                     blank_since = None
                     probed = False
