@@ -104,7 +104,7 @@ def run_free_captcha_pipeline(
                 solved = True
         elif free_audio_enabled() and not _parent_left_recaptcha(driver):
             _log("try audio first")
-            if try_solve_recaptcha_audio_page(driver):
+            if try_solve_recaptcha_audio_page(driver, attempts=1):
                 if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=3):
                     _log("cleared after audio")
                     return True

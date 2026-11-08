@@ -85,6 +85,23 @@ def _digits_from_transcript(text: str) -> str:
     return "".join(out)
 
 
+def _answer_from_transcript(text: str) -> str | None:
+    """Digits when the clip is numeric. Otherwise the short phrase Google spoke."""
+    digits = _digits_from_transcript(text)
+    if _plausible_captcha_digits(digits):
+        return digits
+    words = re.sub(r"[^a-zA-Z\s]", " ", text or "").split()
+    if not 1 <= len(words) <= 8:
+        return None
+    phrase = " ".join(words).lower()
+    # Phrases Whisper emits on silence, not on a real clip.
+    if any(bad in phrase for bad in (
+        "thanks for watching", "thank you", "subscribe", "magnetic lasso",
+    )):
+        return None
+    return " ".join(words)
+
+
 def _plausible_captcha_digits(digits: str) -> bool:
     """reCAPTCHA speaks 4–8 mixed digits. One repeated digit is a Whisper hallucination."""
     if not digits or not digits.isdigit():
@@ -111,22 +128,27 @@ def _audio_suffix(raw: bytes, url: str = "", ctype: str = "") -> str:
 
 
 def _audio_is_silent(path: str) -> bool:
-    """A silent mp3 means PLAY never loaded the spoken digits."""
+    """A silent mp3 means PLAY never loaded the spoken digits.
+
+    PyAV returns float samples in -1..1. int() of those values is always 0,
+    which made every real clip look silent.
+    """
     try:
         import av
+        import numpy as np
     except Exception:
         return False
     try:
         container = av.open(path)
-        peak = 0
+        peak = 0.0
         for frame in container.decode(audio=0):
             arr = frame.to_ndarray()
             if arr.size:
-                peak = max(peak, int(abs(arr).max()))
-            if peak > 400:
+                peak = max(peak, float(np.max(np.abs(arr))))
+            if peak > 0.05:
                 return False
-        _log(f"audio clip is silent peak={peak}")
-        return True
+        _log(f"audio clip is silent peak={peak:.4f}")
+        return peak < 0.02
     except Exception as exc:
         _log(f"silence check failed: {exc}")
         return False
@@ -191,13 +213,13 @@ def _transcribe_audio(path: str) -> str | None:
         if segs and max(getattr(s, "avg_logprob", -9) for s in segs) < -1.05:
             _log(f"Whisper low confidence, ignored: {text[:60]}")
             continue
-        digits = _digits_from_transcript(text)
-        if _plausible_captcha_digits(digits):
-            best = digits
-            _log(f"Whisper (beam={beam}) digits: {digits[:12]}")
+        answer = _answer_from_transcript(text)
+        if answer:
+            best = answer
+            _log(f"Whisper (beam={beam}) answer: {answer[:40]}")
             break
         cleaned = re.sub(r"[^a-zA-Z0-9\s]", "", text)
-        _log(f"Whisper rejected: {digits or cleaned[:60]}")
+        _log(f"Whisper rejected: {cleaned[:60]}")
     return best
 
 
