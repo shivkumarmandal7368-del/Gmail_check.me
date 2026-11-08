@@ -1859,11 +1859,44 @@ def _click_recaptcha_from_frame(driver) -> str:
         time.sleep(0.02)
     _cdp_click_xy(driver, x, y)
     # One click, then wait. A second click is what opened the image puzzle.
-    outcome = _poll_recaptcha_after_click(driver, 1.0)
+    outcome = _poll_recaptcha_after_click(driver, 0.8)
     if outcome != "pending":
         return outcome
+    if not _cdp_challenge_open(driver) and _click_anchor_element(driver):
+        outcome = _poll_recaptcha_after_click(driver, 1.2)
+        if outcome != "pending":
+            return outcome
     log(f"reCAPTCHA checkbox click did not open a challenge aria={state.get('aria')}")
     return "miss"
+
+
+def _click_anchor_element(driver) -> bool:
+    """Click #recaptcha-anchor inside its iframe when the page coordinate misses."""
+    frame = _top_recaptcha_anchor_iframe(driver)
+    if frame is None:
+        return False
+    try:
+        driver.switch_to.default_content()
+        driver.switch_to.frame(frame)
+        clicked = driver.execute_script(
+            """
+            var a = document.getElementById('recaptcha-anchor');
+            if (!a) return false;
+            a.click();
+            return true;
+            """
+        )
+        driver.switch_to.default_content()
+        if clicked:
+            log("reCAPTCHA checkbox clicked inside the anchor frame")
+        return bool(clicked)
+    except Exception as exc:
+        log(f"reCAPTCHA anchor element click failed: {exc}")
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        return False
 
 
 def _click_recaptcha_checkbox_once(driver, *, use_touch: bool = False) -> bool:
@@ -2004,7 +2037,13 @@ def _password_only_recaptcha_recover(
         log(f"{email} — password-only: checkbox ticked, short wait for password page")
         return _wait_password_after_recaptcha_tick(driver, page_state, pace) or _pwd_ready()
 
-    if pace.get("password_only") or _cdp_challenge_open_stable(driver):
+    puzzle = _cdp_challenge_open(driver)
+    if pace.get("password_only") and not puzzle:
+        log(f"{email} — password-only: checkbox still open, clicking it inside the frame")
+        _click_anchor_element(driver)
+        return _wait_password_after_recaptcha_tick(driver, page_state, pace) or _pwd_ready()
+
+    if puzzle:
         log(f"{email} — password-only: one audio try")
         try:
             from recaptcha_free_solver import run_free_captcha_pipeline
@@ -2013,7 +2052,7 @@ def _password_only_recaptcha_recover(
             )
         except Exception as exc:
             log(f"{email} — audio try skipped: {exc}")
-        extra = time.time() + (8 if pace.get("password_only") else 6)
+        extra = time.time() + (3 if pace.get("password_only") else 6)
         while time.time() < extra:
             if _pwd_ready():
                 return True
@@ -2286,8 +2325,7 @@ def handle_recaptcha_checkbox(
         else:
             driver.switch_to.default_content()
             if pace.get("password_only"):
-                # CDP puzzle probe was ~2s and audio runs either way.
-                _rc_result = "image"
+                _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
             else:
                 _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
 
