@@ -18,9 +18,9 @@ function isDeleteReason(reason: string): boolean {
  * browser results persisted before the category field was added.
  */
 export function getBrowserResultCategory(result: BrowserResultForCategory): BrowserResultCategory {
-  if (result.status === "opened" || result.status === "password_ok") return "open";
+  if (result.status === "opened" || result.status === "password_ok" || result.status === "totp_ok") return "open";
 
-  if (result.status === "wrong_password" || result.status === "password_changed") return "delete";
+  if (result.status === "wrong_password" || result.status === "password_changed" || result.status === "totp_wrong") return "delete";
 
   const reasonLower = (result.reason ?? "").toLowerCase();
   if (

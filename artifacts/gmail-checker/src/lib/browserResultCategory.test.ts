@@ -57,7 +57,9 @@ assert.equal(
 assert.equal(getBrowserResultCategory({ status: "opened", category: "open", reason: "Mailbox opened" }), "open");
 assert.equal(getBrowserResultCategory({ status: "wrong_password", category: "unknown", reason: "Wrong password" }), "delete");
 assert.equal(getBrowserResultCategory({ status: "password_ok", reason: "Password sahi" }), "open");
+assert.equal(getBrowserResultCategory({ status: "totp_ok", reason: "2FA sahi" }), "open");
 assert.equal(getBrowserResultCategory({ status: "password_changed", reason: "Password changed" }), "delete");
+assert.equal(getBrowserResultCategory({ status: "totp_wrong", reason: "2FA galat" }), "delete");
 assert.equal(
   getBrowserResultCategory({ status: "unknown", reason: "Your password was changed 2 days ago" }),
   "delete",

@@ -659,10 +659,10 @@ def password_stop_verdict(url: str, text: str) -> dict:
 def browser_result_category(result: dict) -> str:
     """Return the stable UI category for a browser-check result."""
     status = result.get("status", "")
-    if status in ("opened", "password_ok"):
+    if status in ("opened", "password_ok", "totp_ok"):
         return "open"
 
-    if status in ("wrong_password", "password_changed"):
+    if status in ("wrong_password", "password_changed", "totp_wrong"):
         return "delete"
 
     # 2fa_required is a definitive negative signal — not_open
@@ -5293,7 +5293,8 @@ def main():
     sign_out_sessions = bool(data.get("signOutSessions", False))
     robot_check_only  = bool(data.get("robotCheckOnly", False))
     password_only     = bool(data.get("passwordOnly", False))
-    if password_only:
+    verify_totp       = bool(data.get("verifyTotp", False))
+    if password_only or verify_totp:
         change_password = False
         sign_out_sessions = False
     raw_device_index  = data.get("deviceIndex")
@@ -5311,6 +5312,7 @@ def main():
         email, password, totp_secret, proxy, fresh_profile,
         proxy_for_ip_check, device_index, change_password,
         sign_out_sessions, robot_check_only, password_only,
+        verify_totp,
     )
 
     # Auto-retry up to 3 times if Google blocked automation detection.
@@ -5359,6 +5361,7 @@ def main():
             email, password, totp_secret, _retry_proxy, True,
             proxy_for_ip_check, device_index, change_password,
             sign_out_sessions, robot_check_only, password_only,
+            verify_totp,
         )
         _blocked_reason = result.get("reason", "")
 
@@ -5633,6 +5636,7 @@ def check_gmail(
     sign_out_sessions: bool = False,
     robot_check_only: bool = False,
     password_only: bool = False,
+    verify_totp: bool = False,
 ) -> dict:
     totp_code = generate_totp(totp_secret) if totp_secret else None
     proxy = _proxy_without_unsupported_sticky(proxy)
@@ -6086,7 +6090,8 @@ def check_gmail(
             sign_out_sessions,
             robot_check_only,
             proxy_url=proxy_for_ip_check or proxy,
-            password_only=password_only,
+            password_only=password_only or verify_totp,
+            verify_totp=verify_totp,
         )
 
         # ── Post-login geo fallback (driver still open here!) ──────────────────
@@ -6094,7 +6099,7 @@ def check_gmail(
         # Chrome just proved the proxy works. Driver is still open so CDP re-injection
         # actually takes effect for this session (not after quit like before).
         # Use _retries=1: one round tries all 3 services — no need for more.
-        if not password_only and not fp.get("ip") and (proxy_for_ip_check or proxy):
+        if not password_only and not verify_totp and not fp.get("ip") and (proxy_for_ip_check or proxy):
             _fb_proxy = proxy_for_ip_check or proxy
             log("Post-login geo fallback: fingerprint has no IP, retrying geo lookup now…")
             _fallback_geo = geo_lookup_proxy(_fb_proxy, _label="post-login", _retries=1)
@@ -6137,6 +6142,7 @@ def check_gmail(
             and isinstance(shots, list)
             and shots
             and not password_only
+            and not verify_totp
         ):
             _login_result["stepScreenshots"] = list(shots)
         if isinstance(_login_result, dict):
@@ -6220,6 +6226,7 @@ def _do_login(
     robot_check_only: bool = False,
     proxy_url: str | None = None,
     password_only: bool = False,
+    verify_totp: bool = False,
 ) -> dict:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
@@ -6976,6 +6983,136 @@ def _do_login(
             return True
         log(f"{email} — {label}: re-auth still on {driver.current_url[:70]}")
         return False
+
+    def totp_verify_result() -> dict:
+        """After password accepted: complete the authenticator challenge, then stop.
+
+        Uses the supplied TOTP secret only. Does not open authenticator setup
+        or replace the account's 2FA key.
+        """
+        _wrong_totp_phrases = (
+            "wrong code", "that code didn't work", "code is incorrect",
+            "enter the code again", "code expired",
+            "didn't recognize that code",
+        )
+        deadline = time.time() + 8.0
+        saw_2fa = False
+        while time.time() < deadline:
+            url = _live_url(driver) or ""
+            href = url.lower()
+            kind = challenge_kind(url)
+            if (
+                is_totp_challenge_url(url)
+                or kind in {"dp", "totp", "ipp", "selection", "skotp", "ootp", "sms", "pk"}
+                or find_totp_input(driver) is not None
+            ):
+                saw_2fa = True
+                break
+            try:
+                text = driver.find_element(By.TAG_NAME, "body").text.lower()
+            except Exception:
+                text = ""
+            if any(x in text for x in (
+                "2-step verification",
+                "verify it's you",
+                "verify that it's you",
+                "choose how you want to sign in",
+            )):
+                saw_2fa = True
+                break
+            if (
+                signed_in_host(url)
+                or "myaccount.google.com" in href
+                or "mail.google.com" in href
+            ):
+                break
+            time.sleep(0.12)
+        url, text = page_state()
+        if not saw_2fa:
+            shot = screenshot_b64()
+            log(f"{email} — 2FA verify: no authenticator prompt after password")
+            return {
+                "status": "password_ok",
+                "reason": "Password sahi, 2FA nahi mila",
+                "category": "open",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
+        if not totp_secret and not totp_code:
+            shot = screenshot_b64()
+            return {
+                "status": "2fa_required",
+                "reason": "2FA required — add TOTP secret as 3rd field: email:password:totp_secret",
+                "category": "not_open",
+                "totpCode": None,
+                "debugScreenshot": shot,
+            }
+        log(f"{email} — 2FA verify: entering authenticator code")
+        if not pass_signin_challenge("2FA verify"):
+            auth = _tap_labeled("auth")
+            if auth:
+                log(f"{email} — 2FA verify clicked '{auth}'")
+            if not _totp_ready():
+                more = _click_try_another_way()
+                if more:
+                    log(f"{email} — 2FA verify clicked '{more}'")
+                    _poll_until(_totp_ready, 4.0)
+                    _tap_labeled("auth")
+            if _totp_ready():
+                enter_fresh_totp_once("2FA verify")
+                _poll_until(lambda: not is_totp_challenge_url(_live_url(driver) or ""), 8.0)
+        url, text = page_state()
+        extra = _password_visible_messages(driver)
+        combined = f"{text} {extra}".strip().lower()
+        if any(x in combined for x in _wrong_totp_phrases):
+            if totp_secret:
+                _totp_cache["code"] = None
+                _totp_cache["window"] = None
+                log(f"{email} — 2FA verify: wrong code, retrying next window")
+                if enter_fresh_totp_once("2FA verify retry", force_new=True):
+                    _poll_until(
+                        lambda: not is_totp_challenge_url(_live_url(driver) or ""),
+                        10.0,
+                    )
+                    url, text = page_state()
+                    extra = _password_visible_messages(driver)
+                    combined = f"{text} {extra}".strip().lower()
+            if any(x in combined for x in _wrong_totp_phrases) or is_totp_challenge_url(url):
+                shot = screenshot_b64()
+                log(f"{email} — 2FA verify: code rejected")
+                return {
+                    "status": "totp_wrong",
+                    "reason": "2FA galat",
+                    "category": "delete",
+                    "totpCode": totp_code,
+                    "debugScreenshot": shot,
+                }
+        href = (url or "").lower()
+        still_2fa = (
+            is_totp_challenge_url(url)
+            or challenge_kind(url) in {
+                "dp", "totp", "ipp", "selection", "skotp", "ootp", "sms", "pk",
+            }
+        )
+        if still_2fa:
+            shot = screenshot_b64()
+            log(f"{email} — 2FA verify unclear url={href[:140]}")
+            return {
+                "status": "unknown",
+                "reason": "2FA page had no clear sahi or galat message",
+                "category": "unknown",
+                "totpCode": totp_code,
+                "debugScreenshot": shot,
+            }
+        shot = screenshot_b64()
+        log(f"{email} — 2FA verify: authenticator accepted")
+        return {
+            "status": "totp_ok",
+            "reason": "2FA sahi",
+            "category": "open",
+            "totpCode": totp_code,
+            "debugScreenshot": shot,
+        }
 
     def _device_url_kind() -> str:
         """list | detail | other — without full page reload."""
@@ -9460,6 +9597,8 @@ def _do_login(
 
     if password_only:
         _pwd_poll = float(_pace.get("pwd_poll_s", 4))
+        if verify_totp:
+            _pwd_poll = max(_pwd_poll, 4.0)
         if "challenge/pwd" in (_live_url(driver) or "").lower() and not password_only:
             _pwd_poll = max(_pwd_poll, 8.0)
         _verdict_deadline = time.time() + _pwd_poll
@@ -9515,6 +9654,14 @@ def _do_login(
         verdict["totpCode"] = totp_code
         verdict["debugScreenshot"] = screenshot_b64()
         verdict["category"] = browser_result_category(verdict)
+        if verify_totp and verdict.get("status") == "password_ok":
+            log(f"{email} — password sahi, verifying 2FA")
+            totp_verdict = totp_verify_result()
+            totp_verdict.setdefault("totpCode", totp_code)
+            totp_verdict["category"] = browser_result_category(totp_verdict)
+            totp_verdict.setdefault("debugScreenshot", screenshot_b64())
+            log(f"{email} — 2FA verify stop: {totp_verdict.get('reason')}")
+            return totp_verdict
         if verdict.get("status") == "unknown":
             log(f"{email} — password-only unclear url={(_live_url(driver) or '')[:140]}")
         log(f"{email} — password-only stop: {verdict['reason']}")
