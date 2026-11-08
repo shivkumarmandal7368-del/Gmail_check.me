@@ -264,7 +264,10 @@ async function checkOneAccount(
       killSet?.delete(proc);
 
       // The Python script prints exactly one JSON line to stdout
-      const lastLine = stdout.trim().split("\n").filter(Boolean).pop() ?? "";
+      const lastLine = stdout.trim().split("\n").filter((line) => {
+        const t = line.trim();
+        return t.startsWith("{") && t.endsWith("}");
+      }).pop() ?? "";
       try {
         const parsed = JSON.parse(lastLine);
         resolve({
