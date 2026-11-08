@@ -63,55 +63,168 @@ def preload_whisper() -> None:
     if _whisper_model is not None:
         return
     from faster_whisper import WhisperModel
-    model_name = os.environ.get("WHISPER_MODEL", "tiny.en")
+    model_name = os.environ.get("WHISPER_MODEL", "base.en")
     _log(f"preloading Whisper {model_name}")
     _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
+
+
+_NUMBER_WORDS = {
+    "zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+}
+
+
+def _digits_from_transcript(text: str) -> str:
+    parts = re.findall(r"[a-z]+|\d", (text or "").lower())
+    out = []
+    for part in parts:
+        if part.isdigit():
+            out.append(part)
+        elif part in _NUMBER_WORDS:
+            out.append(_NUMBER_WORDS[part])
+    return "".join(out)
+
+
+def _answer_from_transcript(text: str) -> str | None:
+    """Digits when the clip is numeric. Otherwise the short phrase Google spoke."""
+    digits = _digits_from_transcript(text)
+    if _plausible_captcha_digits(digits):
+        return digits
+    words = re.sub(r"[^a-zA-Z\s]", " ", text or "").split()
+    if not 1 <= len(words) <= 8:
+        return None
+    phrase = " ".join(words).lower()
+    # Phrases Whisper emits on silence, not on a real clip.
+    if any(bad in phrase for bad in (
+        "thanks for watching", "thank you", "subscribe", "magnetic lasso",
+    )):
+        return None
+    return " ".join(words)
+
+
+def _plausible_captcha_digits(digits: str) -> bool:
+    """reCAPTCHA speaks 4–8 mixed digits. One repeated digit is a Whisper hallucination."""
+    if not digits or not digits.isdigit():
+        return False
+    if not 4 <= len(digits) <= 8:
+        return False
+    if len(set(digits)) < 2:
+        return False
+    return True
+
+
+def _audio_suffix(raw: bytes, url: str = "", ctype: str = "") -> str:
+    """Google's payload URL has no extension. Saving MP3 bytes as .wav makes Whisper hear noise."""
+    head = raw[:4]
+    low = (ctype or "").lower()
+    path = (url or "").lower().split("?")[0]
+    if head[:3] == b"ID3" or head[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2") or "mpeg" in low or "mp3" in low or path.endswith(".mp3"):
+        return ".mp3"
+    if head == b"RIFF":
+        return ".wav"
+    if head == b"OggS":
+        return ".ogg"
+    return ".mp3"
+
+
+def _audio_is_silent(path: str) -> bool:
+    """A silent mp3 means PLAY never loaded the spoken digits.
+
+    PyAV returns float samples in -1..1. int() of those values is always 0,
+    which made every real clip look silent.
+    """
+    try:
+        import av
+        import numpy as np
+    except Exception:
+        return False
+    try:
+        container = av.open(path)
+        peak = 0.0
+        for frame in container.decode(audio=0):
+            arr = frame.to_ndarray()
+            if arr.size:
+                peak = max(peak, float(np.max(np.abs(arr))))
+            if peak > 0.05:
+                return False
+        _log(f"audio clip is silent peak={peak:.4f}")
+        return peak < 0.02
+    except Exception as exc:
+        _log(f"silence check failed: {exc}")
+        return False
+
+
+def _log_audio_level(path: str) -> None:
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        return
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-i", path, "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=8,
+        )
+        for line in (proc.stderr or "").splitlines():
+            if "mean_volume" in line or "max_volume" in line:
+                _log(line.strip())
+    except Exception as exc:
+        _log(f"volume check skipped: {exc}")
 
 
 def _transcribe_audio(path: str) -> str | None:
     global _whisper_model
     _patch_av_open()
     try:
+        import shutil
+        shutil.copy(path, "/tmp/last-rc-audio" + os.path.splitext(path)[1])
+    except Exception:
+        pass
+    if _audio_is_silent(path):
+        return None
+    _log_audio_level(path)
+    try:
         from faster_whisper import WhisperModel
     except ImportError:
         _log("install faster-whisper on VPS: .venv/bin/pip install faster-whisper")
         return None
-    model_name = os.environ.get("WHISPER_MODEL", "tiny.en")
+    model_name = os.environ.get("WHISPER_MODEL", "base.en")
     if _whisper_model is None:
         _log(f"loading Whisper model {model_name} (first run downloads model weights)…")
         _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
     best: str | None = None
-    for beam in (5, 3, 1):
+    for beam in (1,):
         try:
             segments, _ = _whisper_model.transcribe(
                 path,
                 language="en",
                 beam_size=beam,
-                best_of=3,
+                best_of=1,
                 temperature=0.0,
-                initial_prompt="The numbers are spoken clearly for a captcha.",
-                vad_filter=True,
+                vad_filter=False,
+                condition_on_previous_text=False,
             )
         except Exception as exc:
             _log(f"Whisper failed: {exc}")
             return None
-        text = " ".join(s.text for s in segments).strip()
+        segs = list(segments)
+        text = " ".join(s.text for s in segs).strip()
         if not text:
             continue
-        digits = re.sub(r"\D", "", text)
-        if len(digits) >= 4:
-            best = digits
-            _log(f"Whisper (beam={beam}) digits: {digits[:12]}")
+        if segs and max(getattr(s, "avg_logprob", -9) for s in segs) < -1.05:
+            _log(f"Whisper low confidence, ignored: {text[:60]}")
+            continue
+        answer = _answer_from_transcript(text)
+        if answer:
+            best = answer
+            _log(f"Whisper (beam={beam}) answer: {answer[:40]}")
             break
         cleaned = re.sub(r"[^a-zA-Z0-9\s]", "", text)
-        cleaned = " ".join(cleaned.split())
-        best = cleaned or text
-        _log(f"Whisper (beam={beam}) heard: {cleaned[:80]}")
-        break
+        _log(f"Whisper rejected: {cleaned[:60]}")
     return best
 
 
-def _switch_challenge_frame(driver: "WebDriver") -> bool:
+def _visible_bframe(driver: "WebDriver"):
+    """Largest on-screen challenge iframe. Re-queried every call so the element is not stale."""
     from selenium.webdriver.common.by import By
 
     driver.switch_to.default_content()
@@ -139,7 +252,7 @@ def _switch_challenge_frame(driver: "WebDriver") -> bool:
             pass
     driver.switch_to.default_content()
     best = None
-    best_area = 0
+    best_area = 0.0
     for fr in frames:
         try:
             src = (fr.get_attribute("src") or "").lower()
@@ -161,6 +274,11 @@ def _switch_challenge_frame(driver: "WebDriver") -> bool:
                 best = fr
         except Exception:
             continue
+    return best
+
+
+def _switch_challenge_frame(driver: "WebDriver") -> bool:
+    best = _visible_bframe(driver)
     if best is None:
         return False
     try:
@@ -173,6 +291,72 @@ def _switch_challenge_frame(driver: "WebDriver") -> bool:
         except Exception:
             pass
         return False
+
+
+def _click_challenge_button(driver: "WebDriver", kind: str) -> bool:
+    """Trusted click on the headphone, PLAY, or reload control inside the visible bframe."""
+    frame = _visible_bframe(driver)
+    if frame is None:
+        _log(f"audio {kind}: no challenge frame")
+        return False
+    try:
+        loc = frame.location or {}
+        ox = float(loc.get("x") or 0)
+        oy = float(loc.get("y") or 0)
+        driver.switch_to.default_content()
+        driver.switch_to.frame(frame)
+        local = driver.execute_script(
+            """
+            var kind = arguments[0];
+            var el = null;
+            if (kind === 'audio') {
+              el = document.querySelector('#recaptcha-audio-button, .rc-button-audio');
+            } else if (kind === 'play') {
+              el = document.querySelector('.rc-audiochallenge-play-button');
+              if (!el) {
+                var buttons = document.querySelectorAll('button');
+                for (var i = 0; i < buttons.length; i++) {
+                  if ((buttons[i].innerText || '').replace(/\\s+/g, ' ').trim().toUpperCase() === 'PLAY') {
+                    el = buttons[i];
+                    break;
+                  }
+                }
+              }
+            } else {
+              el = document.querySelector('#recaptcha-reload-button, .rc-button-reload');
+            }
+            if (!el) return null;
+            var r = el.getBoundingClientRect();
+            if (r.width < 8 || r.height < 8) return null;
+            return {x: r.left, y: r.top, w: r.width, h: r.height};
+            """,
+            kind,
+        ) or {}
+    except Exception as exc:
+        _log(f"audio {kind} lookup failed: {exc}")
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        return False
+    if float(local.get("w") or 0) < 8:
+        driver.switch_to.default_content()
+        _log(f"audio {kind} button not in this frame")
+        return False
+    x = ox + float(local["x"]) + float(local["w"]) / 2.0
+    y = oy + float(local["y"]) + float(local["h"]) / 2.0
+    driver.switch_to.default_content()
+    for typ, buttons in (("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": typ,
+            "x": x,
+            "y": y,
+            "button": "left" if typ != "mouseMoved" else "none",
+            "buttons": buttons,
+            "clickCount": 1 if typ != "mouseMoved" else 0,
+        })
+    _log(f"audio {kind} click at {int(x)},{int(y)}")
+    return True
 
 
 def _cdp_attrs(node: dict) -> dict:
@@ -370,7 +554,8 @@ def _try_audio_via_cdp(driver: "WebDriver") -> bool:
         _log("could not read audio from challenge frame")
         return False
     data, ctype = payload
-    suffix = ".mp3" if "mpeg" in ctype or "mp3" in ctype else ".wav"
+    suffix = _audio_suffix(data, "", ctype)
+    _log(f"audio clip {len(data)} bytes {suffix}")
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp.write(data)
     tmp.close()
@@ -435,7 +620,7 @@ def _download_challenge_audio(driver: "WebDriver", session) -> str | None:
             url = link.get_attribute("href")
         except Exception:
             pass
-    if not url:
+    if not url or ("payload" not in url and "/audio" not in url):
         return None
     try:
         driver.set_script_timeout(20)
@@ -457,8 +642,9 @@ def _download_challenge_audio(driver: "WebDriver", session) -> str | None:
         if b64:
             import base64
             raw = base64.b64decode(b64)
-            if len(raw) > 100:
-                suffix = ".mp3" if url.lower().split("?")[0].endswith(".mp3") else ".wav"
+            if len(raw) > 8000:
+                suffix = _audio_suffix(raw, url)
+                _log(f"audio clip {len(raw)} bytes {suffix}")
                 tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
                 tmp.write(raw)
                 tmp.close()
@@ -469,11 +655,171 @@ def _download_challenge_audio(driver: "WebDriver", session) -> str | None:
         session.cookies.set(c["name"], c["value"], domain=c.get("domain"))
     r = session.get(url, timeout=30)
     r.raise_for_status()
-    suffix = ".mp3" if "mpeg" in (r.headers.get("content-type") or "") else ".wav"
+    if len(r.content) < 8000:
+        _log(f"audio clip too small ({len(r.content)})")
+        return None
+    suffix = _audio_suffix(r.content, url, r.headers.get("content-type") or "")
+    _log(f"audio clip {len(r.content)} bytes {suffix}")
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp.write(r.content)
     tmp.close()
     return tmp.name
+
+
+def _cdp_click_audio_button(driver: "WebDriver") -> bool:
+    """Click the headphone control even when Selenium says it is not interactable."""
+    from selenium.webdriver.common.by import By
+
+    driver.switch_to.default_content()
+    if not _switch_challenge_frame(driver):
+        return False
+    local = driver.execute_script(
+        """
+        var b = document.querySelector('#recaptcha-audio-button, .rc-button-audio');
+        if (!b) return null;
+        var r = b.getBoundingClientRect();
+        return {x: r.left, y: r.top, w: r.width, h: r.height};
+        """
+    ) or {}
+    driver.switch_to.default_content()
+    if float(local.get("w") or 0) < 8:
+        return False
+    outer = {"x": 0, "y": 0}
+    try:
+        frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+        for frame in frames:
+            src = ((frame.get_attribute("src") or "") + (frame.get_attribute("title") or "")).lower()
+            if "bframe" not in src and "challenge" not in src:
+                continue
+            rect = driver.execute_script(
+                "var r=arguments[0].getBoundingClientRect(); return {x:r.left,y:r.top};",
+                frame,
+            ) or {}
+            outer = rect
+            break
+    except Exception:
+        pass
+    x = float(outer.get("x") or 0) + float(local["x"]) + float(local["w"]) / 2
+    y = float(outer.get("y") or 0) + float(local["y"]) + float(local["h"]) / 2
+    for typ, buttons in (("mousePressed", 1), ("mouseReleased", 0)):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": typ,
+            "x": x,
+            "y": y,
+            "button": "left",
+            "buttons": buttons,
+            "clickCount": 1,
+        })
+    _log(f"audio headphone click at {int(x)},{int(y)}")
+    return True
+
+
+def _cdp_click_named_button(driver: "WebDriver", labels: tuple[str, ...]) -> bool:
+    """Trusted click on PLAY / reload. Use the iframe that actually contains the button."""
+    from selenium.webdriver.common.by import By
+
+    driver.switch_to.default_content()
+    try:
+        frames = driver.execute_script("""
+            const out = [];
+            function walk(root) {
+              if (!root || !root.querySelectorAll) return;
+              root.querySelectorAll('iframe').forEach(f => out.push(f));
+              root.querySelectorAll('*').forEach(n => { if (n.shadowRoot) walk(n.shadowRoot); });
+            }
+            walk(document);
+            return out;
+        """) or []
+    except Exception:
+        frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+    parents = list(frames)
+    for parent in parents:
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(parent)
+            frames.extend(driver.find_elements(By.CSS_SELECTOR, "iframe"))
+        except Exception:
+            pass
+    driver.switch_to.default_content()
+    for frame in frames:
+        try:
+            size = frame.size or {}
+            loc = frame.location or {}
+            rect = {
+                "x": float(loc.get("x") or 0),
+                "y": float(loc.get("y") or 0),
+                "w": float(size.get("width") or 0),
+                "h": float(size.get("height") or 0),
+            }
+        except Exception:
+            continue
+        if rect["w"] < 80 or rect["h"] < 40:
+            continue
+        if rect["y"] < -20 or rect["x"] < -20:
+            continue
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(frame)
+            local = driver.execute_script(
+                """
+                var labels = arguments[0];
+                function box(el, name) {
+                  if (!el) return null;
+                  var r = el.getBoundingClientRect();
+                  if (r.width < 8 || r.height < 8) return null;
+                  return {x: r.left, y: r.top, w: r.width, h: r.height, t: name};
+                }
+                if (labels.indexOf('PLAY') !== -1) {
+                  var play = document.querySelector('.rc-audiochallenge-play-button, #audio-source');
+                  var hit = box(document.querySelector('.rc-audiochallenge-play-button'), 'PLAY');
+                  if (hit) return hit;
+                }
+                var nodes = document.querySelectorAll('button, div[role="button"], .rc-button');
+                for (var i = 0; i < nodes.length; i++) {
+                  var t = ((nodes[i].innerText || nodes[i].getAttribute('aria-label') || nodes[i].getAttribute('title') || '') + '').trim().toUpperCase();
+                  for (var j = 0; j < labels.length; j++) {
+                    if (t === labels[j] || t.indexOf(labels[j]) !== -1) {
+                      var hit = box(nodes[i], t.slice(0, 24));
+                      if (hit) return hit;
+                    }
+                  }
+                }
+                return null;
+                """,
+                list(labels),
+            ) or {}
+        except Exception:
+            local = {}
+        if float(local.get("w") or 0) < 8:
+            continue
+        x = float(rect["x"]) + float(local["x"]) + float(local["w"]) / 2
+        y = float(rect["y"]) + float(local["y"]) + float(local["h"]) / 2
+        driver.switch_to.default_content()
+        for typ, buttons in (("mousePressed", 1), ("mouseReleased", 0)):
+            driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                "type": typ,
+                "x": x,
+                "y": y,
+                "button": "left",
+                "buttons": buttons,
+                "clickCount": 1,
+            })
+        _log(f"audio {local.get('t')} click at {int(x)},{int(y)}")
+        return True
+    try:
+        if _switch_challenge_frame(driver):
+            names = driver.execute_script(
+                """
+                return Array.from(document.querySelectorAll('button, .rc-button, [role="button"]')).slice(0, 8).map(function(el) {
+                  return ((el.className || '') + '|' + (el.innerText || el.getAttribute('title') || '')).slice(0, 60);
+                });
+                """
+            )
+            _log(f"audio buttons: {names}")
+    except Exception:
+        pass
+    driver.switch_to.default_content()
+    return False
 
 
 def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bool:
@@ -496,41 +842,71 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             _log("no selenium challenge iframe — using CDP")
             return _try_audio_via_cdp(driver)
 
-        audio_btn = None
-        for sel in (
-            "#recaptcha-audio-button",
-            ".rc-button-audio",
-            "button#recaptcha-audio-button",
-            "button.rc-button-audio",
-        ):
-            try:
-                audio_btn = driver.find_element(By.CSS_SELECTOR, sel)
-                if audio_btn.is_displayed():
-                    break
-            except Exception:
-                audio_btn = None
-        if not audio_btn:
-            _log("audio button not in selenium frame — trying CDP")
-            driver.switch_to.default_content()
-            return _try_audio_via_cdp(driver)
+        already_audio = False
         try:
-            shown = audio_btn.is_displayed()
+            already_audio = bool(driver.execute_script(
+                """
+                if (document.querySelector('.rc-audiochallenge-play-button, #audio-response')) return true;
+                var buttons = document.querySelectorAll('button');
+                for (var i = 0; i < buttons.length; i++) {
+                  if ((buttons[i].innerText || '').replace(/\\s+/g, ' ').trim().toUpperCase() === 'PLAY') return true;
+                }
+                return false;
+                """
+            ))
         except Exception:
-            shown = False
-        if not shown:
-            _log("audio button present but not displayed — clicking it anyway")
-
+            already_audio = False
+        audio_btn = None
+        if already_audio:
+            _log("audio challenge already open")
+        else:
+            for sel in (
+                "#recaptcha-audio-button",
+                ".rc-button-audio",
+                "button#recaptcha-audio-button",
+                "button.rc-button-audio",
+            ):
+                try:
+                    audio_btn = driver.find_element(By.CSS_SELECTOR, sel)
+                    if audio_btn.is_displayed():
+                        break
+                except Exception:
+                    audio_btn = None
+        if not already_audio:
+            if not audio_btn:
+                _log("audio button not in selenium frame — trying CDP")
+                driver.switch_to.default_content()
+                return _try_audio_via_cdp(driver)
+            if not _click_challenge_button(driver, "audio"):
+                _log("audio headphone click missed — trying CDP frame search")
+                driver.switch_to.default_content()
+                return _try_audio_via_cdp(driver)
+            if not _switch_challenge_frame(driver):
+                driver.switch_to.default_content()
+                return False
+        # JS click does not count as a user gesture, so Google keeps a silent
+        # mp3 and Whisper invents a sentence. A real mouse click on PLAY loads digits.
+        if not _click_challenge_button(driver, "play"):
+            _log("audio PLAY button not clicked")
+        time.sleep(0.8)
         try:
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", audio_btn)
-            audio_btn.click()
+            if _switch_challenge_frame(driver):
+                state = driver.execute_script(
+                    """
+                    var a = document.querySelector('#audio-source, audio');
+                    return a ? {
+                      paused: a.paused, t: a.currentTime, dur: a.duration, ready: a.readyState,
+                      src: String(a.currentSrc || a.src || '').slice(0, 80)
+                    } : {missing: true};
+                    """
+                )
+                _log(f"audio element {state}")
         except Exception as exc:
-            _log(f"audio button click failed: {exc} — trying CDP")
-            driver.switch_to.default_content()
-            return _try_audio_via_cdp(driver)
+            _log(f"audio element state failed: {exc}")
         _snap(driver, "Captcha audio")
 
         # The phone proxy often takes several seconds to paint the audio clip.
-        clip_deadline = time.time() + 8.0
+        clip_deadline = time.time() + 1.6
         session = req.Session()
         audio_path = None
         try:
@@ -554,12 +930,33 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
                 if not audio_path:
                     time.sleep(0.4)
             if not audio_path:
-                _log("could not download audio clip — trying the challenge frame")
-                _snap(driver, "Captcha audio missing")
+                _log("audio clip not ready, reloading the clip once")
+                try:
+                    driver.execute_script(
+                        """
+                        var b = document.querySelector('#recaptcha-reload-button, .rc-button-reload');
+                        if (b) b.click();
+                        """
+                    )
+                except Exception:
+                    pass
                 driver.switch_to.default_content()
-                return _try_audio_via_cdp(driver)
+                continue
             answer = _transcribe_audio(audio_path)
             if not answer:
+                _log("bad transcript, reloading the audio clip")
+                if not _click_challenge_button(driver, "reload"):
+                    try:
+                        if _switch_challenge_frame(driver):
+                            driver.execute_script(
+                                """
+                                var b = document.querySelector('#recaptcha-reload-button, .rc-button-reload');
+                                if (b) b.click();
+                                """
+                            )
+                    except Exception:
+                        pass
+                time.sleep(0.8)
                 driver.switch_to.default_content()
                 continue
             resp = None

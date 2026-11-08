@@ -205,7 +205,9 @@ def try_solve_recaptcha_image_page(driver: "WebDriver", rounds: int = 4) -> bool
             continue
         missing_frame_since = None
         try:
-            if driver.find_elements(By.CSS_SELECTOR, "#audio-source, .rc-audiochallenge-control-panel"):
+            panels = driver.find_elements(By.CSS_SELECTOR, ".rc-audiochallenge-control-panel, #audio-response")
+            if any(p.is_displayed() for p in panels):
+                _log("audio challenge is showing, skip image")
                 driver.switch_to.default_content()
                 return False
         except Exception:

@@ -25,21 +25,22 @@ def _wait_recaptcha_cleared(
     while time.time() < deadline:
         try:
             driver.switch_to.default_content()
-            url = driver.current_url or ""
+            url = driver.execute_script("return location.href") or ""
             if "challenge/recaptcha" not in url:
                 return True
             if checkbox_ticked():
                 return True
         except Exception:
             pass
-        time.sleep(0.45)
+        time.sleep(0.2)
     return False
 
 
 def _parent_left_recaptcha(driver: "WebDriver") -> bool:
     try:
         driver.switch_to.default_content()
-        return "challenge/recaptcha" not in (driver.current_url or "")
+        href = driver.execute_script("return location.href") or ""
+        return "challenge/recaptcha" not in href
     except Exception:
         return False
 
@@ -67,6 +68,9 @@ def run_free_captcha_pipeline(
     driver: "WebDriver",
     checkbox_ticked: Callable[[], bool],
     max_cycles: int = 3,
+    grace_s: float = 2.2,
+    skip_vision: bool = False,
+    vision_rounds: int = 2,
 ) -> bool:
     """Try audio → vision → audio retries. Returns True if captcha cleared."""
     if not free_audio_enabled() and not free_vision_enabled():
@@ -75,7 +79,7 @@ def run_free_captcha_pipeline(
     # The checkbox click often reaches the password page on its own.
     # Clicking the headphone button during that hop added several seconds.
     if not _image_grid_ready(driver):
-        grace = time.time() + 2.2
+        grace = time.time() + grace_s
         while time.time() < grace:
             if _parent_left_recaptcha(driver):
                 _log("left recaptcha page")
@@ -88,23 +92,30 @@ def run_free_captcha_pipeline(
             _log("left recaptcha page")
             return True
         solved = False
-        # Spoken digits are one clip. The picture grid takes several rounds and
-        # was the slow path that still failed on cars and scooters.
-        if free_audio_enabled() and not _parent_left_recaptcha(driver):
-            _log("try audio first")
-            if try_solve_recaptcha_audio_page(driver):
-                if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
-                    _log("cleared after audio")
-                    return True
-                solved = True
-
-        if free_vision_enabled() and not _parent_left_recaptcha(driver):
-            _log("try image (YOLO)")
-            if try_solve_recaptcha_image_page(driver, rounds=2):
+        grid_open = _image_grid_ready(driver)
+        # A visible tile grid is the page the user sees. Audio on that page
+        # hears noise and then the image solver was skipped.
+        if grid_open and free_vision_enabled() and not skip_vision:
+            _log("image grid is open, solving it")
+            if try_solve_recaptcha_image_page(driver, rounds=vision_rounds):
                 if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
                     _log("cleared after vision")
                     return True
                 solved = True
+        elif free_audio_enabled() and not _parent_left_recaptcha(driver):
+            _log("try audio first")
+            if try_solve_recaptcha_audio_page(driver, attempts=1):
+                if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=3):
+                    _log("cleared after audio")
+                    return True
+                solved = True
+            if free_vision_enabled() and not skip_vision and not _parent_left_recaptcha(driver):
+                _log("try image (YOLO)")
+                if try_solve_recaptcha_image_page(driver, rounds=vision_rounds):
+                    if _wait_recaptcha_cleared(driver, checkbox_ticked, timeout=8):
+                        _log("cleared after vision")
+                        return True
+                    solved = True
 
         if not solved:
             break

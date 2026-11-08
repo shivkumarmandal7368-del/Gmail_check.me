@@ -65,6 +65,8 @@ export interface Job {
   signOutSessions?: boolean;
   /** Email-only flow: stop after robot vs password page */
   robotCheckOnly?: boolean;
+  /** Stop after the password page: sahi, changed, or wrong. */
+  passwordOnly?: boolean;
 
   /** Progress */
   total: number;
@@ -158,6 +160,7 @@ export function createJob(params: {
   changePasswordAfterLogin?: boolean;
   signOutSessions?: boolean;
   robotCheckOnly?: boolean;
+  passwordOnly?: boolean;
 }): Job {
   const id = randomBytes(8).toString("hex");
   const job: Job = {

@@ -18,14 +18,25 @@ function isDeleteReason(reason: string): boolean {
  * browser results persisted before the category field was added.
  */
 export function getBrowserResultCategory(result: BrowserResultForCategory): BrowserResultCategory {
-  if (result.status === "opened") return "open";
+  if (result.status === "opened" || result.status === "password_ok") return "open";
 
-  // wrong_password and 2fa_required are definitive negative signals — not_open
-  if (result.status === "wrong_password" || result.status === "2fa_required") return "not_open";
+  if (result.status === "wrong_password" || result.status === "password_changed") return "delete";
+
+  const reasonLower = (result.reason ?? "").toLowerCase();
+  if (
+    reasonLower.includes("password changed")
+    || (reasonLower.includes("password") && reasonLower.includes("changed") && reasonLower.includes("ago"))
+  ) return "delete";
+
+  if (result.status === "2fa_required") return "not_open";
+
+  // "did not say sahi, changed, or wrong" contains the word changed.
+  // That sentence means the page was unclear, so it stays unknown.
+  if (result.status === "unknown") return "unknown";
 
   if (result.status !== "verification_required") return "unknown";
 
-  const reason = (result.reason ?? "").toLowerCase();
+  const reason = reasonLower;
   // Re-check Delete results by reason so stale persisted results created by
   // the previous broader rule cannot remain in the Delete bucket.
   if (result.category === "delete") return isDeleteReason(reason) ? "delete" : "not_open";

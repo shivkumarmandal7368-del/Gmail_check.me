@@ -15,6 +15,8 @@ export type BrowserLoginStatus =
   | "opened"
   | "verification_required"
   | "wrong_password"
+  | "password_ok"
+  | "password_changed"
   | "2fa_required"
   | "unknown";
 
@@ -89,6 +91,8 @@ export interface BrowserLoginResult {
   fingerprintData?: FingerprintData;
   proxySession?: string;   // unique sticky-session ID → proof of different IP per account
   durationMs?: number;     // how long this account took end-to-end (ms)
+  /** True when Google showed I'm not a robot during this check. */
+  captcha?: boolean;
 }
 
 function getPython3(): string {
@@ -173,6 +177,7 @@ async function checkOneAccount(
   changePasswordAfterLogin = false,
   robotCheckOnly = false,
   signOutSessions = false,
+  passwordOnly = false,
   onLog?: (email: string, line: string) => void,
 ): Promise<BrowserLoginResult> {
   let totpCode: string | null = null;
@@ -192,6 +197,7 @@ async function checkOneAccount(
     changePasswordAfterLogin,
     ...(signOutSessions ? { signOutSessions: true } : {}),
     ...(robotCheckOnly ? { robotCheckOnly: true } : {}),
+    ...(passwordOnly ? { passwordOnly: true } : {}),
   });
 
   console.log(`[BROWSER] ${email} — spawning Python UC checker`);
@@ -258,7 +264,10 @@ async function checkOneAccount(
       killSet?.delete(proc);
 
       // The Python script prints exactly one JSON line to stdout
-      const lastLine = stdout.trim().split("\n").filter(Boolean).pop() ?? "";
+      const lastLine = stdout.trim().split("\n").filter((line) => {
+        const t = line.trim();
+        return t.startsWith("{") && t.endsWith("}");
+      }).pop() ?? "";
       try {
         const parsed = JSON.parse(lastLine);
         resolve({
@@ -281,6 +290,7 @@ async function checkOneAccount(
           durationMs: typeof parsed.durationMs === "number" ? parsed.durationMs : undefined,
           newPassword: typeof parsed.newPassword === "string" ? parsed.newPassword : undefined,
           robotOutcome: typeof parsed.robotOutcome === "string" ? parsed.robotOutcome : undefined,
+          captcha: parsed.captcha === true,
         });
       } catch {
         const snippet = (stderr || stdout).slice(-400);
@@ -341,6 +351,7 @@ export async function browserLoginCheck(
   changePasswordAfterLogin = false,
   robotCheckOnly = false,
   signOutSessions = false,
+  passwordOnly = false,
   onLog?: (email: string, line: string) => void, // Python progress for the browser terminal
 ): Promise<BrowserLoginResult[]> {
   // Proxy selection: rotation list takes priority over single proxy
@@ -396,6 +407,7 @@ export async function browserLoginCheck(
         changePasswordAfterLogin,
         robotCheckOnly,
         signOutSessions,
+        passwordOnly,
         onLog,
       ).catch(
         (err: unknown) => ({
