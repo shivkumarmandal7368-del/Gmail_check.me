@@ -649,15 +649,19 @@ def _cdp_click_named_button(driver: "WebDriver", labels: tuple[str, ...]) -> boo
     driver.switch_to.default_content()
     for frame in frames:
         try:
-            rect = driver.execute_script(
-                "var r=arguments[0].getBoundingClientRect(); return {x:r.left,y:r.top,w:r.width,h:r.height};",
-                frame,
-            ) or {}
+            size = frame.size or {}
+            loc = frame.location or {}
+            rect = {
+                "x": float(loc.get("x") or 0),
+                "y": float(loc.get("y") or 0),
+                "w": float(size.get("width") or 0),
+                "h": float(size.get("height") or 0),
+            }
         except Exception:
             continue
-        if float(rect.get("w") or 0) < 80 or float(rect.get("h") or 0) < 60:
+        if rect["w"] < 80 or rect["h"] < 40:
             continue
-        if float(rect.get("y") or 0) < -20 or float(rect.get("x") or 0) < -20:
+        if rect["y"] < -20 or rect["x"] < -20:
             continue
         try:
             driver.switch_to.default_content()
