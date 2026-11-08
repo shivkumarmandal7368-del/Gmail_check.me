@@ -638,6 +638,15 @@ def _cdp_click_named_button(driver: "WebDriver", labels: tuple[str, ...]) -> boo
         """) or []
     except Exception:
         frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+    parents = list(frames)
+    for parent in parents:
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(parent)
+            frames.extend(driver.find_elements(By.CSS_SELECTOR, "iframe"))
+        except Exception:
+            pass
+    driver.switch_to.default_content()
     for frame in frames:
         try:
             rect = driver.execute_script(
