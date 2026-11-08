@@ -621,62 +621,63 @@ def _cdp_click_audio_button(driver: "WebDriver") -> bool:
 
 
 def _cdp_click_named_button(driver: "WebDriver", labels: tuple[str, ...]) -> bool:
-    """Trusted click on PLAY / reload inside the challenge iframe."""
+    """Trusted click on PLAY / reload. Use the iframe that actually contains the button."""
     from selenium.webdriver.common.by import By
 
     driver.switch_to.default_content()
-    if not _switch_challenge_frame(driver):
-        return False
-    local = driver.execute_script(
-        """
-        var labels = arguments[0];
-        var nodes = document.querySelectorAll('button, div[role="button"]');
-        for (var i = 0; i < nodes.length; i++) {
-          var t = ((nodes[i].innerText || nodes[i].getAttribute('aria-label') || nodes[i].getAttribute('title') || '') + '').trim().toUpperCase();
-          for (var j = 0; j < labels.length; j++) {
-            if (t === labels[j] || t.indexOf(labels[j]) === 0) {
-              var r = nodes[i].getBoundingClientRect();
-              if (r.width > 8 && r.height > 8) return {x: r.left, y: r.top, w: r.width, h: r.height, t: t};
-            }
-          }
-        }
-        return null;
-        """,
-        list(labels),
-    ) or {}
-    driver.switch_to.default_content()
-    if float(local.get("w") or 0) < 8:
-        return False
-    outer = {"x": 0, "y": 0}
-    try:
-        frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
-        for frame in frames:
-            src = ((frame.get_attribute("src") or "") + (frame.get_attribute("title") or "")).lower()
-            if "bframe" not in src and "challenge" not in src:
-                continue
+    frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+    for frame in frames:
+        try:
             rect = driver.execute_script(
                 "var r=arguments[0].getBoundingClientRect(); return {x:r.left,y:r.top,w:r.width,h:r.height};",
                 frame,
             ) or {}
-            if float(rect.get("w") or 0) < 80 or float(rect.get("y") or 0) < -20:
-                continue
-            outer = rect
-            break
-    except Exception:
-        pass
-    x = float(outer.get("x") or 0) + float(local["x"]) + float(local["w"]) / 2
-    y = float(outer.get("y") or 0) + float(local["y"]) + float(local["h"]) / 2
-    for typ, buttons in (("mousePressed", 1), ("mouseReleased", 0)):
-        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
-            "type": typ,
-            "x": x,
-            "y": y,
-            "button": "left",
-            "buttons": buttons,
-            "clickCount": 1,
-        })
-    _log(f"audio {local.get('t')} click at {int(x)},{int(y)}")
-    return True
+        except Exception:
+            continue
+        if float(rect.get("w") or 0) < 80 or float(rect.get("h") or 0) < 60:
+            continue
+        if float(rect.get("y") or 0) < -20 or float(rect.get("x") or 0) < -20:
+            continue
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(frame)
+            local = driver.execute_script(
+                """
+                var labels = arguments[0];
+                var nodes = document.querySelectorAll('button, div[role="button"]');
+                for (var i = 0; i < nodes.length; i++) {
+                  var t = ((nodes[i].innerText || nodes[i].getAttribute('aria-label') || nodes[i].getAttribute('title') || '') + '').trim().toUpperCase();
+                  for (var j = 0; j < labels.length; j++) {
+                    if (t === labels[j] || t.indexOf(labels[j]) === 0) {
+                      var r = nodes[i].getBoundingClientRect();
+                      if (r.width > 8 && r.height > 8) return {x: r.left, y: r.top, w: r.width, h: r.height, t: t};
+                    }
+                  }
+                }
+                return null;
+                """,
+                list(labels),
+            ) or {}
+        except Exception:
+            local = {}
+        if float(local.get("w") or 0) < 8:
+            continue
+        x = float(rect["x"]) + float(local["x"]) + float(local["w"]) / 2
+        y = float(rect["y"]) + float(local["y"]) + float(local["h"]) / 2
+        driver.switch_to.default_content()
+        for typ, buttons in (("mousePressed", 1), ("mouseReleased", 0)):
+            driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                "type": typ,
+                "x": x,
+                "y": y,
+                "button": "left",
+                "buttons": buttons,
+                "clickCount": 1,
+            })
+        _log(f"audio {local.get('t')} click at {int(x)},{int(y)}")
+        return True
+    driver.switch_to.default_content()
+    return False
 
 
 def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bool:
@@ -743,6 +744,20 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
         if not _cdp_click_named_button(driver, ("PLAY",)):
             _log("audio PLAY button not clicked")
         time.sleep(1.3)
+        try:
+            if _switch_challenge_frame(driver):
+                state = driver.execute_script(
+                    """
+                    var a = document.querySelector('#audio-source, audio');
+                    return a ? {
+                      paused: a.paused, t: a.currentTime, dur: a.duration, ready: a.readyState,
+                      src: String(a.currentSrc || a.src || '').slice(0, 80)
+                    } : {missing: true};
+                    """
+                )
+                _log(f"audio element {state}")
+        except Exception as exc:
+            _log(f"audio element state failed: {exc}")
         _snap(driver, "Captcha audio")
 
         # The phone proxy often takes several seconds to paint the audio clip.
