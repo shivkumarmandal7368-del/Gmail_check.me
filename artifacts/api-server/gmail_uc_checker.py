@@ -1922,9 +1922,11 @@ def _click_recaptcha_from_frame(driver) -> str:
     _cdp_click_xy(driver, x, y)
     # One trusted click. element.click() inside the iframe opens the image
     # puzzle and the account lands in NOT OPEN.
-    outcome = _poll_recaptcha_after_click(driver, 1.2)
+    outcome = _poll_recaptcha_after_click(driver, 1.6)
     if outcome != "pending":
         return outcome
+    if _recaptcha_checkbox_ticked(driver):
+        return "passed"
     log(f"reCAPTCHA checkbox click did not open a challenge aria={state.get('aria')}")
     return "miss"
 
@@ -2351,9 +2353,13 @@ def handle_recaptcha_checkbox(
                 time.sleep(0.18 if pace.get("password_only") else 0.35)
                 continue
             misses += 1
-            if pace.get("password_only") or misses >= 2:
+            max_miss = 5 if pace.get("password_only") else 2
+            if misses >= max_miss:
                 log(f"{email} — reCAPTCHA click attempts exhausted")
                 break
+            if outcome == "miss" and pace.get("password_only"):
+                time.sleep(0.35)
+                continue
             log(f"{email} — reCAPTCHA click attempt {attempt} did not tick — retry")
             time.sleep(0.3)
 
@@ -2442,14 +2448,30 @@ def handle_recaptcha_checkbox(
                 from recaptcha_free_solver import run_free_captcha_pipeline
                 from recaptcha_solver import captcha_solver_configured, try_solve_recaptcha_on_page
 
-                if (
-                    _rc_result in ("image", "timeout", "missed")
-                    and not pace.get("password_only")
-                ):
-                    log(f"{email} — free captcha pipeline (audio first, then vision)…")
-                    if run_free_captcha_pipeline(driver, _recaptcha_checkbox_ticked, max_cycles=1):
-                        _rc_result = "passed"
-                        log(f"{email} — free captcha pipeline OK")
+                if _rc_result in ("image", "timeout", "missed"):
+                    if pace.get("password_only"):
+                        log(f"{email} — password-only: audio captcha…")
+                        if run_free_captcha_pipeline(
+                            driver,
+                            _recaptcha_checkbox_ticked,
+                            max_cycles=2,
+                            grace_s=0.15,
+                            skip_vision=True,
+                        ):
+                            _rc_result = "passed"
+                            log(f"{email} — password-only: audio captcha OK")
+                        elif _recaptcha_checkbox_ticked(driver):
+                            _wait_password_after_recaptcha_tick(driver, page_state, pace)
+                            if (
+                                _password_field_visible(driver, 0.25)
+                                or "challenge/pwd" in (_live_url(driver) or "").lower()
+                            ):
+                                _rc_result = "passed"
+                    else:
+                        log(f"{email} — free captcha pipeline (audio first, then vision)…")
+                        if run_free_captcha_pipeline(driver, _recaptcha_checkbox_ticked, max_cycles=1):
+                            _rc_result = "passed"
+                            log(f"{email} — free captcha pipeline OK")
 
                 if _rc_result != "passed" and captcha_solver_configured() and not pace.get("password_only"):
                     log(f"{email} — image/timeout captcha — sending to solver API…")
@@ -3121,9 +3143,9 @@ def _login_pace(proxy_url: str | None, password_only: bool = False) -> dict:
         "email_nav_s": 14 if turbo else (22 if fast else 12),
         "pwd_nav_s": 3.5 if turbo else (8 if fast else 8),
         "pwd_poll_s": 1.5 if turbo else (5 if fast else 8),
-        "rc_click_s": 8 if turbo else (16 if fast else 18),
-        "rc_recover_s": 6 if turbo else (16 if fast else 18),
-        "rc_post_tick_s": 5 if turbo else 8,
+        "rc_click_s": 12 if turbo else (16 if fast else 18),
+        "rc_recover_s": 8 if turbo else (16 if fast else 18),
+        "rc_post_tick_s": 6 if turbo else 8,
         "rc_blank_reload_s": 4.0 if turbo else (5.0 if fast else 7.0),
         "rc_anchor_ready_s": 0.25 if turbo else (0.45 if fast else 0.6),
         "rc_nav_s": 5 if turbo else (6 if fast else 12),
