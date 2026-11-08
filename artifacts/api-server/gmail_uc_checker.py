@@ -3026,8 +3026,8 @@ def _login_pace(proxy_url: str | None, password_only: bool = False) -> dict:
         "rc_poll_s": 0.15 if turbo else (0.2 if fast else 0.4),
         "rc_wait_s": 3 if turbo else (4 if fast else 8),
         "email_nav_s": 14 if turbo else (22 if fast else 12),
-        "pwd_nav_s": 5 if turbo else (8 if fast else 8),
-        "pwd_poll_s": 4 if turbo else (5 if fast else 8),
+        "pwd_nav_s": 3.5 if turbo else (8 if fast else 8),
+        "pwd_poll_s": 1.5 if turbo else (5 if fast else 8),
         "rc_click_s": 8 if turbo else (16 if fast else 18),
         "rc_recover_s": 6 if turbo else (16 if fast else 18),
         "rc_post_tick_s": 5 if turbo else 8,
@@ -9184,33 +9184,29 @@ def _do_login(
             log(f"{email} — password Next {state}")
         except Exception:
             pass
-        nxt = wait_for_any(["#passwordNext button", "#passwordNext [role='button']", "#passwordNext"], timeout=2)
-        clicked = False
-        if nxt and _trusted_button_click(driver, nxt):
-            clicked = True
+        nxt = wait_for_any(["#passwordNext button", "#passwordNext [role='button']", "#passwordNext"], timeout=1)
+        clicked = bool(nxt and _trusted_button_click(driver, nxt))
+        if clicked:
             log(f"{email} — password Next clicked")
-        elif _click_button_text(driver, ("Next",)):
-            clicked = True
-            log(f"{email} — password Next clicked by label")
-        try:
-            js_clicked = driver.execute_script(
-                """
-                var nodes = Array.from(document.querySelectorAll('button, [role="button"]'));
-                var next = nodes.find(function(b) {
-                  return (b.innerText || b.textContent || '').trim() === 'Next';
-                });
-                if (!next) return false;
-                next.click();
-                return true;
-                """
-            )
-            if js_clicked and not clicked:
+        else:
+            try:
+                clicked = bool(driver.execute_script(
+                    """
+                    var nodes = Array.from(document.querySelectorAll('button, [role="button"]'));
+                    var next = nodes.find(function(b) {
+                      return (b.innerText || b.textContent || '').trim() === 'Next';
+                    });
+                    if (!next) return false;
+                    next.click();
+                    return true;
+                    """
+                ))
+            except Exception:
+                clicked = False
+            if clicked:
                 log(f"{email} — password Next clicked in the page")
-            clicked = clicked or bool(js_clicked)
-        except Exception:
-            pass
-        if not clicked:
-            log(f"{email} — password Next control not found")
+            else:
+                log(f"{email} — password Next control not found")
         try:
             _press_enter()
             log(f"{email} — password Enter pressed")
@@ -9228,28 +9224,34 @@ def _do_login(
     _pw_next_at = time.time()
     while time.time() < _nav_deadline:
         try:
-            _cur = _live_url(driver)
-            if _cur != _pre_pwd_url and "challenge/pwd" not in _cur:
+            _cur = (_live_url(driver) or "").lower()
+            # A new query string on the same Welcome card is not a result.
+            # Leave only when the password box itself is gone.
+            still_form = "challenge/pwd" in _cur or _password_field_visible(driver, 0.05)
+            if not still_form and "identifier" not in _cur and "recaptcha" not in _cur:
                 break
-            _, _body = page_state()
-            if any(x in _body for x in (
-                "wrong password", "didn't recognize", "incorrect password",
-                "password you entered",
-            )):
-                break
+            if still_form and (time.time() - _pw_next_at) > 0.6:
+                _err = driver.execute_script(
+                    "return ((document.body && document.body.innerText) || '').slice(0, 800).toLowerCase()"
+                ) or ""
+                if any(x in _err for x in (
+                    "wrong password", "didn't recognize", "incorrect password",
+                    "password you entered",
+                )):
+                    break
         except Exception:
             pass
         if (
             not _pw_retried
-            and (time.time() - _pw_next_at) > (1.2 if password_only and _phone_fast else 5)
+            and (time.time() - _pw_next_at) > (1.0 if password_only and _phone_fast else 5)
             and (
-                "challenge/pwd" in _live_url(driver)
-                or _password_field_visible(driver, 0.15)
+                "challenge/pwd" in (_live_url(driver) or "").lower()
+                or _password_field_visible(driver, 0.05)
             )
         ):
             log(f"{email} — password page still open, submitting again")
             try:
-                pw_field = wait_for_any(PW_SELECTORS, timeout=2) or pw_field
+                pw_field = _find_visible_password_field(driver) or pw_field
                 filled = driver.execute_script(
                     "return (arguments[0].value || '').length", pw_field,
                 ) or 0
@@ -9260,8 +9262,8 @@ def _do_login(
                 log(f"{email} — password refill: {exc}")
             _click_password_next()
             _pw_retried = True
-            _nav_deadline = max(_nav_deadline, time.time() + (3 if password_only and _phone_fast else 12))
-        time.sleep(0.15 if password_only and _phone_fast else 0.2)
+            _nav_deadline = max(_nav_deadline, time.time() + (1.6 if password_only and _phone_fast else 12))
+        time.sleep(0.1 if password_only and _phone_fast else 0.2)
     rand_sleep(80, 150) if (password_only and _phone_fast) else (rand_sleep(150, 300) if _phone_fast else rand_sleep(300, 600))
 
     tmark("password step done")
