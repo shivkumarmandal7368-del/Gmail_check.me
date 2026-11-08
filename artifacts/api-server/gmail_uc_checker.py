@@ -1872,7 +1872,8 @@ def _click_recaptcha_from_frame(driver) -> str:
     Returns passed | challenge | notready | error | miss.
     """
     driver.switch_to.default_content()
-    _widen_clipped_signin(driver, force=True)
+    # Resizing to 1280x900 on every attempt restarts the spinner and the
+    # checkbox never ticks. The phone view is the one the click is aimed at.
     meta = _recaptcha_anchor_meta(driver)
     frame = _top_recaptcha_anchor_iframe(driver)
     if frame is None and not meta:
@@ -2138,7 +2139,7 @@ def _password_only_recaptcha_recover(
     puzzle = _captcha_puzzle_visible(driver)
     if pace.get("password_only") and not puzzle:
         log(f"{email} — password-only: checkbox still open, retry until the row is painted")
-        deadline = time.time() + 4.0
+        deadline = time.time() + 2.0
         while time.time() < deadline:
             if _pwd_ready() or _recaptcha_checkbox_ticked(driver):
                 return _wait_password_after_recaptcha_tick(driver, page_state, pace) or _pwd_ready()
@@ -2297,11 +2298,9 @@ def handle_recaptcha_checkbox(
                 _rc_result = "passed"
                 log(f"{email} — reCAPTCHA already ticked (attempt {attempt})")
                 break
-            _image_open = (
-                _cdp_challenge_open_stable(driver)
-                if pace.get("password_only")
-                else _cdp_challenge_open(driver)
-            )
+            # A DOM pierce before every click was adding about a second per
+            # attempt, which is why captcha accounts sat near 40s.
+            _image_open = False if pace.get("password_only") else _cdp_challenge_open(driver)
             if _image_open:
                 log(f"{email} — reCAPTCHA challenge is open")
                 capture_step(driver, "Robot challenge")
@@ -2469,7 +2468,8 @@ def handle_recaptcha_checkbox(
                 from recaptcha_free_solver import run_free_captcha_pipeline
                 from recaptcha_solver import captcha_solver_configured, try_solve_recaptcha_on_page
 
-                if _rc_result in ("image", "timeout", "missed"):
+                puzzle_open = _rc_result == "image" or _captcha_puzzle_visible(driver)
+                if _rc_result in ("image", "timeout", "missed") and puzzle_open:
                     if pace.get("password_only"):
                         log(f"{email} — password-only: audio captcha…")
                         if run_free_captcha_pipeline(
@@ -3164,7 +3164,7 @@ def _login_pace(proxy_url: str | None, password_only: bool = False) -> dict:
         "email_nav_s": 14 if turbo else (22 if fast else 12),
         "pwd_nav_s": 3.5 if turbo else (8 if fast else 8),
         "pwd_poll_s": 1.5 if turbo else (5 if fast else 8),
-        "rc_click_s": 12 if turbo else (16 if fast else 18),
+        "rc_click_s": 7 if turbo else (16 if fast else 18),
         "rc_recover_s": 8 if turbo else (16 if fast else 18),
         "rc_post_tick_s": 6 if turbo else 8,
         "rc_blank_reload_s": 4.0 if turbo else (5.0 if fast else 7.0),
