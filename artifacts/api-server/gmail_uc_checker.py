@@ -1994,33 +1994,36 @@ def handle_recaptcha_checkbox(
         def _wait_widget(seconds: float) -> dict:
             deadline = time.time() + seconds
             started = time.time()
-            anchor_since = None
             found_now = {}
-            last_log = -5.0
+            last_log = 0.0
             while time.time() < deadline:
                 if _google_error_dialog_open(driver):
                     _clear_google_error_dialog(driver, email)
                     deadline = max(deadline, time.time() + 8)
-                    anchor_since = None
-                    time.sleep(0.4)
+                    time.sleep(0.2)
                     continue
-                found_now = _cdp_find_recaptcha(driver)
-                if found_now.get("checkbox"):
+                # Cheap JS iframe lookup first. Full CDP DOM pierce is 1–3s
+                # per poll and is why the log said "waiting" while the box
+                # was already on screen on a phone.
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+                frame = _top_recaptcha_anchor_iframe(driver)
+                if frame is None:
+                    frame = _find_recaptcha_anchor_iframe(driver)
+                if frame is not None:
+                    state = _read_recaptcha_anchor(driver, frame) or {}
+                    found_now = {
+                        "anchor": {"src": (state.get("href") or "iframe")},
+                        "checkbox": {"aria": state.get("aria")} if state.get("ready") else None,
+                    }
                     return found_now
-                if found_now.get("anchor"):
-                    if anchor_since is None:
-                        anchor_since = time.time()
-                    elif time.time() - anchor_since >= float(
-                        pace.get("rc_anchor_ready_s", 0.6)
-                    ):
-                        return found_now
-                else:
-                    anchor_since = None
                 waited = time.time() - started
-                if waited - last_log >= 3:
+                if waited >= 1.2 and waited - last_log >= 1.5:
                     last_log = waited
                     log(f"{email} — waiting for the robot checkbox ({int(waited)}s)")
-                time.sleep(0.15 if pace.get("password_only") else 0.25)
+                time.sleep(0.05)
             return found_now
 
         _widget_wait = float(pace.get("rc_wait_s", 6 if pace.get("fast") else 8))
@@ -2033,7 +2036,7 @@ def handle_recaptcha_checkbox(
                 driver.refresh()
             except Exception as exc:
                 log(f"{email} — robot page reload failed: {exc}")
-            found = _wait_widget(max(_widget_wait, 8))
+            found = _wait_widget(_widget_wait)
             if not (found.get("anchor") or found.get("checkbox")):
                 log(f"{email} — robot box still loading, reloading again")
                 try:
@@ -2041,7 +2044,7 @@ def handle_recaptcha_checkbox(
                     driver.refresh()
                 except Exception as exc:
                     log(f"{email} — robot page reload failed: {exc}")
-                found = _wait_widget(8)
+                found = _wait_widget(max(_widget_wait, 3))
         if found.get("anchor") or found.get("checkbox"):
             log(
                 f"{email} — reCAPTCHA widget in DOM "
@@ -2077,7 +2080,7 @@ def handle_recaptcha_checkbox(
             if _google_error_dialog_open(driver):
                 log(f"{email} — robot page said something went wrong")
                 _clear_google_error_dialog(driver, email)
-                _wait_widget(6)
+                _wait_widget(3 if pace.get("password_only") else 6)
                 continue
             if _recaptcha_checkbox_ticked(driver):
                 _rc_result = "passed"
@@ -2106,7 +2109,7 @@ def handle_recaptcha_checkbox(
                     driver.refresh()
                 except Exception as exc:
                     log(f"{email} — robot page reload failed: {exc}")
-                _wait_widget(6)
+                _wait_widget(3 if pace.get("password_only") else 6)
                 click_deadline = max(click_deadline, time.time() + 8)
                 continue
             if outcome == "notready":
@@ -2131,7 +2134,7 @@ def handle_recaptcha_checkbox(
                         driver.refresh()
                     except Exception as exc:
                         log(f"{email} — robot page reload failed: {exc}")
-                    _wait_widget(6)
+                    _wait_widget(3 if pace.get("password_only") else 6)
                     click_deadline = max(click_deadline, time.time() + 12)
                     continue
                 if attempt == 1 or attempt % 4 == 0:
@@ -2882,7 +2885,7 @@ def _login_pace(proxy_url: str | None, password_only: bool = False) -> dict:
         "skip_logout": fast,
         "rc_pre_click": (120, 280) if turbo else ((250, 500) if fast else (1200, 2200)),
         "rc_poll_s": 0.15 if turbo else (0.2 if fast else 0.4),
-        "rc_wait_s": 8 if turbo else (8 if fast else 10),
+        "rc_wait_s": 3 if turbo else (4 if fast else 8),
         "email_nav_s": 14 if turbo else (22 if fast else 12),
         "pwd_nav_s": 5 if turbo else (8 if fast else 8),
         "pwd_poll_s": 4 if turbo else (5 if fast else 8),
