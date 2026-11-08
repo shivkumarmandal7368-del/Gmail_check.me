@@ -2138,7 +2138,7 @@ def _password_only_recaptcha_recover(
         try:
             from recaptcha_free_solver import run_free_captcha_pipeline
             run_free_captcha_pipeline(
-                driver, _recaptcha_checkbox_ticked, max_cycles=1, grace_s=0.2,
+                driver, _recaptcha_checkbox_ticked, max_cycles=2, grace_s=0.15,
                 skip_vision=True,
             )
         except Exception as exc:
@@ -2423,10 +2423,12 @@ def handle_recaptcha_checkbox(
                     )
         else:
             driver.switch_to.default_content()
-            if pace.get("password_only"):
-                _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
+            if _recaptcha_checkbox_ticked(driver):
+                _rc_result = "passed"
+            elif _cdp_challenge_open(driver):
+                _rc_result = "image"
             else:
-                _rc_result = "image" if _cdp_challenge_open(driver) else "timeout"
+                _rc_result = "timeout"
 
         if _rc_result != "passed":
             try:
