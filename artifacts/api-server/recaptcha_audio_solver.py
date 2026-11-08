@@ -63,7 +63,7 @@ def preload_whisper() -> None:
     if _whisper_model is not None:
         return
     from faster_whisper import WhisperModel
-    model_name = os.environ.get("WHISPER_MODEL", "tiny.en")
+    model_name = os.environ.get("WHISPER_MODEL", "base.en")
     _log(f"preloading Whisper {model_name}")
     _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
 
@@ -118,7 +118,7 @@ def _transcribe_audio(path: str) -> str | None:
     except ImportError:
         _log("install faster-whisper on VPS: .venv/bin/pip install faster-whisper")
         return None
-    model_name = os.environ.get("WHISPER_MODEL", "tiny.en")
+    model_name = os.environ.get("WHISPER_MODEL", "base.en")
     if _whisper_model is None:
         _log(f"loading Whisper model {model_name} (first run downloads model weights)…")
         _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
@@ -670,6 +670,19 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
                 continue
             answer = _transcribe_audio(audio_path)
             if not answer:
+                _log("bad transcript, reloading the audio clip")
+                try:
+                    if not _switch_challenge_frame(driver):
+                        driver.switch_to.default_content()
+                    driver.execute_script(
+                        """
+                        var b = document.querySelector('#recaptcha-reload-button, .rc-button-reload');
+                        if (b) b.click();
+                        """
+                    )
+                except Exception:
+                    pass
+                time.sleep(0.6)
                 driver.switch_to.default_content()
                 continue
             resp = None
