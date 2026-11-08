@@ -455,7 +455,7 @@ def _download_challenge_audio(driver: "WebDriver", session) -> str | None:
         if b64:
             import base64
             raw = base64.b64decode(b64)
-            if len(raw) > 100:
+            if len(raw) > 8000:
                 suffix = ".mp3" if url.lower().split("?")[0].endswith(".mp3") else ".wav"
                 tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
                 tmp.write(raw)
@@ -467,6 +467,9 @@ def _download_challenge_audio(driver: "WebDriver", session) -> str | None:
         session.cookies.set(c["name"], c["value"], domain=c.get("domain"))
     r = session.get(url, timeout=30)
     r.raise_for_status()
+    if len(r.content) < 8000:
+        _log(f"audio clip too small ({len(r.content)})")
+        return None
     suffix = ".mp3" if "mpeg" in (r.headers.get("content-type") or "") else ".wav"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp.write(r.content)

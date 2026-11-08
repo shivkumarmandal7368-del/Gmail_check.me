@@ -1178,9 +1178,22 @@ def _cdp_touch_xy(driver, x: float, y: float) -> None:
         log(f"reCAPTCHA touch click skipped: {exc}")
 
 
-def _widen_clipped_signin(driver) -> None:
+def _widen_clipped_signin(driver, force: bool = False) -> None:
     """The Welcome card is wider than the phone view, so Next is drawn off-screen."""
     try:
+        if force:
+            driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                "width": 1280,
+                "height": 900,
+                "deviceScaleFactor": 1,
+                "mobile": False,
+            })
+            try:
+                driver.set_window_size(1280, 900)
+            except Exception:
+                pass
+            log("widened sign-in view to 1280x900 so Next is on screen")
+            return
         box = driver.execute_script(
             """
             var next = Array.from(document.querySelectorAll('button, [role="button"]'))
@@ -2092,7 +2105,7 @@ def _password_only_recaptcha_recover(
             from recaptcha_free_solver import run_free_captcha_pipeline
             run_free_captcha_pipeline(
                 driver, _recaptcha_checkbox_ticked, max_cycles=1, grace_s=0.3,
-                skip_vision=True,
+                vision_rounds=1,
             )
         except Exception as exc:
             log(f"{email} — audio try skipped: {exc}")
@@ -9221,7 +9234,7 @@ def _do_login(
             })
 
     def _click_password_next() -> None:
-        _widen_clipped_signin(driver)
+        _widen_clipped_signin(driver, force=True)
         try:
             state = driver.execute_script(
                 """
@@ -9270,10 +9283,18 @@ def _do_login(
     _pwd_wait_s = float(_pace.get("pwd_nav_s", 8))
     _nav_deadline = time.time() + _pwd_wait_s
     _pw_retried = False
+    _conn_wait = False
     _pw_next_at = time.time()
     while time.time() < _nav_deadline:
         try:
             _cur = (_live_url(driver) or "").lower()
+            if "checkconnection" in _cur:
+                if not _conn_wait:
+                    log(f"{email} — password request still checking the connection")
+                    _conn_wait = True
+                    _nav_deadline = max(_nav_deadline, time.time() + 4)
+                time.sleep(0.15)
+                continue
             # A new query string on the same Welcome card is not a result.
             # Leave only when the password box itself is gone.
             still_form = "challenge/pwd" in _cur or _password_field_visible(driver, 0.05)
