@@ -17,6 +17,8 @@ export type BrowserLoginStatus =
   | "wrong_password"
   | "password_ok"
   | "password_changed"
+  | "totp_ok"
+  | "totp_wrong"
   | "2fa_required"
   | "unknown";
 
@@ -178,6 +180,7 @@ async function checkOneAccount(
   robotCheckOnly = false,
   signOutSessions = false,
   passwordOnly = false,
+  verifyTotp = false,
   onLog?: (email: string, line: string) => void,
 ): Promise<BrowserLoginResult> {
   let totpCode: string | null = null;
@@ -198,6 +201,7 @@ async function checkOneAccount(
     ...(signOutSessions ? { signOutSessions: true } : {}),
     ...(robotCheckOnly ? { robotCheckOnly: true } : {}),
     ...(passwordOnly ? { passwordOnly: true } : {}),
+    ...(verifyTotp ? { verifyTotp: true } : {}),
   });
 
   console.log(`[BROWSER] ${email} — spawning Python UC checker`);
@@ -352,6 +356,7 @@ export async function browserLoginCheck(
   robotCheckOnly = false,
   signOutSessions = false,
   passwordOnly = false,
+  verifyTotp = false,
   onLog?: (email: string, line: string) => void, // Python progress for the browser terminal
 ): Promise<BrowserLoginResult[]> {
   // Proxy selection: rotation list takes priority over single proxy
@@ -408,6 +413,7 @@ export async function browserLoginCheck(
         robotCheckOnly,
         signOutSessions,
         passwordOnly,
+        verifyTotp,
         onLog,
       ).catch(
         (err: unknown) => ({

@@ -5,7 +5,7 @@ import { getBrowserResultCategory } from "@/lib/browserResultCategory"
 
 // Extended result type: adds "checking" in-flight status + per-account timing + original credentials
 type ExtBrowserResult = Omit<BrowserLoginResult, "status"> & {
-  status: BrowserLoginResult["status"] | "checking";
+  status: BrowserLoginResult["status"] | "checking" | "password_ok" | "password_changed" | "totp_ok" | "totp_wrong";
   category?: BrowserLoginResult["category"];
   durationMs?: number;
   /** Original password from input — preserved for export */
@@ -25,7 +25,7 @@ import { Progress } from "@/components/ui/progress"
 import {
   Download, Terminal, CheckCircle2, XCircle, AlertTriangle,
   HelpCircle, Activity, ShieldAlert, Smartphone,
-  Lock, LogOut, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle, Zap, Bot, KeyRound
+  Lock, LogOut, MailCheck, MailX, RefreshCw, Globe, Loader2, Trash2, PauseCircle, PlayCircle, Zap, Bot, KeyRound, ShieldCheck
 } from "lucide-react"
 import { RobotChecker } from "@/pages/RobotChecker";
 
@@ -103,7 +103,7 @@ function BrowserChecker() {
   // ── localStorage keys ────────────────────────────────────────────────────
   const LS = {
     input: "vbc_input", proxy: "vbc_proxy", proxyMode: "vbc_proxy_mode", concurrency: "vbc_conc",
-    fresh: "vbc_fresh", changePw: "vbc_change_pw", deviceLogout: "vbc_device_logout", passwordOnly: "vbc_password_only", device: "vbc_device", results: "vbc_results", total: "vbc_total",
+    fresh: "vbc_fresh", changePw: "vbc_change_pw", deviceLogout: "vbc_device_logout", passwordOnly: "vbc_password_only", verifyTotp: "vbc_verify_totp", device: "vbc_device", results: "vbc_results", total: "vbc_total",
     active: "vbc_active", savedAt: "vbc_saved_at", jobId: "vbc_job_id",
     creds: "vbc_creds",
   } as const;
@@ -119,6 +119,7 @@ function BrowserChecker() {
   const [changePasswordAfterLogin, setChangePasswordAfterLogin] = useState<boolean>(() => lsGet(LS.changePw, false));
   const [deviceLogout, setDeviceLogout] = useState<boolean>(() => lsGet(LS.deviceLogout, false));
   const [passwordOnly, setPasswordOnly] = useState<boolean>(() => lsGet(LS.passwordOnly, false));
+  const [verifyTotp, setVerifyTotp] = useState<boolean>(() => lsGet(LS.verifyTotp, false));
   const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
 
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
@@ -188,6 +189,7 @@ function BrowserChecker() {
   useEffect(() => { try { localStorage.setItem(LS.changePw, JSON.stringify(changePasswordAfterLogin)); } catch {} }, [changePasswordAfterLogin]);
   useEffect(() => { try { localStorage.setItem(LS.deviceLogout, JSON.stringify(deviceLogout)); } catch {} }, [deviceLogout]);
   useEffect(() => { try { localStorage.setItem(LS.passwordOnly, JSON.stringify(passwordOnly)); } catch {} }, [passwordOnly]);
+  useEffect(() => { try { localStorage.setItem(LS.verifyTotp, JSON.stringify(verifyTotp)); } catch {} }, [verifyTotp]);
   useEffect(() => { try { localStorage.setItem(LS.device,      JSON.stringify(deviceIndex));  } catch {} }, [deviceIndex]);
   useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
   useEffect(() => { try { localStorage.setItem(LS.total,       JSON.stringify(total));        } catch {} }, [total]);
@@ -540,8 +542,9 @@ function BrowserChecker() {
       ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
       concurrency: 1, freshProfile, deviceIndex,
       ...(passwordOnly ? { passwordOnly: true } : {}),
-      ...(!passwordOnly && changePasswordAfterLogin ? { changePasswordAfterLogin: true } : {}),
-      ...(!passwordOnly && deviceLogout ? { signOutSessions: true } : {}),
+      ...(verifyTotp ? { verifyTotp: true } : {}),
+      ...(!passwordOnly && !verifyTotp && changePasswordAfterLogin ? { changePasswordAfterLogin: true } : {}),
+      ...(!passwordOnly && !verifyTotp && deviceLogout ? { signOutSessions: true } : {}),
     });
   };
 
@@ -806,21 +809,33 @@ function BrowserChecker() {
       opened: "Opened", verification_required: "Verify Required",
       wrong_password: "Password wrong", "2fa_required": "2FA Required",
       password_ok: "Password sahi", password_changed: "Password changed",
+      totp_ok: "2FA sahi", totp_wrong: "2FA galat",
       unknown: "Unknown", checking: "Checking",
     };
     return map[status] ?? status;
   };
 
-  const downloadExcel = (rows: ExtBrowserResult[], name: string) => {
+  const downloadExcel = (
+    rows: ExtBrowserResult[],
+    name: string,
+    extraSheets?: Array<{ name: string; rows: ExtBrowserResult[] }>,
+  ) => {
     const header = ["Gmail", "Password", "2FA"];
-    const data = rows.map(r => {
-      const fresh = (r as { newPassword?: string }).newPassword;
-      return [r.email, fresh || r.password || "", r.totpSecret ?? ""];
-    });
-    const worksheet = XLSX.utils.aoa_to_sheet([header, ...data]);
-    worksheet["!cols"] = [{ wch: 36 }, { wch: 22 }, { wch: 28 }];
+    const toSheet = (list: ExtBrowserResult[]) => {
+      const data = list.map(r => {
+        const fresh = (r as { newPassword?: string }).newPassword;
+        return [r.email, fresh || r.password || "", r.totpSecret ?? ""];
+      });
+      const worksheet = XLSX.utils.aoa_to_sheet([header, ...data]);
+      worksheet["!cols"] = [{ wch: 36 }, { wch: 22 }, { wch: 28 }];
+      return worksheet;
+    };
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Gmail");
+    const firstName = extraSheets?.length ? "Captcha" : "Gmail";
+    XLSX.utils.book_append_sheet(workbook, toSheet(rows), firstName.slice(0, 31));
+    for (const sheet of extraSheets ?? []) {
+      XLSX.utils.book_append_sheet(workbook, toSheet(sheet.rows), sheet.name.slice(0, 31));
+    }
     const buffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
     const blob = new Blob([buffer], {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1082,25 +1097,46 @@ function BrowserChecker() {
               </p>
             </button>
 
-            <button onClick={() => !isChecking && setPasswordOnly(v => !v)} disabled={isChecking}
-              className={cn("w-full rounded-lg border p-3 text-left transition-colors",
-                passwordOnly ? "border-emerald-500/40 bg-emerald-500/5" : "border-border bg-card/30 opacity-60")}>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-400/80 flex items-center gap-1">
-                  <KeyRound className="w-3 h-3" /> Sirf password
-                </span>
-                <div className={cn("w-8 h-4 rounded-full transition-colors relative", passwordOnly ? "bg-emerald-500" : "bg-border")}>
-                  <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", passwordOnly ? "left-4" : "left-0.5")} />
+            <div className="rounded-lg border border-border/80 p-2 space-y-2">
+              <p className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground px-1">Password check</p>
+              <button type="button" onClick={() => !isChecking && setPasswordOnly(v => !v)} disabled={isChecking}
+                className={cn("w-full rounded-lg border p-3 text-left transition-colors",
+                  passwordOnly ? "border-emerald-500/40 bg-emerald-500/5" : "border-border bg-card/30 opacity-60")}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-400/80 flex items-center gap-1">
+                    <KeyRound className="w-3 h-3" /> Sirf password
+                  </span>
+                  <div className={cn("w-8 h-4 rounded-full transition-colors relative", passwordOnly ? "bg-emerald-500" : "bg-border")}>
+                    <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", passwordOnly ? "left-4" : "left-0.5")} />
+                  </div>
                 </div>
-              </div>
-              <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
-                {passwordOnly
-                  ? "Password ke baad ruk jaata hai. Result: Password sahi, Password changed, ya Password wrong. 2FA, password change, aur device logout nahi chalenge."
-                  : "Off: password ke baad 2FA aur baaki steps chalte hain."}
-              </p>
-            </button>
+                <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
+                  {passwordOnly
+                    ? "Password ke baad ruk jaata hai. Result: Password sahi, Password changed, ya Password wrong. Password change aur device logout nahi chalenge."
+                    : "Off: password ke baad baaki steps chalte hain."}
+                </p>
+              </button>
 
-            <button onClick={() => !isChecking && setChangePasswordAfterLogin(v => !v)} disabled={isChecking || passwordOnly}
+              <button type="button" onClick={() => !isChecking && setVerifyTotp(v => !v)} disabled={isChecking}
+                className={cn("w-full rounded-lg border p-3 text-left transition-colors",
+                  verifyTotp ? "border-sky-500/40 bg-sky-500/5" : "border-border bg-card/30 opacity-60")}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] font-mono uppercase tracking-widest text-sky-400/80 flex items-center gap-1">
+                    <ShieldCheck className="w-3 h-3" /> 2FA verify
+                  </span>
+                  <div className={cn("w-8 h-4 rounded-full transition-colors relative", verifyTotp ? "bg-sky-500" : "bg-border")}>
+                    <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", verifyTotp ? "left-4" : "left-0.5")} />
+                  </div>
+                </div>
+                <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
+                  {verifyTotp
+                    ? "Password sahi ke baad Google Authenticator challenge di hui secret se complete karega. Result: 2FA sahi ya 2FA galat. Key change nahi hoti — line ka 3rd field use hota hai."
+                    : "Off: 2FA challenge skip (sirf password) ya full login ke hisaab se."}
+                </p>
+              </button>
+            </div>
+
+            <button onClick={() => !isChecking && setChangePasswordAfterLogin(v => !v)} disabled={isChecking || passwordOnly || verifyTotp}
               className={cn("w-full rounded-lg border p-3 text-left transition-colors",
                 changePasswordAfterLogin ? "border-amber-500/40 bg-amber-500/5" : "border-border bg-card/30 opacity-60")}>
               <div className="flex items-center justify-between mb-1">
@@ -1118,7 +1154,7 @@ function BrowserChecker() {
               </p>
             </button>
 
-            <button onClick={() => !isChecking && setDeviceLogout(v => !v)} disabled={isChecking || passwordOnly}
+            <button onClick={() => !isChecking && setDeviceLogout(v => !v)} disabled={isChecking || passwordOnly || verifyTotp}
               className={cn("w-full rounded-lg border p-3 text-left transition-colors",
                 deviceLogout ? "border-rose-500/40 bg-rose-500/5" : "border-border bg-card/30 opacity-60")}>
               <div className="flex items-center justify-between mb-1">
@@ -1368,8 +1404,12 @@ function BrowserChecker() {
                   <Download className="w-3 h-3 mr-1" />.TXT
                 </Button>
                 <Button variant="outline" size="sm"
-                  onClick={() => downloadExcel(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
-                  disabled={displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
+                  onClick={() => activeList === "opened"
+                    ? downloadExcel(openCaptcha, "gmail_open", [{ name: "Captcha not", rows: openNoCaptcha }])
+                    : downloadExcel(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
+                  disabled={activeList === "opened"
+                    ? openCaptcha.length === 0 && openNoCaptcha.length === 0
+                    : displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
                   <Download className="w-3 h-3 mr-1" />.XLSX
                 </Button>
                 <Button variant="outline" size="sm"
@@ -2385,7 +2425,9 @@ function BrowserStatusBadge({ status }: { status: string }) {
     checking:              { label: "CHECKING",  className: "border-blue-500/40 text-blue-400 bg-blue-400/10",      icon: <Loader2 className="w-3 h-3 animate-spin" /> },
     opened:                { label: "OPENED",    className: "border-green-500/50 text-green-400 bg-green-400/10",   icon: <MailCheck className="w-3 h-3" /> },
     password_ok:           { label: "SAHI",      className: "border-green-500/50 text-green-400 bg-green-400/10",   icon: <MailCheck className="w-3 h-3" /> },
+    totp_ok:               { label: "2FA SAHI",  className: "border-sky-500/50 text-sky-400 bg-sky-400/10",         icon: <ShieldCheck className="w-3 h-3" /> },
     password_changed:      { label: "CHANGED",   className: "border-amber-500/50 text-amber-300 bg-amber-400/10",   icon: <KeyRound className="w-3 h-3" /> },
+    totp_wrong:            { label: "2FA GALAT", className: "border-red-500/50 text-red-400 bg-red-400/10",         icon: <XCircle className="w-3 h-3" /> },
     verification_required: { label: "VERIFY",    className: "border-yellow-500/50 text-yellow-400 bg-yellow-400/10", icon: <Smartphone className="w-3 h-3" /> },
     wrong_password:        { label: "WRONG",     className: "border-red-500/50 text-red-400 bg-red-400/10",         icon: <XCircle className="w-3 h-3" /> },
     "2fa_required":        { label: "2FA NEEDED",className: "border-blue-500/50 text-blue-400 bg-blue-400/10",      icon: <Lock className="w-3 h-3" /> },

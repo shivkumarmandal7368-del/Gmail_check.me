@@ -95,6 +95,7 @@ router.post("/jobs", (req: Request, res: Response) => {
   const changePasswordAfterLogin = req.body.changePasswordAfterLogin === true;
   const signOutSessions = req.body.signOutSessions === true;
   const passwordOnly = req.body.passwordOnly === true;
+  const verifyTotp = req.body.verifyTotp === true;
   const deviceIndex =
     typeof req.body.deviceIndex === "number" &&
     Number.isInteger(req.body.deviceIndex) &&
@@ -110,10 +111,11 @@ router.post("/jobs", (req: Request, res: Response) => {
     concurrency,
     freshProfile,
     deviceIndex,
-    changePasswordAfterLogin: passwordOnly ? false : changePasswordAfterLogin,
-    signOutSessions: passwordOnly ? false : signOutSessions,
+    changePasswordAfterLogin: (passwordOnly || verifyTotp) ? false : changePasswordAfterLogin,
+    signOutSessions: (passwordOnly || verifyTotp) ? false : signOutSessions,
     robotCheckOnly,
     passwordOnly,
+    verifyTotp,
   });
 
   res.json({ jobId });

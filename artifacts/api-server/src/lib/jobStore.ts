@@ -67,6 +67,8 @@ export interface Job {
   robotCheckOnly?: boolean;
   /** Stop after the password page: sahi, changed, or wrong. */
   passwordOnly?: boolean;
+  /** After password, complete the authenticator challenge with the supplied secret. */
+  verifyTotp?: boolean;
 
   /** Progress */
   total: number;
@@ -161,6 +163,7 @@ export function createJob(params: {
   signOutSessions?: boolean;
   robotCheckOnly?: boolean;
   passwordOnly?: boolean;
+  verifyTotp?: boolean;
 }): Job {
   const id = randomBytes(8).toString("hex");
   const job: Job = {
