@@ -3026,7 +3026,7 @@ def _login_pace(proxy_url: str | None, password_only: bool = False) -> dict:
         "rc_poll_s": 0.15 if turbo else (0.2 if fast else 0.4),
         "rc_wait_s": 3 if turbo else (4 if fast else 8),
         "email_nav_s": 14 if turbo else (22 if fast else 12),
-        "pwd_nav_s": 2 if turbo else (8 if fast else 8),
+        "pwd_nav_s": 5 if turbo else (8 if fast else 8),
         "pwd_poll_s": 4 if turbo else (5 if fast else 8),
         "rc_click_s": 8 if turbo else (16 if fast else 18),
         "rc_recover_s": 6 if turbo else (16 if fast else 18),
@@ -5396,11 +5396,36 @@ def _screenshot_encode_limits() -> tuple[int, int]:
 
 
 def _compact_screenshot(driver) -> str | None:
-    """JPEG preview for job results — readable text at a glance (not tiny 420px)."""
+    """JPEG preview for job results — the whole sign-in card, not a clipped phone slice."""
+    png = None
     try:
-        png = driver.get_screenshot_as_png()
+        metrics = driver.execute_cdp_cmd("Page.getLayoutMetrics", {}) or {}
+        content = metrics.get("cssContentSize") or metrics.get("contentSize") or {}
+        width = int(float(content.get("width") or 0))
+        height = int(float(content.get("height") or 0))
+        if width >= 200 and height >= 200:
+            shot = driver.execute_cdp_cmd("Page.captureScreenshot", {
+                "format": "png",
+                "captureBeyondViewport": True,
+                "fromSurface": True,
+                "clip": {
+                    "x": 0,
+                    "y": 0,
+                    "width": min(width, 1400),
+                    "height": min(height, 1800),
+                    "scale": 1,
+                },
+            }) or {}
+            data = shot.get("data")
+            if data:
+                png = base64.b64decode(data)
     except Exception:
-        return None
+        png = None
+    if png is None:
+        try:
+            png = driver.get_screenshot_as_png()
+        except Exception:
+            return None
     max_w, quality = _screenshot_encode_limits()
     try:
         import io as _io
@@ -9160,16 +9185,32 @@ def _do_login(
         except Exception:
             pass
         nxt = wait_for_any(["#passwordNext button", "#passwordNext [role='button']", "#passwordNext"], timeout=2)
+        clicked = False
         if nxt and _trusted_button_click(driver, nxt):
+            clicked = True
             log(f"{email} — password Next clicked")
         elif _click_button_text(driver, ("Next",)):
+            clicked = True
             log(f"{email} — password Next clicked by label")
-        else:
-            log(f"{email} — password Next control not found")
         try:
-            pw_field.click()
+            js_clicked = driver.execute_script(
+                """
+                var nodes = Array.from(document.querySelectorAll('button, [role="button"]'));
+                var next = nodes.find(function(b) {
+                  return (b.innerText || b.textContent || '').trim() === 'Next';
+                });
+                if (!next) return false;
+                next.click();
+                return true;
+                """
+            )
+            if js_clicked and not clicked:
+                log(f"{email} — password Next clicked in the page")
+            clicked = clicked or bool(js_clicked)
         except Exception:
             pass
+        if not clicked:
+            log(f"{email} — password Next control not found")
         try:
             _press_enter()
             log(f"{email} — password Enter pressed")
@@ -9200,8 +9241,11 @@ def _do_login(
             pass
         if (
             not _pw_retried
-            and (time.time() - _pw_next_at) > (2.5 if password_only and _phone_fast else 5)
-            and "challenge/pwd" in _live_url(driver)
+            and (time.time() - _pw_next_at) > (1.2 if password_only and _phone_fast else 5)
+            and (
+                "challenge/pwd" in _live_url(driver)
+                or _password_field_visible(driver, 0.15)
+            )
         ):
             log(f"{email} — password page still open, submitting again")
             try:
@@ -9246,6 +9290,19 @@ def _do_login(
                 combined = f"{text} {extra}".strip()
                 log(f"{email} — password-only: post-password robot ({_rc_result})")
             verdict = password_stop_verdict(url, combined)
+            href = (url or "").lower()
+            if (
+                verdict.get("status") == "unknown"
+                and "challenge/pwd" not in href
+                and "identifier" not in href
+                and "recaptcha" not in href
+                and not _password_field_visible(driver, 0.1)
+            ):
+                verdict = {
+                    "status": "password_ok",
+                    "reason": "Password sahi",
+                    "category": "open",
+                }
             if verdict.get("status") != "unknown":
                 break
             if "challenge/pwd" in (url or "").lower() and _password_changed_signal(combined):
@@ -9267,6 +9324,8 @@ def _do_login(
         verdict["totpCode"] = totp_code
         verdict["debugScreenshot"] = screenshot_b64()
         verdict["category"] = browser_result_category(verdict)
+        if verdict.get("status") == "unknown":
+            log(f"{email} — password-only unclear url={(_live_url(driver) or '')[:140]}")
         log(f"{email} — password-only stop: {verdict['reason']}")
         return verdict
 
