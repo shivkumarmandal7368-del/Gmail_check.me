@@ -1094,25 +1094,18 @@ def _find_recaptcha_anchor_iframe(driver, log_miss: bool = False):
 
 
 def _recaptcha_checkbox_ticked(driver) -> bool:
-    from selenium.webdriver.common.by import By
-
     driver.switch_to.default_content()
-    found = _cdp_find_recaptcha(driver)
-    aria = (found.get("checkbox") or {}).get("aria")
-    if aria == "true":
+    if "challenge/recaptcha" not in (_live_url(driver) or "").lower():
         return True
-    if found.get("checkbox"):
-        return False
-    fr = _find_recaptcha_anchor_iframe(driver)
+    fr = _top_recaptcha_anchor_iframe(driver)
     if fr is None:
         return False
+    state = _read_recaptcha_anchor(driver, fr)
+    if (state.get("aria") or "") == "true":
+        return True
     try:
+        driver.switch_to.default_content()
         driver.switch_to.frame(fr)
-        for sel in ("#recaptcha-anchor", ".recaptcha-checkbox"):
-            els = driver.find_elements(By.CSS_SELECTOR, sel)
-            if els and els[0].get_attribute("aria-checked") == "true":
-                driver.switch_to.default_content()
-                return True
         checked = driver.execute_script("""
             var a = document.getElementById('recaptcha-anchor');
             return a && a.getAttribute('aria-checked') === 'true';
@@ -1618,6 +1611,64 @@ def _cdp_click_recaptcha_checkbox(driver) -> bool:
     return aria == "true"
 
 
+def _recaptcha_anchor_meta(driver) -> dict:
+    """Parent-page recaptcha iframe box. No frame switch — switching stalls the widget."""
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    try:
+        return driver.execute_script(
+            """
+            var frames = document.querySelectorAll('iframe');
+            var best = null, bestArea = 0;
+            for (var i = 0; i < frames.length; i++) {
+              var f = frames[i];
+              var src = (f.src || '').toLowerCase();
+              var title = (f.title || '').toLowerCase();
+              var isAnchor = src.indexOf('/recaptcha/') !== -1 && src.indexOf('anchor') !== -1
+                && src.indexOf('bframe') === -1;
+              var isRobot = title.indexOf('not a robot') !== -1;
+              if (!isAnchor && !isRobot) continue;
+              var r = f.getBoundingClientRect();
+              var area = Math.max(r.width, 1) * Math.max(r.height, 1);
+              if (area >= bestArea) {
+                best = {
+                  src: f.src || '', title: f.title || '',
+                  x: r.left, y: r.top, w: r.width, h: r.height
+                };
+                bestArea = area;
+              }
+            }
+            return best;
+            """
+        ) or {}
+    except Exception:
+        return {}
+
+
+def _prefetch_recaptcha(driver) -> None:
+    """Warm recaptcha hosts like a phone that already opened Google."""
+    try:
+        driver.execute_script(
+            """
+            ['https://www.google.com', 'https://www.gstatic.com'].forEach(function(h) {
+              var l = document.createElement('link');
+              l.rel = 'preconnect';
+              l.href = h;
+              l.crossOrigin = 'anonymous';
+              document.head.appendChild(l);
+            });
+            var s = document.createElement('script');
+            s.src = 'https://www.google.com/recaptcha/enterprise.js';
+            s.async = true;
+            document.head.appendChild(s);
+            """
+        )
+    except Exception:
+        pass
+
+
 def _top_recaptcha_anchor_iframe(driver):
     """Visible enterprise/anchor iframe on the sign-in page. None when it is not painted yet."""
     driver.switch_to.default_content()
@@ -1633,8 +1684,7 @@ def _top_recaptcha_anchor_iframe(driver):
               if (src.indexOf('/recaptcha/') === -1 || src.indexOf('anchor') === -1) continue;
               if (src.indexOf('bframe') !== -1) continue;
               var r = f.getBoundingClientRect();
-              if (r.width < 8 || r.height < 8) continue;
-              var area = r.width * r.height;
+              var area = Math.max(r.width, 1) * Math.max(r.height, 1);
               if (area > bestArea) { best = f; bestArea = area; }
             }
             return best;
@@ -1727,7 +1777,7 @@ def _recaptcha_checkbox_viewport_point(driver, frame, state: dict):
     return None
 
 
-def _poll_recaptcha_after_click(driver, seconds: float = 2.4) -> str:
+def _poll_recaptcha_after_click(driver, seconds: float = 1.2) -> str:
     """passed | challenge | pending after a checkbox click."""
     deadline = time.time() + seconds
     while time.time() < deadline:
@@ -1738,7 +1788,7 @@ def _poll_recaptcha_after_click(driver, seconds: float = 2.4) -> str:
             return "passed"
         if _cdp_challenge_open(driver):
             return "challenge"
-        time.sleep(0.25)
+        time.sleep(0.08)
     return "pending"
 
 
@@ -1748,51 +1798,55 @@ def _click_recaptcha_from_frame(driver) -> str:
     Returns passed | challenge | notready | error | miss.
     """
     driver.switch_to.default_content()
+    meta = _recaptcha_anchor_meta(driver)
     frame = _top_recaptcha_anchor_iframe(driver)
-    if frame is None:
-        frame = _find_recaptcha_anchor_iframe(driver)
-    if frame is None:
+    if frame is None and not meta:
         return "notready"
-    state = _read_recaptcha_anchor(driver, frame)
+    state = _read_recaptcha_anchor(driver, frame) if frame is not None else {}
     if not state:
-        return "notready"
+        state = {}
     if state.get("aria") == "true":
         return "passed"
-    if not state.get("ready"):
-        return "notready"
-    if state.get("loading") and float(state.get("w") or 0) < 8:
-        return "notready"
+    # Phone users click the painted box. Inner #recaptcha-anchor often
+    # arrives a beat later; clicking the iframe is enough.
     if state.get("err"):
         log(f"reCAPTCHA anchor error: {(state.get('text') or '')[:120]}")
         return "error"
     point = _recaptcha_checkbox_viewport_point(driver, frame, state)
     if not point:
-        return "miss"
+        mw = float(meta.get("w") or 0)
+        mh = float(meta.get("h") or 0)
+        if mw >= 8 and mh >= 8:
+            point = (float(meta["x"]) + 28.0, float(meta["y"]) + mh / 2.0)
+        elif mw >= 1 or mh >= 1:
+            point = (float(meta.get("x") or 0) + 28.0, float(meta.get("y") or 0) + max(mh, 28) / 2.0)
+    if not point:
+        return "notready"
     x, y = point
     log(
         f"reCAPTCHA checkbox click at {int(x)},{int(y)} "
-        f"aria={state.get('aria')} {int(float(state.get('w') or 0))}x{int(float(state.get('h') or 0))}"
+        f"aria={state.get('aria')} {int(float(state.get('w') or meta.get('w') or 0))}x{int(float(state.get('h') or meta.get('h') or 0))}"
     )
-    sx = max(12.0, x - random.randint(70, 140))
-    sy = max(12.0, y - random.randint(40, 90))
-    for step in range(1, 5):
+    sx = max(12.0, x - random.randint(40, 90))
+    sy = max(12.0, y - random.randint(20, 50))
+    for step in range(1, 3):
         driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
             "type": "mouseMoved",
-            "x": sx + (x - sx) * step / 4,
-            "y": sy + (y - sy) * step / 4,
+            "x": sx + (x - sx) * step / 2,
+            "y": sy + (y - sy) * step / 2,
             "button": "none",
             "buttons": 0,
         })
-        time.sleep(0.04)
+        time.sleep(0.02)
     _cdp_click_xy(driver, x, y)
-    outcome = _poll_recaptcha_after_click(driver, 4.0)
+    outcome = _poll_recaptcha_after_click(driver, 1.2)
     if outcome != "pending":
         return outcome
     # A second press only when the box is still painted. A 0-size box means the
     # first click already started navigation, and another click was restarting it.
-    state_after = _read_recaptcha_anchor(driver, frame)
+    state_after = _read_recaptcha_anchor(driver, frame) if frame is not None else {}
     if float(state_after.get("w") or 0) < 8:
-        outcome = _poll_recaptcha_after_click(driver, 4.0)
+        outcome = _poll_recaptcha_after_click(driver, 1.0)
         if outcome != "pending":
             return outcome
         log(f"reCAPTCHA checkbox click did not open a challenge aria={state.get('aria')}")
@@ -1800,7 +1854,7 @@ def _click_recaptcha_from_frame(driver) -> str:
     point_again = _recaptcha_checkbox_viewport_point(driver, frame, state_after)
     if point_again:
         _cdp_click_xy(driver, point_again[0], point_again[1])
-    outcome = _poll_recaptcha_after_click(driver, 2.5)
+    outcome = _poll_recaptcha_after_click(driver, 0.8)
     if outcome != "pending":
         return outcome
     log(f"reCAPTCHA checkbox click did not open a challenge aria={state.get('aria')}")
@@ -2009,18 +2063,15 @@ def handle_recaptcha_checkbox(
                     driver.switch_to.default_content()
                 except Exception:
                     pass
-                frame = _top_recaptcha_anchor_iframe(driver)
-                if frame is None:
-                    frame = _find_recaptcha_anchor_iframe(driver)
-                if frame is not None:
-                    state = _read_recaptcha_anchor(driver, frame) or {}
+                meta = _recaptcha_anchor_meta(driver)
+                if meta.get("src"):
                     found_now = {
-                        "anchor": {"src": (state.get("href") or "iframe")},
-                        "checkbox": {"aria": state.get("aria")} if state.get("ready") else None,
+                        "anchor": {"src": meta.get("src")},
+                        "checkbox": {"aria": None} if float(meta.get("w") or 0) >= 8 else None,
                     }
                     return found_now
                 waited = time.time() - started
-                if waited >= 1.2 and waited - last_log >= 1.5:
+                if waited >= 0.8 and waited - last_log >= 1.0:
                     last_log = waited
                     log(f"{email} — waiting for the robot checkbox ({int(waited)}s)")
                 time.sleep(0.05)
@@ -2028,6 +2079,8 @@ def handle_recaptcha_checkbox(
 
         _widget_wait = float(pace.get("rc_wait_s", 6 if pace.get("fast") else 8))
         found = _wait_widget(_widget_wait)
+        # Do not refresh while the recaptcha iframe src is already there —
+        # reload restarts enterprise.js and adds 10s. Phone never does that.
         if not (found.get("anchor") or found.get("checkbox")):
             log(f"{email} — robot box still loading, reloading the page once")
             capture_step(driver, "Robot checkbox")
@@ -2893,7 +2946,7 @@ def _login_pace(proxy_url: str | None, password_only: bool = False) -> dict:
         "rc_recover_s": 18 if turbo else (16 if fast else 18),
         "rc_blank_reload_s": 5.0 if turbo else (5.0 if fast else 7.0),
         "rc_anchor_ready_s": 0.35 if turbo else (0.45 if fast else 0.6),
-        "rc_nav_s": 10 if turbo else (8 if fast else 12),
+        "rc_nav_s": 4 if turbo else (6 if fast else 12),
     }
 
 
@@ -8241,6 +8294,7 @@ def _do_login(
             try:
                 log(f"{email} — Warmup: google.com")
                 driver.get("https://www.google.com")
+                _prefetch_recaptcha(driver)
                 _warm_deadline = time.time() + 3.5
                 while time.time() < _warm_deadline:
                     try:
@@ -8278,6 +8332,7 @@ def _do_login(
                 try:
                     log(f"{email} — Warmup: google.com")
                     driver.get("https://www.google.com")
+                    _prefetch_recaptcha(driver)
                     _warm_deadline = time.time() + (4 if _phone_fast else 8)
                     while time.time() < _warm_deadline:
                         try:
@@ -8330,6 +8385,7 @@ def _do_login(
                 try:
                     log(f"{email} — Warmup: google.com")
                     driver.get("https://www.google.com")
+                    _prefetch_recaptcha(driver)
                     _warm_deadline = time.time() + (4 if _phone_fast else 8)
                     while time.time() < _warm_deadline:
                         try:
