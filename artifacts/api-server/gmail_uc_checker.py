@@ -1178,6 +1178,44 @@ def _cdp_touch_xy(driver, x: float, y: float) -> None:
         log(f"reCAPTCHA touch click skipped: {exc}")
 
 
+def _widen_clipped_signin(driver) -> None:
+    """The Welcome card is wider than the phone view, so Next is drawn off-screen."""
+    try:
+        box = driver.execute_script(
+            """
+            var next = Array.from(document.querySelectorAll('button, [role="button"]'))
+              .find(function(b) { return (b.innerText || '').trim() === 'Next'; });
+            var r = next ? next.getBoundingClientRect() : {left:0, top:0, width:0, height:0, right:0};
+            return {
+              right: r.right, left: r.left, iw: window.innerWidth, ih: window.innerHeight,
+              sw: document.documentElement.scrollWidth
+            };
+            """
+        ) or {}
+        right = float(box.get("right") or 0)
+        left = float(box.get("left") or 0)
+        iw = float(box.get("iw") or 0)
+        sw = float(box.get("sw") or 0)
+        clipped = (iw and (right > iw - 4 or left < 0)) or (sw > iw + 24)
+        if not clipped:
+            return
+        width = 1280
+        height = 900
+        driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+            "width": width,
+            "height": height,
+            "deviceScaleFactor": 1,
+            "mobile": False,
+        })
+        try:
+            driver.set_window_size(width, height)
+        except Exception:
+            pass
+        log(f"widened sign-in view to {width}x{height} so Next is on screen")
+    except Exception as exc:
+        log(f"widen sign-in view failed: {exc}")
+
+
 def _cdp_click_element(driver, element) -> bool:
     """Click the visible center of a control. ActionChains misses overlay buttons."""
     try:
@@ -5399,6 +5437,10 @@ def _compact_screenshot(driver) -> str | None:
     """JPEG preview for job results — the whole sign-in card, not a clipped phone slice."""
     png = None
     try:
+        _widen_clipped_signin(driver)
+    except Exception:
+        pass
+    try:
         metrics = driver.execute_cdp_cmd("Page.getLayoutMetrics", {}) or {}
         content = metrics.get("cssContentSize") or metrics.get("contentSize") or {}
         width = int(float(content.get("width") or 0))
@@ -9173,6 +9215,7 @@ def _do_login(
             })
 
     def _click_password_next() -> None:
+        _widen_clipped_signin(driver)
         try:
             state = driver.execute_script(
                 """
