@@ -1786,7 +1786,7 @@ def _read_recaptcha_anchor(driver, frame) -> dict:
             return {
               ready: !!a || /not a robot/i.test(text),
               aria: a ? a.getAttribute('aria-checked') : null,
-              loading: shown(spinner) && !a,
+              loading: shown(spinner),
               err: shown(err) || shown(reload) || /could not connect/i.test(text),
               text: text,
               href: href,
@@ -1876,8 +1876,9 @@ def _click_recaptcha_from_frame(driver) -> str:
     point = _recaptcha_checkbox_viewport_point(driver, frame, state)
     mw = float(meta.get("w") or 0)
     mh = float(meta.get("h") or 0)
-    # 28x28 is the loading stub, not the "I'm not a robot" row (~304x78).
-    if mw < 120 and float(state.get("w") or 0) < 20:
+    # 28x28 is the loading spinner. The real row is about 304x78.
+    # Clicking the spinner leaves the account in NOT OPEN.
+    if state.get("loading") or mw < 200:
         return "notready"
     if not point:
         if mw >= 120 and mh >= 20:

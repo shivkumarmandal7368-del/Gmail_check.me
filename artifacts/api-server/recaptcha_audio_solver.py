@@ -474,6 +474,54 @@ def _download_challenge_audio(driver: "WebDriver", session) -> str | None:
     return tmp.name
 
 
+def _cdp_click_audio_button(driver: "WebDriver") -> bool:
+    """Click the headphone control even when Selenium says it is not interactable."""
+    from selenium.webdriver.common.by import By
+
+    driver.switch_to.default_content()
+    if not _switch_challenge_frame(driver):
+        return False
+    local = driver.execute_script(
+        """
+        var b = document.querySelector('#recaptcha-audio-button, .rc-button-audio');
+        if (!b) return null;
+        var r = b.getBoundingClientRect();
+        return {x: r.left, y: r.top, w: r.width, h: r.height};
+        """
+    ) or {}
+    driver.switch_to.default_content()
+    if float(local.get("w") or 0) < 8:
+        return False
+    outer = {"x": 0, "y": 0}
+    try:
+        frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+        for frame in frames:
+            src = ((frame.get_attribute("src") or "") + (frame.get_attribute("title") or "")).lower()
+            if "bframe" not in src and "challenge" not in src:
+                continue
+            rect = driver.execute_script(
+                "var r=arguments[0].getBoundingClientRect(); return {x:r.left,y:r.top};",
+                frame,
+            ) or {}
+            outer = rect
+            break
+    except Exception:
+        pass
+    x = float(outer.get("x") or 0) + float(local["x"]) + float(local["w"]) / 2
+    y = float(outer.get("y") or 0) + float(local["y"]) + float(local["h"]) / 2
+    for typ, buttons in (("mousePressed", 1), ("mouseReleased", 0)):
+        driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": typ,
+            "x": x,
+            "y": y,
+            "button": "left",
+            "buttons": buttons,
+            "clickCount": 1,
+        })
+    _log(f"audio headphone click at {int(x)},{int(y)}")
+    return True
+
+
 def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bool:
     """Switch to audio challenge, transcribe locally, submit. Returns True if submitted."""
     if not free_audio_enabled():
@@ -515,14 +563,8 @@ def try_solve_recaptcha_audio_page(driver: "WebDriver", attempts: int = 2) -> bo
             shown = audio_btn.is_displayed()
         except Exception:
             shown = False
-        if not shown:
-            _log("audio button present but not displayed — clicking it anyway")
-
-        try:
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", audio_btn)
-            audio_btn.click()
-        except Exception as exc:
-            _log(f"audio button click failed: {exc} — trying CDP")
+        if not _cdp_click_audio_button(driver):
+            _log("audio headphone click missed — trying CDP frame search")
             driver.switch_to.default_content()
             return _try_audio_via_cdp(driver)
         _snap(driver, "Captcha audio")
