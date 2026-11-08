@@ -67,6 +67,7 @@ def run_free_captcha_pipeline(
     driver: "WebDriver",
     checkbox_ticked: Callable[[], bool],
     max_cycles: int = 3,
+    grace_s: float = 2.2,
 ) -> bool:
     """Try audio → vision → audio retries. Returns True if captcha cleared."""
     if not free_audio_enabled() and not free_vision_enabled():
@@ -75,7 +76,7 @@ def run_free_captcha_pipeline(
     # The checkbox click often reaches the password page on its own.
     # Clicking the headphone button during that hop added several seconds.
     if not _image_grid_ready(driver):
-        grace = time.time() + 2.2
+        grace = time.time() + grace_s
         while time.time() < grace:
             if _parent_left_recaptcha(driver):
                 _log("left recaptcha page")

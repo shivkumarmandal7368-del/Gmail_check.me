@@ -1859,7 +1859,7 @@ def _click_recaptcha_from_frame(driver) -> str:
         time.sleep(0.02)
     _cdp_click_xy(driver, x, y)
     # One click, then wait. A second click is what opened the image puzzle.
-    outcome = _poll_recaptcha_after_click(driver, 1.4)
+    outcome = _poll_recaptcha_after_click(driver, 1.0)
     if outcome != "pending":
         return outcome
     log(f"reCAPTCHA checkbox click did not open a challenge aria={state.get('aria')}")
@@ -1994,7 +1994,7 @@ def _password_only_recaptcha_recover(
             return True
         return False
 
-    quick = time.time() + (2.5 if pace.get("password_only") else 5)
+    quick = time.time() + (0.4 if pace.get("password_only") else 5)
     while time.time() < quick:
         if _pwd_ready():
             return True
@@ -2004,11 +2004,13 @@ def _password_only_recaptcha_recover(
         log(f"{email} — password-only: checkbox ticked, short wait for password page")
         return _wait_password_after_recaptcha_tick(driver, page_state, pace) or _pwd_ready()
 
-    if _cdp_challenge_open_stable(driver):
-        log(f"{email} — password-only: real image puzzle, one audio try")
+    if pace.get("password_only") or _cdp_challenge_open_stable(driver):
+        log(f"{email} — password-only: one audio try")
         try:
             from recaptcha_free_solver import run_free_captcha_pipeline
-            run_free_captcha_pipeline(driver, _recaptcha_checkbox_ticked, max_cycles=1)
+            run_free_captcha_pipeline(
+                driver, _recaptcha_checkbox_ticked, max_cycles=1, grace_s=0.3,
+            )
         except Exception as exc:
             log(f"{email} — audio try skipped: {exc}")
         extra = time.time() + (8 if pace.get("password_only") else 6)
@@ -2217,7 +2219,7 @@ def handle_recaptcha_checkbox(
                 time.sleep(0.18 if pace.get("password_only") else 0.35)
                 continue
             misses += 1
-            if misses >= 2:
+            if pace.get("password_only") or misses >= 2:
                 log(f"{email} — reCAPTCHA click attempts exhausted")
                 break
             log(f"{email} — reCAPTCHA click attempt {attempt} did not tick — retry")
@@ -2225,7 +2227,7 @@ def handle_recaptcha_checkbox(
 
         # Failed clicks: do not sit 12s. Solver starts almost immediately.
         _extra_wait = (
-            2.5 if (pace.get("password_only") and _rc_result != "passed")
+            0.4 if (pace.get("password_only") and _rc_result != "passed")
             else (1.5 if _rc_result != "passed" else max(pace.get("rc_wait_s", 6), 4))
         )
         wait_deadline = time.time() + _extra_wait
@@ -5085,8 +5087,9 @@ def main():
     )
 
     _t0 = time.time()
-    if not password_only:
-        threading.Thread(target=_preload_whisper_bg, daemon=True).start()
+    # Password-only still hits an image puzzle on some accounts. Load Whisper
+    # during Chrome startup so the audio solve is not an 8s cold start.
+    threading.Thread(target=_preload_whisper_bg, daemon=True).start()
     result = check_gmail(
         email, password, totp_secret, proxy, fresh_profile,
         proxy_for_ip_check, device_index, change_password,
