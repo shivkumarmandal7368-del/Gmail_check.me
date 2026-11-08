@@ -1883,9 +1883,10 @@ def _click_recaptcha_from_frame(driver) -> str:
         return "passed"
     mw = float(meta.get("w") or 0)
     mh = float(meta.get("h") or 0)
-    # aria=None means the square is still the blue spinner. A click there
-    # does not tick, and the log then says "I'm not a robot (timeout)".
-    if state.get("aria") != "false" or state.get("loading") or mw < 200:
+    inner_w = float(state.get("w") or 0)
+    # aria=None or a 28px square is still the spinner. Clicking it opens the
+    # image puzzle. The real row is about 304px wide; wait for that.
+    if state.get("aria") != "false" or state.get("loading") or mw < 200 or inner_w < 120:
         return "notready"
     # Phone users click the painted box. Inner #recaptcha-anchor often
     # arrives a beat later; clicking the iframe is enough.
