@@ -835,6 +835,7 @@ function BrowserChecker() {
     rows: ExtBrowserResult[],
     name: string,
     extraSheets?: Array<{ name: string; rows: ExtBrowserResult[] }>,
+    sheetName?: string,
   ) => {
     const header = ["Gmail", "Password", "2FA"];
     const toSheet = (list: ExtBrowserResult[]) => {
@@ -847,7 +848,7 @@ function BrowserChecker() {
       return worksheet;
     };
     const workbook = XLSX.utils.book_new();
-    const firstName = extraSheets?.length ? "Captcha" : "Gmail";
+    const firstName = sheetName ?? (extraSheets?.length ? "Captcha" : "Gmail");
     XLSX.utils.book_append_sheet(workbook, toSheet(rows), firstName.slice(0, 31));
     for (const sheet of extraSheets ?? []) {
       XLSX.utils.book_append_sheet(workbook, toSheet(sheet.rows), sheet.name.slice(0, 31));
@@ -1491,7 +1492,9 @@ function BrowserChecker() {
                 </Button>
                 <Button variant="outline" size="sm"
                   onClick={() => captchaOnly
-                    ? downloadExcel(captchaList, "gmail_captcha_check", [{ name: "Not captcha", rows: notCaptchaList }])
+                    ? (activeList === "not_captcha"
+                      ? downloadExcel(notCaptchaList, "gmail_not_captcha", undefined, "Not captcha")
+                      : downloadExcel(captchaList, "gmail_captcha", undefined, "Captcha"))
                     : activeList === "opened"
                     ? downloadExcel(openCaptcha, "gmail_open", [{ name: "Captcha not", rows: openNoCaptcha }])
                     : downloadExcel(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
@@ -1510,6 +1513,30 @@ function BrowserChecker() {
               </>
             </div>
           </div>
+          {captchaOnly && (activeList === "captcha" || activeList === "not_captcha") && (
+            <div className="border-b border-border px-3 py-2 flex items-center gap-2 flex-wrap bg-card">
+              <button type="button" onClick={() => setActiveList("captcha")}
+                className={cn("px-3 py-1 rounded-md border text-[11px] font-mono",
+                  activeList === "captcha" ? "bg-orange-500/15 text-orange-300 border-orange-500/40" : "text-muted-foreground border-border")}>
+                CAPTCHA ({captchaList.length})
+              </button>
+              <Button variant="outline" size="sm" className="h-7 px-2 font-mono text-[10px]"
+                disabled={captchaList.length === 0}
+                onClick={() => downloadExcel(captchaList, "gmail_captcha", undefined, "Captcha")}>
+                <Download className="w-3 h-3 mr-1" />Excel
+              </Button>
+              <button type="button" onClick={() => setActiveList("not_captcha")}
+                className={cn("px-3 py-1 rounded-md border text-[11px] font-mono",
+                  activeList === "not_captcha" ? "bg-green-500/15 text-green-300 border-green-500/40" : "text-muted-foreground border-border")}>
+                NOT CAPTCHA ({notCaptchaList.length})
+              </button>
+              <Button variant="outline" size="sm" className="h-7 px-2 font-mono text-[10px]"
+                disabled={notCaptchaList.length === 0}
+                onClick={() => downloadExcel(notCaptchaList, "gmail_not_captcha", undefined, "Not captcha")}>
+                <Download className="w-3 h-3 mr-1" />Excel
+              </Button>
+            </div>
+          )}
           {activeList === "opened" && (
             <div className="border-b border-border px-3 py-2 flex items-center gap-2 flex-wrap bg-card">
               <button type="button" onClick={() => setOpenBucket("captcha")}
