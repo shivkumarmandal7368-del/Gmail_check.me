@@ -5,7 +5,7 @@ import { getBrowserResultCategory } from "@/lib/browserResultCategory"
 
 // Extended result type: adds "checking" in-flight status + per-account timing + original credentials
 type ExtBrowserResult = Omit<BrowserLoginResult, "status"> & {
-  status: BrowserLoginResult["status"] | "checking" | "password_ok" | "password_changed" | "totp_ok" | "totp_wrong";
+  status: BrowserLoginResult["status"] | "checking" | "password_ok" | "password_changed" | "totp_ok" | "totp_wrong" | "captcha" | "not_captcha";
   category?: BrowserLoginResult["category"];
   durationMs?: number;
   /** Original password from input — preserved for export */
@@ -29,7 +29,7 @@ import {
 } from "lucide-react"
 import { RobotChecker } from "@/pages/RobotChecker";
 
-type LoginList = "opened" | "not_opened" | "delete" | "unknown" | "fingerprint";
+type LoginList = "opened" | "not_opened" | "delete" | "unknown" | "fingerprint" | "captcha" | "not_captcha";
 type AppMode = "browser" | "robot";
 
 export default function Home() {
@@ -103,7 +103,7 @@ function BrowserChecker() {
   // ── localStorage keys ────────────────────────────────────────────────────
   const LS = {
     input: "vbc_input", proxy: "vbc_proxy", proxyMode: "vbc_proxy_mode", concurrency: "vbc_conc",
-    fresh: "vbc_fresh", changePw: "vbc_change_pw", deviceLogout: "vbc_device_logout", passwordOnly: "vbc_password_only", verifyTotp: "vbc_verify_totp", device: "vbc_device", results: "vbc_results", total: "vbc_total",
+    fresh: "vbc_fresh", changePw: "vbc_change_pw", deviceLogout: "vbc_device_logout", passwordOnly: "vbc_password_only", verifyTotp: "vbc_verify_totp", captchaOnly: "vbc_captcha_only", device: "vbc_device", results: "vbc_results", total: "vbc_total",
     active: "vbc_active", savedAt: "vbc_saved_at", jobId: "vbc_job_id",
     creds: "vbc_creds",
   } as const;
@@ -120,6 +120,7 @@ function BrowserChecker() {
   const [deviceLogout, setDeviceLogout] = useState<boolean>(() => lsGet(LS.deviceLogout, false));
   const [passwordOnly, setPasswordOnly] = useState<boolean>(() => lsGet(LS.passwordOnly, false));
   const [verifyTotp, setVerifyTotp] = useState<boolean>(() => lsGet(LS.verifyTotp, false));
+  const [captchaOnly, setCaptchaOnly] = useState<boolean>(() => lsGet(LS.captchaOnly, false));
   const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
 
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
@@ -190,6 +191,8 @@ function BrowserChecker() {
   useEffect(() => { try { localStorage.setItem(LS.deviceLogout, JSON.stringify(deviceLogout)); } catch {} }, [deviceLogout]);
   useEffect(() => { try { localStorage.setItem(LS.passwordOnly, JSON.stringify(passwordOnly)); } catch {} }, [passwordOnly]);
   useEffect(() => { try { localStorage.setItem(LS.verifyTotp, JSON.stringify(verifyTotp)); } catch {} }, [verifyTotp]);
+  useEffect(() => { try { localStorage.setItem(LS.captchaOnly, JSON.stringify(captchaOnly)); } catch {} }, [captchaOnly]);
+  useEffect(() => { if (captchaOnly) setActiveList("captcha"); }, [captchaOnly]);
   useEffect(() => { try { localStorage.setItem(LS.device,      JSON.stringify(deviceIndex));  } catch {} }, [deviceIndex]);
   useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
   useEffect(() => { try { localStorage.setItem(LS.total,       JSON.stringify(total));        } catch {} }, [total]);
@@ -262,7 +265,7 @@ function BrowserChecker() {
   // ── Helpers ───────────────────────────────────────────────────────────────
   const parseProxies = (text: string) => text.split(/\n+/).map(l => l.trim()).filter(Boolean);
 
-  const parseCredentials = (text: string) =>
+  const parseCredentials = (text: string, emailOnly = false) =>
     text.split(/\n+/).map(l => l.trim()).filter(Boolean).map(line => {
       // Pasted list numbers ("1. email" or "1) email") are not part of the account.
       const cleaned = line
@@ -276,7 +279,8 @@ function BrowserChecker() {
       if (!cleaned.includes(":") && /\s/.test(cleaned)) {
         const parts = cleaned.split(/\s+/).filter(Boolean);
         const email = parts[0] ?? "";
-        if (!email.includes("@") || parts.length < 2) return null;
+        if (!email.includes("@")) return null;
+        if (parts.length < 2) return emailOnly ? { email, password: "-" } : null;
         const totpRaw = parts.length >= 3 ? parts[parts.length - 1] : undefined;
         const password = (parts.length >= 3 ? parts.slice(1, -1) : parts.slice(1)).join(" ");
         const totp = totpRaw ? totpRaw.replace(/\s+/g, "") : undefined;
@@ -285,7 +289,10 @@ function BrowserChecker() {
       }
 
       const parts = cleaned.split(":");
-      if (parts.length < 2) return null;
+      const emailOnlyLine = parts[0]?.trim() ?? "";
+      if (parts.length < 2) {
+        return emailOnly && emailOnlyLine.includes("@") ? { email: emailOnlyLine, password: "-" } : null;
+      }
       const email = parts[0].trim();
       const password = (parts.length > 3 ? parts.slice(1, -1).join(":") : parts[1] ?? "").trim();
       const totpRaw = parts.length === 3 ? parts[2].trim() : parts.length > 3 ? parts[parts.length - 1].trim() : undefined;
@@ -541,10 +548,11 @@ function BrowserChecker() {
       credentials: creds,
       ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
       concurrency: 1, freshProfile, deviceIndex,
-      ...(passwordOnly ? { passwordOnly: true } : {}),
-      ...(verifyTotp ? { verifyTotp: true } : {}),
-      ...(!passwordOnly && !verifyTotp && changePasswordAfterLogin ? { changePasswordAfterLogin: true } : {}),
-      ...(!passwordOnly && !verifyTotp && deviceLogout ? { signOutSessions: true } : {}),
+      ...(captchaOnly ? { captchaOnly: true } : {}),
+      ...(!captchaOnly && passwordOnly ? { passwordOnly: true } : {}),
+      ...(!captchaOnly && verifyTotp ? { verifyTotp: true } : {}),
+      ...(!captchaOnly && !passwordOnly && !verifyTotp && changePasswordAfterLogin ? { changePasswordAfterLogin: true } : {}),
+      ...(!captchaOnly && !passwordOnly && !verifyTotp && deviceLogout ? { signOutSessions: true } : {}),
     });
   };
 
@@ -610,13 +618,13 @@ function BrowserChecker() {
   };
 
   const handleCheck = async () => {
-    const credentials = parseCredentials(inputText);
+    const credentials = parseCredentials(inputText, captchaOnly);
     if (credentials.length === 0) return;
     if (!(await ensureProxy())) return;
 
     // Build and persist credential map so exports survive page refresh
     const newCredsMap: Record<string, { password: string; totpSecret?: string }> = {};
-    for (const c of credentials) newCredsMap[c.email] = { password: c.password, totpSecret: c.totp };
+    for (const c of credentials) newCredsMap[c.email] = { password: c.password === "-" ? "" : c.password, totpSecret: c.totp };
     credsMapRef.current = newCredsMap;
     try { localStorage.setItem(LS.creds, JSON.stringify(newCredsMap)); } catch {}
     sseAbortRef.current?.abort();
@@ -793,11 +801,18 @@ function BrowserChecker() {
   const openNoCaptcha = opened.filter(row => !sawCaptcha(row));
   const deleteList    = results.filter(r => getBrowserResultCategory(r) === "delete");
   const notOpened     = results.filter(r => getBrowserResultCategory(r) === "not_open");
-  const unknownList     = results.filter(r => getBrowserResultCategory(r) === "unknown" && r.status !== "checking");
+  const captchaList = results.filter(r => r.status === "captcha");
+  const notCaptchaList = results.filter(r => r.status === "not_captcha");
+  const unknownList     = results.filter(r => getBrowserResultCategory(r) === "unknown" && r.status !== "checking" && r.status !== "captcha" && r.status !== "not_captcha");
   const fingerprintList = results.filter(r => r.status !== "checking" && !!(r as any).fingerprintData);
   const unknownRetryCount = unknownList.filter(r => !!credsMapRef.current[r.email]).length;
   const completedCount = results.filter(r => r.status !== "checking").length;
-  const displayed = activeList === "opened" ? (openBucket === "captcha" ? openCaptcha : openNoCaptcha)
+  const displayed = captchaOnly
+    ? (activeList === "not_captcha" ? notCaptchaList
+      : activeList === "unknown" ? [...inFlight, ...unknownList]
+      : activeList === "fingerprint" ? fingerprintList
+      : captchaList)
+    : activeList === "opened" ? (openBucket === "captcha" ? openCaptcha : openNoCaptcha)
     : activeList === "not_opened" ? notOpened
     : activeList === "delete" ? deleteList
     : activeList === "fingerprint" ? fingerprintList
@@ -810,6 +825,7 @@ function BrowserChecker() {
       wrong_password: "Password wrong", "2fa_required": "2FA Required",
       password_ok: "Password sahi", password_changed: "Password changed",
       totp_ok: "2FA sahi", totp_wrong: "2FA galat",
+      captcha: "Captcha", not_captcha: "Not captcha",
       unknown: "Unknown", checking: "Checking",
     };
     return map[status] ?? status;
@@ -897,7 +913,9 @@ function BrowserChecker() {
           </CardHeader>
           <CardContent className="space-y-3">
             <NumberedPayloadEditor
-              placeholder={"email@gmail.com:password:2FA_SECRET\nemail@gmail.com password 2FA_SECRET"}
+              placeholder={captchaOnly
+                ? "email@gmail.com\nemail@gmail.com:password"
+                : "email@gmail.com:password:2FA_SECRET\nemail@gmail.com password 2FA_SECRET"}
               className="min-h-[180px]"
               minHeightClass="min-h-[180px]"
               nowrap
@@ -908,7 +926,7 @@ function BrowserChecker() {
             <div className="flex items-center justify-between gap-2">
               <p className="min-w-0 text-[10px] font-mono text-muted-foreground leading-relaxed">
                 {(() => {
-                  const n = parseCredentials(inputText).length;
+                  const n = parseCredentials(inputText, captchaOnly).length;
                   return n > 0
                     ? `${n} account${n === 1 ? "" : "s"}`
                     : "Har line ek account. email:password:2FA ya email password 2FA";
@@ -986,7 +1004,7 @@ function BrowserChecker() {
                 <>
                   {(() => {
                     const count = parseProxies(proxyText).length;
-                    const creds = parseCredentials(inputText).length;
+                    const creds = parseCredentials(inputText, captchaOnly).length;
                     return (
                       <div className={cn(
                         "rounded-lg border p-2.5 text-[11px] font-mono space-y-1",
@@ -1099,7 +1117,7 @@ function BrowserChecker() {
 
             <div className="rounded-lg border border-border/80 p-2 space-y-2">
               <p className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground px-1">Password check</p>
-              <button type="button" onClick={() => !isChecking && setPasswordOnly(v => !v)} disabled={isChecking}
+              <button type="button" onClick={() => !isChecking && setPasswordOnly(v => !v)} disabled={isChecking || captchaOnly}
                 className={cn("w-full rounded-lg border p-3 text-left transition-colors",
                   passwordOnly ? "border-emerald-500/40 bg-emerald-500/5" : "border-border bg-card/30 opacity-60")}>
                 <div className="flex items-center justify-between mb-1">
@@ -1117,7 +1135,7 @@ function BrowserChecker() {
                 </p>
               </button>
 
-              <button type="button" onClick={() => !isChecking && setVerifyTotp(v => !v)} disabled={isChecking}
+              <button type="button" onClick={() => !isChecking && setVerifyTotp(v => !v)} disabled={isChecking || captchaOnly}
                 className={cn("w-full rounded-lg border p-3 text-left transition-colors",
                   verifyTotp ? "border-sky-500/40 bg-sky-500/5" : "border-border bg-card/30 opacity-60")}>
                 <div className="flex items-center justify-between mb-1">
@@ -1134,9 +1152,27 @@ function BrowserChecker() {
                     : "Off: 2FA challenge skip (sirf password) ya full login ke hisaab se."}
                 </p>
               </button>
+
+              <button type="button" onClick={() => !isChecking && setCaptchaOnly(v => !v)} disabled={isChecking}
+                className={cn("w-full rounded-lg border p-3 text-left transition-colors",
+                  captchaOnly ? "border-orange-500/40 bg-orange-500/5" : "border-border bg-card/30 opacity-60")}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] font-mono uppercase tracking-widest text-orange-400/80 flex items-center gap-1">
+                    <Bot className="w-3 h-3" /> Sirf captcha
+                  </span>
+                  <div className={cn("w-8 h-4 rounded-full transition-colors relative", captchaOnly ? "bg-orange-500" : "bg-border")}>
+                    <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", captchaOnly ? "left-4" : "left-0.5")} />
+                  </div>
+                </div>
+                <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
+                  {captchaOnly
+                    ? "Email ke baad ruk jaata hai. Result sirf Captcha ya Not captcha. Password type nahi hota, captcha solve nahi hota."
+                    : "Off: captcha sirf tab dikhega jab password check ke dauran page khule."}
+                </p>
+              </button>
             </div>
 
-            <button onClick={() => !isChecking && setChangePasswordAfterLogin(v => !v)} disabled={isChecking || passwordOnly || verifyTotp}
+            <button onClick={() => !isChecking && setChangePasswordAfterLogin(v => !v)} disabled={isChecking || passwordOnly || verifyTotp || captchaOnly}
               className={cn("w-full rounded-lg border p-3 text-left transition-colors",
                 changePasswordAfterLogin ? "border-amber-500/40 bg-amber-500/5" : "border-border bg-card/30 opacity-60")}>
               <div className="flex items-center justify-between mb-1">
@@ -1154,7 +1190,7 @@ function BrowserChecker() {
               </p>
             </button>
 
-            <button onClick={() => !isChecking && setDeviceLogout(v => !v)} disabled={isChecking || passwordOnly || verifyTotp}
+            <button onClick={() => !isChecking && setDeviceLogout(v => !v)} disabled={isChecking || passwordOnly || verifyTotp || captchaOnly}
               className={cn("w-full rounded-lg border p-3 text-left transition-colors",
                 deviceLogout ? "border-rose-500/40 bg-rose-500/5" : "border-border bg-card/30 opacity-60")}>
               <div className="flex items-center justify-between mb-1">
@@ -1261,7 +1297,35 @@ function BrowserChecker() {
           </Card>
         )}
 
-        {(results.length > 0 || isChecking) && (
+        {captchaOnly && (results.length > 0 || isChecking) && (
+          <div className="grid grid-cols-3 gap-2">
+            <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "captcha" ? "border-orange-500/60 bg-orange-500/5" : "border-border bg-card/40")}
+              onClick={() => setActiveList("captcha")}>
+              <CardContent className="p-3 flex flex-col items-center gap-1">
+                <Bot className={cn("w-4 h-4", captchaList.length > 0 ? "text-orange-400" : "text-muted-foreground/30")} />
+                <span className={cn("text-xl font-mono font-bold", captchaList.length > 0 ? "text-orange-400" : "text-muted-foreground/30")}>{captchaList.length}</span>
+                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">CAPTCHA</span>
+              </CardContent>
+            </Card>
+            <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "not_captcha" ? "border-green-500/60 bg-green-500/5" : "border-border bg-card/40")}
+              onClick={() => setActiveList("not_captcha")}>
+              <CardContent className="p-3 flex flex-col items-center gap-1">
+                <CheckCircle2 className={cn("w-4 h-4", notCaptchaList.length > 0 ? "text-green-400" : "text-muted-foreground/30")} />
+                <span className={cn("text-xl font-mono font-bold", notCaptchaList.length > 0 ? "text-green-400" : "text-muted-foreground/30")}>{notCaptchaList.length}</span>
+                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">NOT CAPTCHA</span>
+              </CardContent>
+            </Card>
+            <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "unknown" ? "border-yellow-500/60 bg-yellow-500/5" : "border-border bg-card/40")}
+              onClick={() => setActiveList("unknown")}>
+              <CardContent className="p-3 flex flex-col items-center gap-1">
+                <HelpCircle className={cn("w-4 h-4", unknownList.length > 0 ? "text-yellow-400" : "text-muted-foreground/30")} />
+                <span className={cn("text-xl font-mono font-bold", unknownList.length > 0 ? "text-yellow-400" : "text-muted-foreground/30")}>{unknownList.length}</span>
+                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">UNKNOWN</span>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+        {!captchaOnly && (results.length > 0 || isChecking) && (
           <div className="grid grid-cols-3 md:grid-cols-5 gap-2">
             <Card className={cn("border-2 cursor-pointer transition-colors", activeList === "opened" ? "border-green-500/60 bg-green-500/5" : "border-border bg-card/40")}
               onClick={() => setActiveList("opened")}>
@@ -1354,6 +1418,26 @@ function BrowserChecker() {
         <Card className="border-border bg-card/50 min-h-[400px] flex flex-col overflow-hidden">
           <div className="border-b border-border p-3 flex items-center justify-between bg-card gap-3 flex-wrap">
             <div className="flex gap-2 flex-wrap">
+              {captchaOnly ? (
+                <>
+                  <button onClick={() => setActiveList("captcha")}
+                    className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
+                      activeList === "captcha" ? "bg-orange-500/10 text-orange-300 border-orange-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
+                    <Bot className="w-3.5 h-3.5" />CAPTCHA ({captchaList.length})
+                  </button>
+                  <button onClick={() => setActiveList("not_captcha")}
+                    className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
+                      activeList === "not_captcha" ? "bg-green-500/10 text-green-400 border-green-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
+                    <CheckCircle2 className="w-3.5 h-3.5" />NOT CAPTCHA ({notCaptchaList.length})
+                  </button>
+                  <button onClick={() => setActiveList("unknown")}
+                    className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
+                      activeList === "unknown" ? "bg-yellow-500/10 text-yellow-400 border-yellow-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
+                    <HelpCircle className="w-3.5 h-3.5" />UNKNOWN ({unknownList.length + inFlight.length})
+                  </button>
+                </>
+              ) : (
+              <>
               <button onClick={() => setActiveList("opened")}
                 className={cn("flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-mono font-medium transition-colors",
                   activeList === "opened" ? "bg-green-500/10 text-green-400 border-green-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
@@ -1379,6 +1463,8 @@ function BrowserChecker() {
                   activeList === "fingerprint" ? "bg-purple-500/10 text-purple-400 border-purple-500/40" : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50")}>
                 <ShieldAlert className="w-3.5 h-3.5" />FINGERPRINT ({fingerprintList.length})
               </button>
+              </>
+              )}
             </div>
             <div className="flex gap-1.5 flex-wrap">
               {activeList === "unknown" && selectedUnknown.size > 0 && !isChecking && (
@@ -1404,10 +1490,14 @@ function BrowserChecker() {
                   <Download className="w-3 h-3 mr-1" />.TXT
                 </Button>
                 <Button variant="outline" size="sm"
-                  onClick={() => activeList === "opened"
+                  onClick={() => captchaOnly
+                    ? downloadExcel(captchaList, "gmail_captcha_check", [{ name: "Not captcha", rows: notCaptchaList }])
+                    : activeList === "opened"
                     ? downloadExcel(openCaptcha, "gmail_open", [{ name: "Captcha not", rows: openNoCaptcha }])
                     : downloadExcel(displayed.filter(r => r.status !== "checking"), `gmail_${activeList}`)}
-                  disabled={activeList === "opened"
+                  disabled={captchaOnly
+                    ? captchaList.length === 0 && notCaptchaList.length === 0
+                    : activeList === "opened"
                     ? openCaptcha.length === 0 && openNoCaptcha.length === 0
                     : displayed.filter(r => r.status !== "checking").length === 0} className="font-mono text-xs h-8 px-2">
                   <Download className="w-3 h-3 mr-1" />.XLSX
@@ -1557,7 +1647,7 @@ function BrowserChecker() {
             ) : results.length === 0 && !isChecking ? (
               <EmptyState icon={<Globe className="w-8 h-8 mb-3 opacity-50" />} label="AWAITING CREDENTIALS" />
             ) : displayed.length === 0 && !isChecking ? (
-              <EmptyState label={`NO ${activeList === "opened" ? (openBucket === "captcha" ? "CAPTCHA" : "CAPTCHA NOT") : activeList === "not_opened" ? "NOT OPEN" : activeList === "delete" ? "DELETE" : "UNKNOWN"} ACCOUNTS`} />
+              <EmptyState label={`NO ${activeList === "captcha" ? "CAPTCHA" : activeList === "not_captcha" ? "NOT CAPTCHA" : activeList === "opened" ? (openBucket === "captcha" ? "CAPTCHA" : "CAPTCHA NOT") : activeList === "not_opened" ? "NOT OPEN" : activeList === "delete" ? "DELETE" : "UNKNOWN"} ACCOUNTS`} />
             ) : displayed.length === 0 && isChecking ? (
               <div className="h-full min-h-[200px] flex flex-col items-center justify-center text-muted-foreground font-mono text-sm p-8 opacity-60">
                 <Loader2 className="w-8 h-8 mb-3 animate-spin opacity-50" />
@@ -2425,6 +2515,8 @@ function BrowserStatusBadge({ status }: { status: string }) {
     checking:              { label: "CHECKING",  className: "border-blue-500/40 text-blue-400 bg-blue-400/10",      icon: <Loader2 className="w-3 h-3 animate-spin" /> },
     opened:                { label: "OPENED",    className: "border-green-500/50 text-green-400 bg-green-400/10",   icon: <MailCheck className="w-3 h-3" /> },
     password_ok:           { label: "SAHI",      className: "border-green-500/50 text-green-400 bg-green-400/10",   icon: <MailCheck className="w-3 h-3" /> },
+    captcha:               { label: "CAPTCHA",   className: "border-orange-500/50 text-orange-300 bg-orange-400/10", icon: <Bot className="w-3 h-3" /> },
+    not_captcha:           { label: "NOT CAPTCHA", className: "border-green-500/50 text-green-400 bg-green-400/10", icon: <CheckCircle2 className="w-3 h-3" /> },
     totp_ok:               { label: "2FA SAHI",  className: "border-sky-500/50 text-sky-400 bg-sky-400/10",         icon: <ShieldCheck className="w-3 h-3" /> },
     password_changed:      { label: "CHANGED",   className: "border-amber-500/50 text-amber-300 bg-amber-400/10",   icon: <KeyRound className="w-3 h-3" /> },
     totp_wrong:            { label: "2FA GALAT", className: "border-red-500/50 text-red-400 bg-red-400/10",         icon: <XCircle className="w-3 h-3" /> },

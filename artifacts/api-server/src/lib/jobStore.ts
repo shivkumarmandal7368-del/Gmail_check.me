@@ -69,6 +69,8 @@ export interface Job {
   passwordOnly?: boolean;
   /** After password, complete the authenticator challenge with the supplied secret. */
   verifyTotp?: boolean;
+  /** After the email, report captcha vs not captcha. Password is not typed. */
+  captchaOnly?: boolean;
 
   /** Progress */
   total: number;
@@ -164,6 +166,7 @@ export function createJob(params: {
   robotCheckOnly?: boolean;
   passwordOnly?: boolean;
   verifyTotp?: boolean;
+  captchaOnly?: boolean;
 }): Job {
   const id = randomBytes(8).toString("hex");
   const job: Job = {

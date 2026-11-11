@@ -656,6 +656,23 @@ def password_stop_verdict(url: str, text: str) -> dict:
     }
 
 
+def captcha_only_kind(url: str, text: str, password_visible: bool) -> str | None:
+    """After the email step: captcha, not_captcha, blocked, or still waiting."""
+    href = (url or "").lower()
+    low = (text or "").lower()
+    if (
+        "challenge/recaptcha" in href
+        or "i'm not a robot" in low
+        or "i’m not a robot" in low
+    ):
+        return "captcha"
+    if "signin/rejected" in href or "couldn't sign you in" in low or "couldn’t sign you in" in low:
+        return "blocked"
+    if password_visible or "challenge/pwd" in href:
+        return "not_captcha"
+    return None
+
+
 def browser_result_category(result: dict) -> str:
     """Return the stable UI category for a browser-check result."""
     status = result.get("status", "")
@@ -5294,9 +5311,13 @@ def main():
     robot_check_only  = bool(data.get("robotCheckOnly", False))
     password_only     = bool(data.get("passwordOnly", False))
     verify_totp       = bool(data.get("verifyTotp", False))
-    if password_only or verify_totp:
+    captcha_only      = bool(data.get("captchaOnly", False))
+    if password_only or verify_totp or captcha_only:
         change_password = False
         sign_out_sessions = False
+    if captcha_only:
+        password_only = False
+        verify_totp = False
     raw_device_index  = data.get("deviceIndex")
     device_index      = (
         int(raw_device_index)
@@ -5307,12 +5328,13 @@ def main():
     _t0 = time.time()
     # Password-only still hits an image puzzle on some accounts. Load Whisper
     # during Chrome startup so the audio solve is not an 8s cold start.
-    threading.Thread(target=_preload_whisper_bg, daemon=True).start()
+    if not captcha_only:
+        threading.Thread(target=_preload_whisper_bg, daemon=True).start()
     result = check_gmail(
         email, password, totp_secret, proxy, fresh_profile,
         proxy_for_ip_check, device_index, change_password,
         sign_out_sessions, robot_check_only, password_only,
-        verify_totp,
+        verify_totp, captcha_only,
     )
 
     # Auto-retry up to 3 times if Google blocked automation detection.
@@ -5361,7 +5383,7 @@ def main():
             email, password, totp_secret, _retry_proxy, True,
             proxy_for_ip_check, device_index, change_password,
             sign_out_sessions, robot_check_only, password_only,
-            verify_totp,
+            verify_totp, captcha_only,
         )
         _blocked_reason = result.get("reason", "")
 
@@ -5637,6 +5659,7 @@ def check_gmail(
     robot_check_only: bool = False,
     password_only: bool = False,
     verify_totp: bool = False,
+    captcha_only: bool = False,
 ) -> dict:
     totp_code = generate_totp(totp_secret) if totp_secret else None
     proxy = _proxy_without_unsupported_sticky(proxy)
@@ -6090,8 +6113,9 @@ def check_gmail(
             sign_out_sessions,
             robot_check_only,
             proxy_url=proxy_for_ip_check or proxy,
-            password_only=password_only or verify_totp,
+            password_only=password_only or verify_totp or captcha_only,
             verify_totp=verify_totp,
+            captcha_only=captcha_only,
         )
 
         # ── Post-login geo fallback (driver still open here!) ──────────────────
@@ -6099,7 +6123,7 @@ def check_gmail(
         # Chrome just proved the proxy works. Driver is still open so CDP re-injection
         # actually takes effect for this session (not after quit like before).
         # Use _retries=1: one round tries all 3 services — no need for more.
-        if not password_only and not verify_totp and not fp.get("ip") and (proxy_for_ip_check or proxy):
+        if not password_only and not verify_totp and not captcha_only and not fp.get("ip") and (proxy_for_ip_check or proxy):
             _fb_proxy = proxy_for_ip_check or proxy
             log("Post-login geo fallback: fingerprint has no IP, retrying geo lookup now…")
             _fallback_geo = geo_lookup_proxy(_fb_proxy, _label="post-login", _retries=1)
@@ -6143,6 +6167,7 @@ def check_gmail(
             and shots
             and not password_only
             and not verify_totp
+            and not captcha_only
         ):
             _login_result["stepScreenshots"] = list(shots)
         if isinstance(_login_result, dict):
@@ -6227,6 +6252,7 @@ def _do_login(
     proxy_url: str | None = None,
     password_only: bool = False,
     verify_totp: bool = False,
+    captcha_only: bool = False,
 ) -> dict:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
@@ -9224,6 +9250,51 @@ def _do_login(
             url, text = page_state()
             if "uplevelingstep" not in url:
                 break
+
+    if captcha_only:
+        log(f"{email} — captcha-only: looking for captcha or the password page")
+        deadline = time.time() + 8
+        kind = None
+        while time.time() < deadline:
+            url, text = page_state()
+            kind = captcha_only_kind(url, text, _password_field_visible(driver, 0.12))
+            if kind:
+                break
+            time.sleep(0.15)
+        if kind == "captcha":
+            try:
+                driver._saw_captcha = True
+            except Exception:
+                pass
+            verdict = {
+                "status": "captcha",
+                "reason": "Captcha",
+                "category": "unknown",
+                "robotOutcome": "captcha",
+            }
+        elif kind == "not_captcha":
+            verdict = {
+                "status": "not_captcha",
+                "reason": "Not captcha",
+                "category": "unknown",
+                "robotOutcome": "not_captcha",
+            }
+        elif kind == "blocked":
+            verdict = {
+                "status": "unknown",
+                "reason": "Google ne sign-in rok diya. Captcha ya password page nahi khula.",
+                "category": "unknown",
+            }
+        else:
+            verdict = {
+                "status": "unknown",
+                "reason": f"Captcha ya password page nahi mila ({(url or '')[:80]})",
+                "category": "unknown",
+            }
+        verdict["totpCode"] = totp_code
+        verdict["debugScreenshot"] = screenshot_b64()
+        log(f"{email} — captcha-only stop: {verdict['reason']}")
+        return verdict
 
     # Same step as a phone: Google shows "I'm not a robot" after the email,
     # one checkbox click, then the password page. An image puzzle is a

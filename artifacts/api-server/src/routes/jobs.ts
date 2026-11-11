@@ -96,6 +96,7 @@ router.post("/jobs", (req: Request, res: Response) => {
   const signOutSessions = req.body.signOutSessions === true;
   const passwordOnly = req.body.passwordOnly === true;
   const verifyTotp = req.body.verifyTotp === true;
+  const captchaOnly = req.body.captchaOnly === true;
   const deviceIndex =
     typeof req.body.deviceIndex === "number" &&
     Number.isInteger(req.body.deviceIndex) &&
@@ -111,11 +112,12 @@ router.post("/jobs", (req: Request, res: Response) => {
     concurrency,
     freshProfile,
     deviceIndex,
-    changePasswordAfterLogin: (passwordOnly || verifyTotp) ? false : changePasswordAfterLogin,
-    signOutSessions: (passwordOnly || verifyTotp) ? false : signOutSessions,
+    changePasswordAfterLogin: (passwordOnly || verifyTotp || captchaOnly) ? false : changePasswordAfterLogin,
+    signOutSessions: (passwordOnly || verifyTotp || captchaOnly) ? false : signOutSessions,
     robotCheckOnly,
-    passwordOnly,
-    verifyTotp,
+    passwordOnly: captchaOnly ? false : passwordOnly,
+    verifyTotp: captchaOnly ? false : verifyTotp,
+    captchaOnly,
   });
 
   res.json({ jobId });
