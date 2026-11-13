@@ -1220,6 +1220,9 @@ function BrowserChecker() {
                   <p className={cn("text-[10px] font-mono leading-relaxed", phoneStatus?.ready ? "text-green-300" : "text-amber-200/90")}>
                     {phoneStatus?.message || "Phone status padh rahe hain…"}
                   </p>
+                  <p className="text-[10px] font-mono text-muted-foreground/80 leading-relaxed">
+                    Switch “connect to Wi-Fi” bole to phone ko pehle kisi Wi-Fi se jodo. Ghar ka router nahi ho to doosra phone hotspot bana ke Realme ko usse connect karo, phir Wireless debugging on hoga.
+                  </p>
                   {!phoneStatus?.ready && (
                     <div className="grid grid-cols-2 gap-1.5">
                       <input value={pairHost} onChange={e => setPairHost(e.target.value)} placeholder="100.x phone IP"
