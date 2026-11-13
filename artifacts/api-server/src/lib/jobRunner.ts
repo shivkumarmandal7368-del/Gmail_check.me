@@ -49,6 +49,7 @@ export interface StartJobParams {
   passwordOnly?: boolean;
   verifyTotp?: boolean;
   captchaOnly?: boolean;
+  ownPhone?: boolean;
 }
 
 /**
@@ -146,6 +147,7 @@ export function resumeJob(jobId: string): boolean {
     passwordOnly: job.passwordOnly,
     verifyTotp: job.verifyTotp,
     captchaOnly: job.captchaOnly,
+    ownPhone: job.ownPhone,
   }, false);
   return true;
 }
@@ -157,7 +159,7 @@ async function runBackground(
   params: StartJobParams,
   signal: AbortSignal,
 ): Promise<void> {
-  const { credentials, proxy, proxies, concurrency, freshProfile, deviceIndex, changePasswordAfterLogin, signOutSessions, robotCheckOnly, passwordOnly, verifyTotp, captchaOnly } = params;
+  const { credentials, proxy, proxies, concurrency, freshProfile, deviceIndex, changePasswordAfterLogin, signOutSessions, robotCheckOnly, passwordOnly, verifyTotp, captchaOnly, ownPhone } = params;
 
   await browserLoginCheck(
     credentials,
@@ -194,6 +196,7 @@ async function runBackground(
     passwordOnly === true && captchaOnly !== true,
     verifyTotp === true && captchaOnly !== true,
     captchaOnly === true,
+    ownPhone === true,
     // Python's stderr is forwarded to the browser UI terminal without
     // persisting credentials or proxy passwords.
     (email, line) => {

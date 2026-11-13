@@ -84,7 +84,7 @@ router.post("/jobs", (req: Request, res: Response) => {
   ).trim();
   const savedProxy = (process.env.PROXY_URL ?? "").trim();
   const proxy = inlineProxy || (proxies.length > 0 ? undefined : savedProxy);
-  if (!proxy && proxies.length === 0) {
+  if (!proxy && proxies.length === 0 && !ownPhone) {
     res.status(400).json({
       error: "No proxy configured. Set PROXY_URL on the server or paste a custom proxy.",
     });
@@ -97,6 +97,7 @@ router.post("/jobs", (req: Request, res: Response) => {
   const passwordOnly = req.body.passwordOnly === true;
   const verifyTotp = req.body.verifyTotp === true;
   const captchaOnly = req.body.captchaOnly === true;
+  const ownPhone = req.body.ownPhone === true;
   const deviceIndex =
     typeof req.body.deviceIndex === "number" &&
     Number.isInteger(req.body.deviceIndex) &&
@@ -118,6 +119,7 @@ router.post("/jobs", (req: Request, res: Response) => {
     passwordOnly: captchaOnly ? false : passwordOnly,
     verifyTotp: captchaOnly ? false : verifyTotp,
     captchaOnly,
+    ownPhone,
   });
 
   res.json({ jobId });

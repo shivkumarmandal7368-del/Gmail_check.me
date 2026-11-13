@@ -71,6 +71,8 @@ export interface Job {
   verifyTotp?: boolean;
   /** After the email, report captcha vs not captcha. Password is not typed. */
   captchaOnly?: boolean;
+  /** Drive the owner's Android Chrome instead of the VPS browser. */
+  ownPhone?: boolean;
 
   /** Progress */
   total: number;
@@ -167,6 +169,7 @@ export function createJob(params: {
   passwordOnly?: boolean;
   verifyTotp?: boolean;
   captchaOnly?: boolean;
+  ownPhone?: boolean;
 }): Job {
   const id = randomBytes(8).toString("hex");
   const job: Job = {

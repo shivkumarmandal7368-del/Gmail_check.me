@@ -1197,6 +1197,8 @@ def _cdp_touch_xy(driver, x: float, y: float) -> None:
 
 def _widen_clipped_signin(driver, force: bool = False) -> None:
     """The Welcome card is wider than the phone view, so Next is drawn off-screen."""
+    if getattr(driver, "_own_phone", False):
+        return
     try:
         if force:
             driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
@@ -5312,6 +5314,7 @@ def main():
     password_only     = bool(data.get("passwordOnly", False))
     verify_totp       = bool(data.get("verifyTotp", False))
     captcha_only      = bool(data.get("captchaOnly", False))
+    own_phone         = bool(data.get("ownPhone", False))
     if password_only or verify_totp or captcha_only:
         change_password = False
         sign_out_sessions = False
@@ -5334,7 +5337,7 @@ def main():
         email, password, totp_secret, proxy, fresh_profile,
         proxy_for_ip_check, device_index, change_password,
         sign_out_sessions, robot_check_only, password_only,
-        verify_totp, captcha_only,
+        verify_totp, captcha_only, own_phone,
     )
 
     # Auto-retry up to 3 times if Google blocked automation detection.
@@ -5383,7 +5386,7 @@ def main():
             email, password, totp_secret, _retry_proxy, True,
             proxy_for_ip_check, device_index, change_password,
             sign_out_sessions, robot_check_only, password_only,
-            verify_totp, captcha_only,
+            verify_totp, captcha_only, own_phone,
         )
         _blocked_reason = result.get("reason", "")
 
@@ -5646,6 +5649,121 @@ def capture_step(driver, label: str) -> None:
     log(f"step shot: {label}")
 
 
+def _release_own_phone(driver, port: int) -> None:
+    """Close only the checker tab. Leave the rest of the phone's Chrome open."""
+    try:
+        handles = list(driver.window_handles)
+        if len(handles) > 1:
+            driver.close()
+    except Exception:
+        pass
+    try:
+        driver.service.stop()
+    except Exception:
+        pass
+    try:
+        from phone_chrome import release_forward
+        release_forward(port)
+    except Exception:
+        pass
+
+
+def _check_on_own_phone(
+    email: str,
+    password: str,
+    totp_secret: str | None,
+    fresh_profile: bool,
+    change_password_after_login: bool,
+    sign_out_sessions: bool,
+    robot_check_only: bool,
+    password_only: bool,
+    verify_totp: bool,
+    captcha_only: bool,
+) -> dict:
+    """Run the existing sign-in steps inside the owner's Android Chrome."""
+    totp_code = generate_totp(totp_secret) if totp_secret else None
+    try:
+        from phone_chrome import PhoneNotReady, forward_devtools
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "reason": f"Phone browser module nahi khula: {exc}",
+            "totpCode": totp_code,
+        }
+    port = 0
+    try:
+        port = forward_devtools()
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=8) as resp:
+            version = json.loads(resp.read().decode())
+        browser = str(version.get("Browser") or "")
+        major = None
+        import re as _re_phone
+        match = _re_phone.search(r"(\d+)\.", browser)
+        if match:
+            major = int(match.group(1))
+        log(f"{email} — own phone Chrome: {browser or 'unknown'} via 127.0.0.1:{port}")
+        _ensure_chromedriver_patched(version_main=major)
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        driver_path = os.path.expanduser(
+            "~/.local/share/undetected_chromedriver/undetected_chromedriver"
+        )
+        options = webdriver.ChromeOptions()
+        options.debugger_address = f"127.0.0.1:{port}"
+        options.page_load_strategy = "eager"
+        driver = webdriver.Chrome(service=Service(driver_path), options=options)
+        driver._own_phone = True
+        driver._saw_captcha = False
+        driver._step_shots = []
+        driver.capture_step = lambda label: None
+        try:
+            driver.switch_to.new_window("tab")
+        except Exception as exc:
+            log(f"{email} — own phone new tab: {exc}")
+        global _active_driver
+        _active_driver = driver
+    except PhoneNotReady as exc:
+        return {"status": "unknown", "reason": str(exc), "totpCode": totp_code}
+    except Exception as exc:
+        try:
+            from phone_chrome import release_forward
+            release_forward(port)
+        except Exception:
+            pass
+        return {
+            "status": "unknown",
+            "reason": f"Phone Chrome se connect nahi hua: {str(exc)[:220]}",
+            "totpCode": totp_code,
+        }
+
+    try:
+        result = _do_login(
+            driver, email, password, totp_code, totp_secret, fresh_profile,
+            change_password_after_login,
+            sign_out_sessions,
+            robot_check_only,
+            proxy_url=None,
+            password_only=password_only or verify_totp or captcha_only,
+            verify_totp=verify_totp,
+            captcha_only=captcha_only,
+        )
+    except Exception as exc:
+        result = {
+            "status": "unknown",
+            "reason": f"Phone browser error: {str(exc)[:220]}",
+            "totpCode": totp_code,
+        }
+    finally:
+        if isinstance(locals().get("result"), dict):
+            result["captcha"] = bool(getattr(driver, "_saw_captcha", False))
+        _release_own_phone(driver, port)
+        _active_driver = None
+    result.setdefault("totpCode", totp_code)
+    result["fingerprint"] = "Own phone Chrome"
+    return result
+
+
 def check_gmail(
     email: str,
     password: str,
@@ -5660,7 +5778,14 @@ def check_gmail(
     password_only: bool = False,
     verify_totp: bool = False,
     captcha_only: bool = False,
+    own_phone: bool = False,
 ) -> dict:
+    if own_phone:
+        return _check_on_own_phone(
+            email, password, totp_secret, fresh_profile,
+            change_password_after_login, sign_out_sessions, robot_check_only,
+            password_only, verify_totp, captcha_only,
+        )
     totp_code = generate_totp(totp_secret) if totp_secret else None
     proxy = _proxy_without_unsupported_sticky(proxy)
     proxy_for_ip_check = _proxy_without_unsupported_sticky(proxy_for_ip_check) or proxy

@@ -103,7 +103,7 @@ function BrowserChecker() {
   // ── localStorage keys ────────────────────────────────────────────────────
   const LS = {
     input: "vbc_input", proxy: "vbc_proxy", proxyMode: "vbc_proxy_mode", concurrency: "vbc_conc",
-    fresh: "vbc_fresh", changePw: "vbc_change_pw", deviceLogout: "vbc_device_logout", passwordOnly: "vbc_password_only", verifyTotp: "vbc_verify_totp", captchaOnly: "vbc_captcha_only", device: "vbc_device", results: "vbc_results", total: "vbc_total",
+    fresh: "vbc_fresh", changePw: "vbc_change_pw", deviceLogout: "vbc_device_logout", passwordOnly: "vbc_password_only", verifyTotp: "vbc_verify_totp", captchaOnly: "vbc_captcha_only", ownPhone: "vbc_own_phone", device: "vbc_device", results: "vbc_results", total: "vbc_total",
     active: "vbc_active", savedAt: "vbc_saved_at", jobId: "vbc_job_id",
     creds: "vbc_creds",
   } as const;
@@ -121,6 +121,13 @@ function BrowserChecker() {
   const [passwordOnly, setPasswordOnly] = useState<boolean>(() => lsGet(LS.passwordOnly, false));
   const [verifyTotp, setVerifyTotp] = useState<boolean>(() => lsGet(LS.verifyTotp, false));
   const [captchaOnly, setCaptchaOnly] = useState<boolean>(() => lsGet(LS.captchaOnly, false));
+  const [ownPhone, setOwnPhone] = useState<boolean>(() => lsGet(LS.ownPhone, false));
+  const [phoneStatus, setPhoneStatus] = useState<{ ready?: boolean; online?: boolean; name?: string; ip?: string; message?: string } | null>(null);
+  const [pairHost, setPairHost] = useState("");
+  const [pairPort, setPairPort] = useState("");
+  const [pairCode, setPairCode] = useState("");
+  const [connectPort, setConnectPort] = useState("");
+  const [pairError, setPairError] = useState("");
   const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
 
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
@@ -192,6 +199,23 @@ function BrowserChecker() {
   useEffect(() => { try { localStorage.setItem(LS.passwordOnly, JSON.stringify(passwordOnly)); } catch {} }, [passwordOnly]);
   useEffect(() => { try { localStorage.setItem(LS.verifyTotp, JSON.stringify(verifyTotp)); } catch {} }, [verifyTotp]);
   useEffect(() => { try { localStorage.setItem(LS.captchaOnly, JSON.stringify(captchaOnly)); } catch {} }, [captchaOnly]);
+  useEffect(() => { try { localStorage.setItem(LS.ownPhone, JSON.stringify(ownPhone)); } catch {} }, [ownPhone]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetch("/api/phone/status")
+        .then(r => r.json())
+        .then(data => {
+          if (cancelled) return;
+          setPhoneStatus(data);
+          setPairHost(current => current || (typeof data.ip === "string" ? data.ip : ""));
+        })
+        .catch(() => { if (!cancelled) setPhoneStatus({ ready: false, message: "Phone status nahi mila" }); });
+    };
+    load();
+    const timer = ownPhone ? setInterval(load, 15000) : null;
+    return () => { cancelled = true; if (timer) clearInterval(timer); };
+  }, [ownPhone]);
   useEffect(() => { if (captchaOnly) setActiveList("captcha"); }, [captchaOnly]);
   useEffect(() => { try { localStorage.setItem(LS.device,      JSON.stringify(deviceIndex));  } catch {} }, [deviceIndex]);
   useEffect(() => { try { localStorage.setItem(LS.active,      JSON.stringify(activeList));   } catch {} }, [activeList]);
@@ -549,6 +573,7 @@ function BrowserChecker() {
       ...(proxies.length > 1 ? { proxies } : proxies.length === 1 ? { proxy: proxies[0] } : {}),
       concurrency: 1, freshProfile, deviceIndex,
       ...(captchaOnly ? { captchaOnly: true } : {}),
+      ...(ownPhone ? { ownPhone: true } : {}),
       ...(!captchaOnly && passwordOnly ? { passwordOnly: true } : {}),
       ...(!captchaOnly && verifyTotp ? { verifyTotp: true } : {}),
       ...(!captchaOnly && !passwordOnly && !verifyTotp && changePasswordAfterLogin ? { changePasswordAfterLogin: true } : {}),
@@ -1171,6 +1196,66 @@ function BrowserChecker() {
                     : "Off: captcha sirf tab dikhega jab password check ke dauran page khule."}
                 </p>
               </button>
+            </div>
+
+            <div className={cn("rounded-lg border p-3 space-y-2", ownPhone ? "border-violet-500/40 bg-violet-500/5" : "border-border bg-card/30")}>
+              <button type="button" onClick={() => !isChecking && setOwnPhone(v => !v)} disabled={isChecking}
+                className="w-full text-left">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] font-mono uppercase tracking-widest text-violet-300/90 flex items-center gap-1">
+                    <Smartphone className="w-3 h-3" /> Mera phone
+                  </span>
+                  <div className={cn("w-8 h-4 rounded-full transition-colors relative", ownPhone ? "bg-violet-500" : "bg-border")}>
+                    <div className={cn("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all", ownPhone ? "left-4" : "left-0.5")} />
+                  </div>
+                </div>
+                <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
+                  {ownPhone
+                    ? "Check aapke phone ke Chrome mein chalega. VPS wala virtual browser nahi khulega, aur internet phone ka apna hoga."
+                    : "Off: check VPS ke browser se hota hai. Phone sirf proxy hai."}
+                </p>
+              </button>
+              {ownPhone && (
+                <div className="space-y-2">
+                  <p className={cn("text-[10px] font-mono leading-relaxed", phoneStatus?.ready ? "text-green-300" : "text-amber-200/90")}>
+                    {phoneStatus?.message || "Phone status padh rahe hain…"}
+                  </p>
+                  {!phoneStatus?.ready && (
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <input value={pairHost} onChange={e => setPairHost(e.target.value)} placeholder="100.x phone IP"
+                        className="col-span-2 bg-background/50 border border-border rounded px-2 py-1 text-[10px] font-mono" />
+                      <input value={pairPort} onChange={e => setPairPort(e.target.value)} placeholder="Pairing port"
+                        className="bg-background/50 border border-border rounded px-2 py-1 text-[10px] font-mono" />
+                      <input value={connectPort} onChange={e => setConnectPort(e.target.value)} placeholder="Connect port"
+                        className="bg-background/50 border border-border rounded px-2 py-1 text-[10px] font-mono" />
+                      <input value={pairCode} onChange={e => setPairCode(e.target.value)} placeholder="6 digit code"
+                        className="col-span-2 bg-background/50 border border-border rounded px-2 py-1 text-[10px] font-mono" />
+                      <button type="button" disabled={isChecking}
+                        onClick={async () => {
+                          setPairError("");
+                          const res = await fetch("/api/phone/pair", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              host: pairHost.trim(),
+                              pairPort: Number(pairPort),
+                              connectPort: Number(connectPort),
+                              code: pairCode.trim(),
+                            }),
+                          });
+                          const data = await res.json().catch(() => ({}));
+                          setPhoneStatus(data);
+                          if (!res.ok || data.ready === false) setPairError(data.message || "Pair fail");
+                          else setPairCode("");
+                        }}
+                        className="col-span-2 rounded border border-violet-500/40 px-2 py-1 text-[10px] font-mono text-violet-200">
+                        Phone pair karo
+                      </button>
+                      {pairError && <p className="col-span-2 text-[10px] font-mono text-red-300">{pairError}</p>}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <button onClick={() => !isChecking && setChangePasswordAfterLogin(v => !v)} disabled={isChecking || passwordOnly || verifyTotp || captchaOnly}
