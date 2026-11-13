@@ -123,11 +123,6 @@ function BrowserChecker() {
   const [captchaOnly, setCaptchaOnly] = useState<boolean>(() => lsGet(LS.captchaOnly, false));
   const [ownPhone, setOwnPhone] = useState<boolean>(() => lsGet(LS.ownPhone, false));
   const [phoneStatus, setPhoneStatus] = useState<{ ready?: boolean; online?: boolean; name?: string; ip?: string; message?: string } | null>(null);
-  const [pairHost, setPairHost] = useState("");
-  const [pairPort, setPairPort] = useState("");
-  const [pairCode, setPairCode] = useState("");
-  const [connectPort, setConnectPort] = useState("");
-  const [pairError, setPairError] = useState("");
   const [deviceIndex,  setDeviceIndex]  = useState<number>(() => lsGet(LS.device, 0));
 
   const [activeList,   setActiveList]   = useState<LoginList>(() => lsGet(LS.active, "opened"));
@@ -208,7 +203,6 @@ function BrowserChecker() {
         .then(data => {
           if (cancelled) return;
           setPhoneStatus(data);
-          setPairHost(current => current || (typeof data.ip === "string" ? data.ip : ""));
         })
         .catch(() => { if (!cancelled) setPhoneStatus({ ready: false, message: "Phone status nahi mila" }); });
     };
@@ -1211,8 +1205,8 @@ function BrowserChecker() {
                 </div>
                 <p className="text-[10px] font-mono text-muted-foreground/70 leading-relaxed">
                   {ownPhone
-                    ? "Check aapke phone ke Chrome mein chalega. VPS wala virtual browser nahi khulega, aur internet phone ka apna hoga."
-                    : "Off: check VPS ke browser se hota hai. Phone sirf proxy hai."}
+                    ? "Check is phone par chalega, VPS browser nahi. Wi-Fi nahi chahiye. Termux khula rakho."
+                    : "Off: check VPS ke browser se hota hai."}
                 </p>
               </button>
               {ownPhone && (
@@ -1224,37 +1218,18 @@ function BrowserChecker() {
                     Ek hi phone ho aur Wi-Fi na ho to yeh switch on nahi hoga. Mera phone band karke check chalao. Browser VPS par rahega, internet Realme ka hi use hoga.
                   </p>
                   {!phoneStatus?.ready && (
-                    <div className="grid grid-cols-2 gap-1.5">
-                      <input value={pairHost} onChange={e => setPairHost(e.target.value)} placeholder="100.x phone IP"
-                        className="col-span-2 bg-background/50 border border-border rounded px-2 py-1 text-[10px] font-mono" />
-                      <input value={pairPort} onChange={e => setPairPort(e.target.value)} placeholder="Pairing port"
-                        className="bg-background/50 border border-border rounded px-2 py-1 text-[10px] font-mono" />
-                      <input value={connectPort} onChange={e => setConnectPort(e.target.value)} placeholder="Connect port"
-                        className="bg-background/50 border border-border rounded px-2 py-1 text-[10px] font-mono" />
-                      <input value={pairCode} onChange={e => setPairCode(e.target.value)} placeholder="6 digit code"
-                        className="col-span-2 bg-background/50 border border-border rounded px-2 py-1 text-[10px] font-mono" />
-                      <button type="button" disabled={isChecking}
-                        onClick={async () => {
-                          setPairError("");
-                          const res = await fetch("/api/phone/pair", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              host: pairHost.trim(),
-                              pairPort: Number(pairPort),
-                              connectPort: Number(connectPort),
-                              code: pairCode.trim(),
-                            }),
-                          });
-                          const data = await res.json().catch(() => ({}));
-                          setPhoneStatus(data);
-                          if (!res.ok || data.ready === false) setPairError(data.message || "Pair fail");
-                          else setPairCode("");
-                        }}
-                        className="col-span-2 rounded border border-violet-500/40 px-2 py-1 text-[10px] font-mono text-violet-200">
-                        Phone pair karo
+                    <div className="space-y-1.5">
+                      <p className="text-[10px] font-mono text-muted-foreground/80 leading-relaxed">
+                        1. Play Store se Termux install karo. Wireless debugging ki zaroorat nahi.
+                      </p>
+                      <p className="text-[10px] font-mono text-muted-foreground/80 leading-relaxed">
+                        2. Termux kholo, yeh command paste karo, READY ka wait karo. Termux band mat karna.
+                      </p>
+                      <button type="button"
+                        onClick={() => navigator.clipboard.writeText("curl -fsSL http://147.90.10.113:8890/api/phone/start.sh | bash")}
+                        className="w-full rounded border border-violet-500/40 bg-background/40 px-2 py-1 text-left text-[10px] font-mono text-violet-100 break-all">
+                        curl -fsSL http://147.90.10.113:8890/api/phone/start.sh | bash
                       </button>
-                      {pairError && <p className="col-span-2 text-[10px] font-mono text-red-300">{pairError}</p>}
                     </div>
                   )}
                 </div>

@@ -5649,21 +5649,10 @@ def capture_step(driver, label: str) -> None:
     log(f"step shot: {label}")
 
 
-def _release_own_phone(driver, port: int) -> None:
-    """Close only the checker tab. Leave the rest of the phone's Chrome open."""
-    try:
-        handles = list(driver.window_handles)
-        if len(handles) > 1:
-            driver.close()
-    except Exception:
-        pass
+def _release_own_phone(driver) -> None:
+    """Disconnect the VPS driver. Leave the phone browser running for the next account."""
     try:
         driver.service.stop()
-    except Exception:
-        pass
-    try:
-        from phone_chrome import release_forward
-        release_forward(port)
     except Exception:
         pass
 
@@ -5683,18 +5672,18 @@ def _check_on_own_phone(
     """Run the existing sign-in steps inside the owner's Android Chrome."""
     totp_code = generate_totp(totp_secret) if totp_secret else None
     try:
-        from phone_chrome import PhoneNotReady, forward_devtools
+        from phone_chrome import PhoneNotReady, devtools_address
     except Exception as exc:
         return {
             "status": "unknown",
             "reason": f"Phone browser module nahi khula: {exc}",
             "totpCode": totp_code,
         }
-    port = 0
+    debugger = ""
     try:
-        port = forward_devtools()
+        debugger = devtools_address()
         import urllib.request
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=8) as resp:
+        with urllib.request.urlopen(f"http://{debugger}/json/version", timeout=8) as resp:
             version = json.loads(resp.read().decode())
         browser = str(version.get("Browser") or "")
         major = None
@@ -5702,7 +5691,7 @@ def _check_on_own_phone(
         match = _re_phone.search(r"(\d+)\.", browser)
         if match:
             major = int(match.group(1))
-        log(f"{email} — own phone Chrome: {browser or 'unknown'} via 127.0.0.1:{port}")
+        log(f"{email} — own phone browser: {browser or 'unknown'} via {debugger}")
         _ensure_chromedriver_patched(version_main=major)
         from selenium import webdriver
         from selenium.webdriver.chrome.service import Service
@@ -5710,7 +5699,7 @@ def _check_on_own_phone(
             "~/.local/share/undetected_chromedriver/undetected_chromedriver"
         )
         options = webdriver.ChromeOptions()
-        options.debugger_address = f"127.0.0.1:{port}"
+        options.debugger_address = debugger
         options.page_load_strategy = "eager"
         driver = webdriver.Chrome(service=Service(driver_path), options=options)
         driver._own_phone = True
@@ -5726,11 +5715,6 @@ def _check_on_own_phone(
     except PhoneNotReady as exc:
         return {"status": "unknown", "reason": str(exc), "totpCode": totp_code}
     except Exception as exc:
-        try:
-            from phone_chrome import release_forward
-            release_forward(port)
-        except Exception:
-            pass
         return {
             "status": "unknown",
             "reason": f"Phone Chrome se connect nahi hua: {str(exc)[:220]}",
@@ -5757,7 +5741,7 @@ def _check_on_own_phone(
     finally:
         if isinstance(locals().get("result"), dict):
             result["captcha"] = bool(getattr(driver, "_saw_captcha", False))
-        _release_own_phone(driver, port)
+        _release_own_phone(driver)
         _active_driver = None
     result.setdefault("totpCode", totp_code)
     result["fingerprint"] = "Own phone Chrome"

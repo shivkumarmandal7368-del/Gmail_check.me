@@ -7,6 +7,7 @@
 
 import { Router, type IRouter, type Request, type Response } from "express";
 import { spawn } from "child_process";
+import { readFileSync } from "fs";
 import { join } from "path";
 
 const router: IRouter = Router();
@@ -44,6 +45,12 @@ function runPhone(args: string[], res: Response) {
 
 router.get("/phone/status", (_req, res) => {
   runPhone(["status"], res);
+});
+
+router.get("/phone/start.sh", (_req, res) => {
+  const script = readFileSync(join(__dirname, "..", "phone-browser.sh"));
+  res.setHeader("Content-Type", "text/x-shellscript; charset=utf-8");
+  res.send(script);
 });
 
 router.post("/phone/pair", (req: Request, res: Response) => {

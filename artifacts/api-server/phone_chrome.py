@@ -97,54 +97,58 @@ def tailscale_phone() -> dict:
     return chosen
 
 
+def devtools_address() -> str:
+    """host:port of the browser running on the phone. No adb and no Wi-Fi."""
+    phone = tailscale_phone()
+    if phone.get("online") is not True or not phone.get("ip"):
+        raise PhoneNotReady(
+            f"{phone.get('name') or 'Phone'} Tailscale par offline hai. "
+            "Phone par Tailscale app khol ke Connected karo."
+        )
+    return f"{phone['ip']}:9222"
+
+
+def browser_on_phone() -> dict | None:
+    import urllib.request
+    try:
+        address = devtools_address()
+    except PhoneNotReady:
+        return None
+    try:
+        with urllib.request.urlopen(f"http://{address}/json/version", timeout=4) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    data["address"] = address
+    return data
+
+
 def phone_status() -> dict:
     phone = tailscale_phone()
-    saved = load_state()
-    adb_state = "missing"
-    try:
-        adb = _adb()
-        listed = _run([adb, "devices"], timeout=8)
-        text = listed.stdout or ""
-        if "\tdevice" in text:
-            adb_state = "device"
-        elif "\tunauthorized" in text:
-            adb_state = "unauthorized"
-        elif "\toffline" in text:
-            adb_state = "offline"
-        else:
-            adb_state = "none"
-    except PhoneNotReady as exc:
-        return {
-            "ready": False,
-            "online": phone.get("online") is True,
-            "name": phone.get("name") or "",
-            "ip": phone.get("ip") or "",
-            "adb": "missing",
-            "paired": bool(saved.get("port")),
-            "message": str(exc),
-        }
-    ready = phone.get("online") is True and adb_state == "device"
+    browser = browser_on_phone()
+    ready = browser is not None
     if not phone.get("online"):
         message = (
             f"{phone.get('name') or 'Phone'} Tailscale par offline hai. "
             "Phone par Tailscale app khol ke Connected karo."
         )
-    elif adb_state != "device":
+    elif not ready:
         message = (
-            "Ek hi phone aur sirf mobile data par Realme Wireless debugging on nahi karta. "
-            "Mera phone off rakho. Check VPS browser se hoga, internet aapke Realme ka hi rahega."
+            "Phone online hai. Wi-Fi ki zaroorat nahi. "
+            "Play Store se Termux lagao, usme neeche wali command paste karo, READY aane do."
         )
     else:
-        message = f"{phone.get('name') or 'Phone'} ka Chrome ready hai."
+        message = f"Phone ka browser ready hai ({browser.get('Browser') or 'Chrome'}). Termux band mat karna."
     return {
         "ready": ready,
         "online": phone.get("online") is True,
         "name": phone.get("name") or "",
-        "ip": phone.get("ip") or saved.get("host") or "",
-        "adb": adb_state,
-        "paired": bool(saved.get("port")),
-        "connect": f"{saved.get('host')}:{saved.get('port')}" if saved.get("port") else "",
+        "ip": phone.get("ip") or "",
+        "browser": (browser or {}).get("Browser") or "",
         "message": message,
+        "command": "curl -fsSL http://147.90.10.113:8890/api/phone/start.sh | bash",
     }
 
 
