@@ -1221,7 +1221,7 @@ function BrowserChecker() {
                     {phoneStatus?.message || "Phone status padh rahe hain…"}
                   </p>
                   <p className="text-[10px] font-mono text-muted-foreground/80 leading-relaxed">
-                    Switch “connect to Wi-Fi” bole to phone ko pehle kisi Wi-Fi se jodo. Ghar ka router nahi ho to doosra phone hotspot bana ke Realme ko usse connect karo, phir Wireless debugging on hoga.
+                    Ek hi phone ho aur Wi-Fi na ho to yeh switch on nahi hoga. Mera phone band karke check chalao. Browser VPS par rahega, internet Realme ka hi use hoga.
                   </p>
                   {!phoneStatus?.ready && (
                     <div className="grid grid-cols-2 gap-1.5">

@@ -131,9 +131,8 @@ def phone_status() -> dict:
         )
     elif adb_state != "device":
         message = (
-            "Phone online hai. Realme par Wireless debugging tabhi on hota hai jab phone kisi Wi-Fi se juda ho. "
-            "Mobile data ya Tailscale kaafi nahi. Kisi Wi-Fi ya doosre phone ke hotspot se jodo, "
-            "switch on karo, phir pairing code aur port yahan daalo."
+            "Ek hi phone aur sirf mobile data par Realme Wireless debugging on nahi karta. "
+            "Mera phone off rakho. Check VPS browser se hoga, internet aapke Realme ka hi rahega."
         )
     else:
         message = f"{phone.get('name') or 'Phone'} ka Chrome ready hai."
