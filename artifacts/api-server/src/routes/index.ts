@@ -7,6 +7,7 @@ import buildInfoRouter from "./buildInfo";
 import deviceCheckRouter from "./deviceCheck";
 import manualBrowserRouter from "./manualBrowser";
 import gmailPayRouter from "./gmailPay";
+import phoneRouter from "./phone";
 
 const router: IRouter = Router();
 
@@ -18,5 +19,6 @@ router.use(buildInfoRouter);
 router.use(deviceCheckRouter);
 router.use(manualBrowserRouter);
 router.use(gmailPayRouter);
+router.use(phoneRouter);
 
 export default router;
