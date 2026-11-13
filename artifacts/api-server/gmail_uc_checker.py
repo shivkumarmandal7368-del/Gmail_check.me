@@ -5672,16 +5672,17 @@ def _check_on_own_phone(
     """Run the existing sign-in steps inside the owner's Android Chrome."""
     totp_code = generate_totp(totp_secret) if totp_secret else None
     try:
-        from phone_chrome import PhoneNotReady, devtools_address
+        from phone_chrome import PhoneNotReady, forward_devtools, release_forward
     except Exception as exc:
         return {
             "status": "unknown",
             "reason": f"Phone browser module nahi khula: {exc}",
             "totpCode": totp_code,
         }
-    debugger = ""
+    port = 0
     try:
-        debugger = devtools_address()
+        port = forward_devtools()
+        debugger = f"127.0.0.1:{port}"
         import urllib.request
         with urllib.request.urlopen(f"http://{debugger}/json/version", timeout=8) as resp:
             version = json.loads(resp.read().decode())
@@ -5691,7 +5692,7 @@ def _check_on_own_phone(
         match = _re_phone.search(r"(\d+)\.", browser)
         if match:
             major = int(match.group(1))
-        log(f"{email} — own phone browser: {browser or 'unknown'} via {debugger}")
+        log(f"{email} — own phone Chrome via wireless debugging {debugger}")
         _ensure_chromedriver_patched(version_main=major)
         from selenium import webdriver
         from selenium.webdriver.chrome.service import Service
@@ -5715,6 +5716,10 @@ def _check_on_own_phone(
     except PhoneNotReady as exc:
         return {"status": "unknown", "reason": str(exc), "totpCode": totp_code}
     except Exception as exc:
+        try:
+            release_forward(port)
+        except Exception:
+            pass
         return {
             "status": "unknown",
             "reason": f"Phone Chrome se connect nahi hua: {str(exc)[:220]}",
@@ -5742,6 +5747,10 @@ def _check_on_own_phone(
         if isinstance(locals().get("result"), dict):
             result["captcha"] = bool(getattr(driver, "_saw_captcha", False))
         _release_own_phone(driver)
+        try:
+            release_forward(port)
+        except Exception:
+            pass
         _active_driver = None
     result.setdefault("totpCode", totp_code)
     result["fingerprint"] = "Own phone Chrome"

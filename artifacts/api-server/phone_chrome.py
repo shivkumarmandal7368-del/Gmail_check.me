@@ -127,28 +127,44 @@ def browser_on_phone() -> dict | None:
 
 def phone_status() -> dict:
     phone = tailscale_phone()
-    browser = browser_on_phone()
-    ready = browser is not None
+    saved = load_state()
+    adb_state = "none"
+    try:
+        adb = _adb()
+        if saved.get("host") and saved.get("port"):
+            _run([adb, "connect", f"{saved['host']}:{saved['port']}"], timeout=12)
+        listed = _run([adb, "devices"], timeout=8)
+        text = listed.stdout or ""
+        if "\tdevice" in text:
+            adb_state = "device"
+        elif "\tunauthorized" in text:
+            adb_state = "unauthorized"
+    except PhoneNotReady:
+        adb_state = "missing"
+    ready = phone.get("online") is True and adb_state == "device"
     if not phone.get("online"):
         message = (
             f"{phone.get('name') or 'Phone'} Tailscale par offline hai. "
             "Phone par Tailscale app khol ke Connected karo."
         )
+    elif adb_state == "unauthorized":
+        message = "Phone par Allow debugging dabao."
     elif not ready:
         message = (
-            "Phone online hai. Wi-Fi ki zaroorat nahi. "
-            "Play Store se Termux lagao, usme neeche wali command paste karo, READY aane do."
+            "Doosre phone ka hotspot on karo aur Realme ko us Wi-Fi se jodo. "
+            "Tailscale Connected rakho. Phir Developer options → Wireless debugging on karo "
+            "aur pairing code yahan daalo. IP 100 se shuru wala hi rakho."
         )
     else:
-        message = f"Phone ka browser ready hai ({browser.get('Browser') or 'Chrome'}). Termux band mat karna."
+        message = f"{phone.get('name') or 'Phone'} ka Chrome ready hai. Check isi phone ke Chrome mein chalega."
     return {
         "ready": ready,
         "online": phone.get("online") is True,
         "name": phone.get("name") or "",
-        "ip": phone.get("ip") or "",
-        "browser": (browser or {}).get("Browser") or "",
+        "ip": phone.get("ip") or saved.get("host") or "",
+        "adb": adb_state,
+        "paired": bool(saved.get("port")),
         "message": message,
-        "command": "curl -fsSL http://147.90.10.113:8890/api/phone/start.sh | bash",
     }
 
 
